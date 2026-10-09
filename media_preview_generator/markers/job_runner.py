@@ -25,7 +25,7 @@ from ..processing.retry_queue import retry_policy, scaled_backoff_delay
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..utils import redact_secrets, redacted_traceback
-from ..web.job_gate import format_wait_message, get_job_gate
+from ..web.job_gate import format_wait_message, get_job_gate, release_slot
 from ..web.jobs import (
     PAUSED_BY_SCHEDULE,
     JobStatus,
@@ -1162,57 +1162,25 @@ def _settle_decide_again(jm, job_id: str, cfg: dict) -> None:
         logger.warning("Couldn't record that the legacy decide-again job finished: {}", exc)
 
 
-def wait_releasing_slot_while_paused(
+def wait_for_tracker(
     tracker,
     *,
-    job_id: str,
-    slot: dict,
-    live_priority: Callable[[], int],
     cancel_check: Callable[[], bool],
-    on_wait: Callable[[int, int, int], None],
     park_check: Callable[[], None] | None = None,
 ) -> None:
-    """Wait for the tracker; while this job is paused on its own, give its gate slot back.
-
-    A paused job does no work, so holding its slot would block every other job — at max_concurrent_jobs=1 a
-    paused backfill would stop all webhook preview jobs. The tracker's pause_check also reads ``slot["held"]``,
-    so no item is dispatched between resume and re-admission.
-    """
-    jm = get_job_manager()
-    gate = get_job_gate()
+    """Wait for the tracker, giving the job a chance to park on each tick."""
     while not tracker.wait(timeout=_POLL_S):
         if cancel_check():
             continue
         if park_check is not None:
             park_check()
-        paused = jm.is_pause_requested(job_id)
-        if paused and slot["held"]:
-            gate.release(slot["priority"], **({"kind": slot["kind"]} if slot.get("kind") else {}))
-            slot["held"] = False
-            jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
-        elif not paused and not slot["held"]:
-            priority = live_priority()
-            slot["priority"] = priority
-            # In-flight items can finish the job while its slot is handed back; don't queue a finished job.
-            if gate.acquire(
-                priority=priority,
-                cancel_check=lambda: cancel_check() or jm.is_pause_requested(job_id) or tracker.done_event.is_set(),
-                on_wait=on_wait,
-                **admission_options(
-                    jm,
-                    job_id,
-                    slot.get("kind"),
-                    on_admitted=lambda admitted: slot.__setitem__("priority", admitted),
-                ),
-            ):
-                slot["held"] = True
 
 
 def job_freeze_check(jm, job_id: str) -> Callable[[], bool]:
     """The job's ``PipelineContext.freeze_check``: True while its running files' ffmpeg must stop where it is, as
     previews' does -- all processing paused (Pause all, quiet hours) or this job paused by its schedule's stop time
-    (``PAUSED_BY_SCHEDULE``). A pause of this job by hand is not one: it gives the job's slot back and lets the running
-    file finish (:func:`wait_releasing_slot_while_paused`).
+    (``PAUSED_BY_SCHEDULE``). A pause of this job by hand is not one: it lets the running file finish and only stops new
+    files being picked.
     """
 
     def frozen() -> bool:
@@ -1240,49 +1208,27 @@ def _start_decode_checks(ctx: PipelineContext, config, selected_gpus: Sequence[t
         logger.warning("Couldn't start the credits decoding check: {}", exc)
 
 
-def _cancel_check_releasing_slot_while_paused(
-    *,
-    job_id: str,
-    slot: dict,
-    live_priority: Callable[[], int],
-    cancel_check: Callable[[], bool],
-    on_wait: Callable[[int, int, int], None],
+def _cancel_check_waiting_out_pause(
+    *, job_id: str, cancel_check: Callable[[], bool], on_pause: Callable[[], None]
 ) -> Callable[[], bool]:
     """A cancel check for work done on the job's own thread (Check servers' read-back): it doesn't return while the
-    job or all processing is paused, and gives the job's gate slot back while this job is paused on its own, taking a
-    slot again on resume (``wait_releasing_slot_while_paused``).
+    job or all processing is paused.
+
+    Args:
+        job_id: The job doing the work.
+        cancel_check: True once the job is cancelled.
+        on_pause: Called before waiting out a pause, so the wait doesn't hold a start-up slot.
 
     Returns:
         The check: True once the job is cancelled.
     """
     jm = get_job_manager()
-    gate = get_job_gate()
 
     def check() -> bool:
         while not cancel_check():
-            paused = jm.is_pause_requested(job_id)
-            if paused and slot["held"]:
-                gate.release(slot["priority"], **({"kind": slot["kind"]} if slot.get("kind") else {}))
-                slot["held"] = False
-                jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
-            elif not paused and not slot["held"]:
-                priority = live_priority()
-                slot["priority"] = priority
-                if gate.acquire(
-                    priority=priority,
-                    cancel_check=lambda: cancel_check() or jm.is_pause_requested(job_id),
-                    on_wait=on_wait,
-                    **admission_options(
-                        jm,
-                        job_id,
-                        slot.get("kind"),
-                        on_admitted=lambda admitted: slot.__setitem__("priority", admitted),
-                    ),
-                ):
-                    slot["held"] = True
-                continue
-            elif not paused and not get_settings_manager().processing_paused:
+            if not jm.is_pause_requested(job_id) and not get_settings_manager().processing_paused:
                 return False
+            on_pause()
             time.sleep(_POLL_S)
         return True
 
@@ -1366,9 +1312,8 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
         filter=lambda record: not record["extra"].get(JOB_LOG_SKIP) and is_job_thread_for(record["thread"].id, job_id),
         enqueue=True,
     )
-    # "priority" is the value the slot was admitted at: the user can re-prioritise the job, and release() must
-    # settle at the admitted value.
-    slot = {"held": False, "priority": job.priority, "kind": JOB_KIND_INTRO_CREDITS}
+    # Held from the gate until the files are submitted to the dispatcher (or the job ends first).
+    slot = {"held": False}
     cfg = dict(job.config or {})
     dispatcher = None
     # Set once the job completes: the fingerprint cache sweep starts after the slot is given back, with the servers'
@@ -1390,11 +1335,8 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
         # ``job`` is the job manager's own object, which the priority route updates in place.
         return job.priority
 
-    def on_wait(active: int, cap: int, effective_cap: int) -> None:
-        jm.update_progress(
-            job_id,
-            current_item=format_wait_message(active, cap, effective_cap),
-        )
+    def on_wait(active: int) -> None:
+        jm.update_progress(job_id, current_item=format_wait_message(active))
         jm.note_slot_wait(job_id)  # JobManager.requeue_interrupted_jobs ages a waiting job by the downtime only
 
     try:
@@ -1426,18 +1368,12 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     ):
                         jm.cancel_job(job_id)
                         return
-                    slot["priority"] = live_priority()
                     jm.note_slot_wait(job_id)
                     if not get_job_gate().acquire(
-                        priority=slot["priority"],
+                        priority=live_priority(),
                         cancel_check=cancel_check,
                         on_wait=on_wait,
-                        **admission_options(
-                            jm,
-                            job_id,
-                            JOB_KIND_INTRO_CREDITS,
-                            on_admitted=lambda priority: slot.__setitem__("priority", priority),
-                        ),
+                        **admission_options(jm, job_id, JOB_KIND_INTRO_CREDITS),
                     ):
                         jm.cancel_job(job_id)
                         return
@@ -1448,8 +1384,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                         and not get_settings_manager().processing_paused
                     ):
                         break
-                    get_job_gate().release(slot["priority"], kind=JOB_KIND_INTRO_CREDITS)
-                    slot["held"] = False
+                    release_slot(slot, get_job_gate())
                 # The job's own start line (start_line) follows once its files are listed.
                 with logger.contextualize(**{JOB_LOG_SKIP: True}):
                     if cfg.get("parked_checkpoint") or job.config.get("resource_wait"):
@@ -1538,12 +1473,10 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                             store=ctx.store,
                             max_files=MAX_RETRY_FILES,
                             capability=lambda server_cfg, publisher: cached_capability(ctx, server_cfg, publisher),
-                            cancel_check=_cancel_check_releasing_slot_while_paused(
+                            cancel_check=_cancel_check_waiting_out_pause(
                                 job_id=job_id,
-                                slot=slot,
-                                live_priority=live_priority,
                                 cancel_check=cancel_check,
-                                on_wait=on_wait,
+                                on_pause=lambda: release_slot(slot, get_job_gate()),
                             ),
                             progress_callback=progress_callback,
                         )
@@ -1705,9 +1638,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                         "worker_callback": worker_callback,
                         "cancel_check": cancel_check,
                         "pause_check": lambda: (
-                            not slot["held"]
-                            or jm.is_pause_requested(job_id)
-                            or get_settings_manager().processing_paused
+                            jm.is_pause_requested(job_id) or get_settings_manager().processing_paused
                         ),
                     },
                     priority=live_priority(),
@@ -1715,6 +1646,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     handlers=kind_handlers(ctx),
                     **({"carried_state": checkpoint["state"]} if checkpoint else {"carried_outcome": carried}),
                 )
+                release_slot(slot, get_job_gate())
                 # The priority route skips the dispatcher while this job has no tracker yet; a change that landed
                 # between reading the priority and registering the tracker would otherwise be lost.
                 current = live_priority()
@@ -1740,17 +1672,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                         },
                     )
 
-                wait_releasing_slot_while_paused(
-                    tracker,
-                    job_id=job_id,
-                    slot=slot,
-                    live_priority=live_priority,
-                    cancel_check=cancel_check,
-                    on_wait=lambda active, cap, eff: jm.update_progress(
-                        job_id, current_item=format_wait_message(active, cap, eff)
-                    ),
-                    park_check=park_check,
-                )
+                wait_for_tracker(tracker, cancel_check=cancel_check, park_check=park_check)
                 result = tracker.get_result()
                 _log_missing(ctx)
                 outcome = dict(result["outcome"])  # includes the carried counts
@@ -1811,14 +1733,10 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
         except Exception as complete_exc:
             logger.warning("Could not mark Intro & Credits job {} failed: {}", job_id, complete_exc)
     finally:
-        # Same teardown as the preview runner (web/routes/job_runner.py run_job finally): slot first so the next
-        # waiter admits quickly, then per-job flags, then worker cards once nothing else is running.
-        if slot["held"]:
-            try:
-                get_job_gate().release(slot["priority"], kind=JOB_KIND_INTRO_CREDITS)
-            except Exception as exc:
-                logger.debug("Could not release job gate for {}: {}", job_id, exc)
-            slot["held"] = False
+        # Same teardown as the preview runner (web/routes/job_runner.py run_job finally): slot first (a job that
+        # ended before submitting its files still holds one), then per-job flags, then worker cards once nothing
+        # else is running.
+        release_slot(slot, get_job_gate())
         set_file_result_callback(None, job_id=job_id)
         jm.clear_pause_flag(job_id)
         jm.clear_cancellation_flag(job_id)

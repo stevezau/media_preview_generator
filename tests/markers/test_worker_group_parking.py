@@ -46,7 +46,7 @@ def test_forced_marker_job_parks_then_keeps_counts_and_followup_obligations(tmp_
     )
     monkeypatch.setattr(job_runner, "runtime_capacity", group_runtime.runtime_capacity)
     manager = JobManager(str(tmp_path))
-    gate = JobGate(lambda: 1)
+    gate = JobGate()
     dispatcher = JobDispatcher(WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[]))
     dispatcher.worker_pool.reconcile_groups(groups, [])
     registry = FakeRegistry({"jf": server_config("jf", ServerType.JELLYFIN, root=str(tmp_path))})

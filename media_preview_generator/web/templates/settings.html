@@ -75,28 +75,6 @@
 
                 <div class="setting-row">
                     <div class="sr-label">
-                        <label for="maxConcurrentJobs" class="sr-title">Max concurrent jobs
-                            <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
-                                    data-bs-toggle="tooltip" data-bs-placement="top"
-                                    title="How many jobs can run at the same time."
-                                    data-explain-title="Max concurrent jobs"
-                                    data-explain-template="infoMaxConcurrentJobsTpl"
-                                    aria-label="Explain max concurrent jobs">
-                                <i class="bi bi-info-circle"></i>
-                            </button>
-                        </label>
-                        <div class="sr-hint">Keep at 3 for most setups.</div>
-                    </div>
-                    <div class="sr-control">
-                        <div class="range-ctl">
-                            <input type="range" class="form-range" id="maxConcurrentJobs" min="1" max="10" step="1" value="3">
-                            <output class="range-value" for="maxConcurrentJobs"><span id="maxConcurrentJobsValue">3</span></output>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="setting-row">
-                    <div class="sr-label">
                         <label for="incomingJobPriority" class="sr-title">Incoming job priority
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Priority for jobs started when new media lands: webhooks and Recently Added sweeps." data-explain-title="Incoming job priority" data-explain-template="infoIncomingPriorityTpl"><i class="bi bi-info-circle"></i></button>
                         </label>
@@ -110,42 +88,6 @@
                         </select>
                     </div>
                 </div>
-
-                <!-- Rich explanation for the concurrency ⓘ modal. -->
-                <template id="infoMaxConcurrentJobsTpl">
-                    <p>Keep this at 3 for most setups. Lower values (1–2) reduce API pressure on media servers when
-                    many webhook jobs arrive at once. Higher values (5–10) let more scans run in parallel — useful
-                    only if your servers + disks can handle it. While the cap is above 1, one slot is held back for
-                    High-priority jobs so newly imported media never waits behind a long scan.</p>
-
-                    <p><strong>What counts as a "job":</strong> any top-level work
-                    unit this app runs — a webhook-triggered processing run, a
-                    scheduled scan, a manual "Process selection" click, a catchup
-                    enumeration. Each one goes through the same pipeline: config
-                    load → library enumeration → per-file dispatch.</p>
-
-                    <p><strong>What the cap controls:</strong> how many jobs can be
-                    in the <em>active</em> phase at the same time. Jobs beyond the
-                    cap go into the Pending queue and promote to Active one-by-one
-                    as slots free up. The cap is priority-aware: High-priority jobs
-                    jump to the front of the Pending queue, and whenever the cap is
-                    above 1 the last slot is <em>reserved</em> for them — at the
-                    default of 3, two Normal jobs run alongside one High slot kept
-                    free for incoming webhook work. A High job never interrupts an
-                    already-running job; it takes the reserved slot instead.</p>
-
-                    <p><strong>What the cap does NOT control:</strong></p>
-                    <ul>
-                        <li><strong>FFmpeg workers within a job</strong> — worker
-                            counts are set per group in Worker groups. A single
-                            job can still use all your GPU workers; the cap limits
-                            concurrent <em>jobs</em>, not concurrent FFmpegs.</li>
-                        <li><strong>Webhook reception</strong> — incoming webhooks
-                            are debounced and batched regardless of this setting.
-                            Even at cap=1 webhooks still arrive; they just wait
-                            longer to become Active.</li>
-                    </ul>
-                </template>
 
                 <h3 class="settings-subheading"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>Retry policy
                     <button type="button" class="info-icon ms-1" tabindex="0"
@@ -1161,9 +1103,6 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('tonemapAlgorithm').addEventListener('change', updateTonemapDescription);
 
     // Job Execution live-value bindings (moved from Automation → Triggers).
-    document.getElementById('maxConcurrentJobs').addEventListener('input', function() {
-        document.getElementById('maxConcurrentJobsValue').textContent = this.value;
-    });
     document.getElementById('webhookRetryDelay').addEventListener('input', function() {
         document.getElementById('retryDelayValue').textContent = this.value;
     });
@@ -1265,14 +1204,10 @@ async function loadSettings() {
         document.getElementById('frameReuseTtlMinutes').value = fr.ttl_minutes ?? 60;
         document.getElementById('frameReuseMaxDiskMb').value = fr.max_cache_disk_mb ?? 2048;
 
-        // Job Execution — global retry / concurrency / restart-recovery
+        // Job Execution — global retry / restart-recovery
         // controls. Keys retain the original `webhook_*` names from when
         // these lived in the webhook settings panel; the semantics are now
         // global (all job types fall back to these defaults).
-        const maxConcurrent = Math.min(10, Math.max(1, parseInt(settings.max_concurrent_jobs, 10) || 3));
-        document.getElementById('maxConcurrentJobs').value = maxConcurrent;
-        document.getElementById('maxConcurrentJobsValue').textContent = String(maxConcurrent);
-
         const incomingPriority = [1, 2, 3].includes(parseInt(settings.incoming_job_priority, 10))
             ? parseInt(settings.incoming_job_priority, 10)
             : 1;
@@ -1637,10 +1572,6 @@ async function saveAllSettings() {
             ttl_minutes: parseInt(document.getElementById('frameReuseTtlMinutes').value, 10) || 60,
             max_cache_disk_mb: parseInt(document.getElementById('frameReuseMaxDiskMb').value, 10) || 2048,
         },
-        max_concurrent_jobs: Math.min(
-            10,
-            Math.max(1, parseInt(document.getElementById('maxConcurrentJobs').value, 10) || 3),
-        ),
         incoming_job_priority: parseInt(document.getElementById('incomingJobPriority').value, 10) || 1,
         webhook_retry_count: Math.min(
             10,

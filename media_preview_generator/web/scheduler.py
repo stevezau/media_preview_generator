@@ -602,9 +602,9 @@ def execute_scheduled_job(
             # APScheduler worker thread. Pre-fix, this code called
             # _run_recently_added_multi_server directly here — that did
             # real publish work without acquiring the JobGate, so it
-            # could push concurrent activity above max_concurrent_jobs,
+            # could start up alongside any number of other enumerations,
             # and it never appeared as a Job in the UI. The new helper
-            # creates a Job row, waits for a gate slot, then runs the
+            # creates a Job row, waits for a start-up slot, then runs the
             # same scan.
             from .routes.job_runner import _start_recently_added_job_async
 

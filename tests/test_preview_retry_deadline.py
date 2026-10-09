@@ -10,7 +10,7 @@ import pytest
 from media_preview_generator.web.jobs import get_job_manager
 from media_preview_generator.web.routes import job_runner
 
-from .journeys.test_journey_max_concurrent_gate import _reset_singletons, app  # noqa: F401
+from .journeys.test_journey_startup_gate import _reset_singletons, app  # noqa: F401
 
 NOW = datetime(2026, 10, 6, 1, 0, tzinfo=UTC)
 

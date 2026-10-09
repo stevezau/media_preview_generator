@@ -72,7 +72,6 @@ def app(tmp_path, monkeypatch):
                 "setup_complete": True,
                 "webhook_enabled": True,
                 "webhook_delay": 60,
-                "max_concurrent_jobs": 10,
                 "media_servers": [plex, _server("jf-1", "jellyfin"), _server("emby-1", "emby")],
             }
         )

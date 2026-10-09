@@ -517,7 +517,7 @@ def check_servers_listing(
         max_files: Most files in the run.
         capability: The job's cached capability check.
         cancel_check: True once the job is cancelled; asked between items, it is also where the job waits out a
-            pause (``job_runner._cancel_check_releasing_slot_while_paused``).
+            pause (``job_runner._cancel_check_waiting_out_pause``).
         progress_callback: ``(current, total, message)`` for the job banner.
 
     Returns:

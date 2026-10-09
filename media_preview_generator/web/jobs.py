@@ -27,6 +27,7 @@ from loguru import logger
 
 from ..job_kinds import JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS, parse_job_kind
 from ..utils import redact_secrets
+from .job_gate import format_wait_message
 
 # Message shown in UI when a job's log file was removed by retention policy.
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
@@ -1792,8 +1793,6 @@ class JobManager:
         originating_job_id: str,
         publishers: list[dict] | None = None,
         wait_active: int | None = None,
-        wait_cap: int | None = None,
-        wait_effective_cap: int | None = None,
         successes: int = 0,
     ) -> Job | None:
         """Mutate the originating dispatch Job to ADD or UPDATE retry-chain state.
@@ -1820,12 +1819,10 @@ class JobManager:
           * ``"scheduled"``       → status=PENDING, retry_eta + retry_wait_total set,
                                     completed_at cleared, error cleared
           * ``"queued_for_slot"`` → status=PENDING, current_item shows
-                                    "Queued — waiting for active slot (X of Y busy)";
+                                    "Queued — waiting to start (X of 3 jobs starting up)";
                                     fired by JobGate's on_wait callback while a retry
-                                    callback is blocked waiting for max_concurrent_jobs.
-                                    Requires ``wait_active`` + ``wait_cap`` kwargs
-                                    (plus ``wait_effective_cap`` to name the
-                                    high-priority reservation).
+                                    callback is blocked waiting for a start-up slot.
+                                    Takes the ``wait_active`` kwarg.
           * ``"running"``         → status=RUNNING, retry_eta cleared (countdown stops)
           * ``"completed"``       → status=COMPLETED, completed_at set, ``error`` cleared (or set to
                                     ``reason``, a warning about files no retry covered; then
@@ -1972,32 +1969,21 @@ class JobManager:
                 job.completed_at = None
                 job.error = None
                 # Clear the worker's last-firing status text so a stale
-                # "Queued — waiting for active slot" or per-file progress
+                # "Queued — waiting to start" or per-file progress
                 # line from a prior firing doesn't linger on the row
                 # while it's actually counting down to the next retry.
                 # The Queue/countdown surface (retry_eta + retry_wait_total
                 # above) owns the visual state for PENDING chain rows.
                 job.progress.current_item = ""
             elif outcome == "queued_for_slot":
-                # Retry callback fired (backoff is over) but waiting for
-                # a JobGate slot. Renders through the same
-                # ``job_gate.format_wait_message`` the two dispatch call
-                # sites use, so the dashboard never shows two phrasings
-                # for one state (and the "Queued — waiting" regex matches).
-                # Imported lazily: job_gate imports this module for the
-                # PRIORITY_* constants, so a module-level import here
-                # would close the cycle.
-                from .job_gate import format_wait_message
-
+                # Retry callback fired (backoff is over) but waiting for a JobGate
+                # slot. Renders through the same ``job_gate.format_wait_message``
+                # the dispatch call sites use, so the dashboard never shows two
+                # phrasings for one state.
                 job.status = JobStatus.PENDING
                 job.progress.retry_eta = None
                 job.progress.retry_wait_total = None
-                active = wait_active if wait_active is not None else 0
-                cap = wait_cap if wait_cap is not None else 0
-                # Callers that don't know the waiter's priority get the
-                # plain message rather than a wrong reservation claim.
-                effective_cap = wait_effective_cap if wait_effective_cap is not None else cap
-                job.progress.current_item = format_wait_message(active, cap, effective_cap)
+                job.progress.current_item = format_wait_message(wait_active if wait_active is not None else 0)
                 job.error = None
             elif outcome == "running":
                 job.status = JobStatus.RUNNING

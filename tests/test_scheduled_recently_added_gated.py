@@ -62,7 +62,6 @@ def app(tmp_path, monkeypatch):
         json.dumps(
             {
                 "setup_complete": True,
-                "max_concurrent_jobs": 10,
                 "webhook_retry_count": 3,
                 "webhook_retry_delay": 30,
                 "media_servers": [
@@ -144,19 +143,12 @@ class TestStartRecentlyAddedJobAsync:
             assert callable(kwargs[name]), name
         assert callable(kwargs["worker_pool_callback"])  # pool reconcile, which the old runner never did
 
-    def test_acquires_gate_before_running_scan_and_releases_at_the_admitted_priority(self, app):
+    def test_acquires_gate_before_running_scan_and_releases_when_the_run_ends(self, app):
         call_log: list[str] = []
         acquired_at: list[int] = []
-        released_at: list[int] = []
         gate = MagicMock()
         gate.acquire.side_effect = lambda **kw: acquired_at.append(kw["priority"]) or call_log.append("acquire") or True
-
-        def release(priority, *, kind):
-            assert kind == "previews"
-            released_at.append(priority)
-            call_log.append("release")
-
-        gate.release.side_effect = release
+        gate.release.side_effect = lambda: call_log.append("release")
 
         with (
             patch(SCAN, side_effect=lambda *a, **k: call_log.append("scan") or {}),
@@ -164,8 +156,9 @@ class TestStartRecentlyAddedJobAsync:
         ):
             _start()
 
+        # The patched scan never submits files, so the slot is still held at the end and the run gives it back.
         assert call_log == ["acquire", "scan", "release"]
-        assert acquired_at == released_at == [1]  # High: the default incoming_job_priority
+        assert acquired_at == [1]  # High: the default incoming_job_priority
 
     @pytest.mark.parametrize(("passed_priority", "expected"), [(1, 1), (2, 2), (3, 3)])
     def test_priority_forwarded_to_created_job(self, app, passed_priority, expected):

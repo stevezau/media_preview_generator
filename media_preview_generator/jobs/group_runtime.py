@@ -71,14 +71,14 @@ def runtime_capacity(kind: str, *, now: datetime | None = None) -> dict:
 
 
 def admission_capacity(kind: str) -> int | None:
-    """Bound same-priority admitted jobs by configured open compatible workers."""
+    """Open compatible workers for the kind: none means its jobs wait at the start-up gate."""
     if current_groups() is None:
         return None
     return runtime_capacity(kind)["open"]
 
 
 def mark_admission_wait(manager, job_id: str, kind: str) -> None:
-    """Explain worker-capacity admission separately from the global job limit."""
+    """Explain worker-capacity admission separately from the start-up slot limit."""
     label = {"loudness": "loudness", "intro_credits": "Intro & Credits", "previews": "preview"}.get(kind, kind)
     message = f"Queued — waiting for {label} worker capacity"
     manager.update_progress(job_id, current_item=message)
@@ -89,8 +89,8 @@ def mark_admission_wait(manager, job_id: str, kind: str) -> None:
         manager.update_progress(parent_id, current_item=message)
 
 
-def admission_options(manager, job_id: str, kind: str | None, *, on_admitted=None) -> dict:
-    """Carry a runner's kind and visible resource wait through pause re-admission."""
+def admission_options(manager, job_id: str, kind: str | None) -> dict:
+    """Carry a runner's kind and visible resource wait into the start-up gate."""
     if kind is None:
         return {}
     options = {"kind": kind, "on_resource_wait": lambda: mark_admission_wait(manager, job_id, kind)}
@@ -100,7 +100,6 @@ def admission_options(manager, job_id: str, kind: str | None, *, on_admitted=Non
     if gate.has_request(job_id):
         gate.complete_preflight(job_id)
         options["request_id"] = job_id
-        options["on_admitted"] = on_admitted
     return options
 
 
@@ -137,7 +136,7 @@ def wake_group_runtime() -> None:
 
 
 def capacity_wait_message(capacity: dict) -> str:
-    """Explain resource waiting separately from the global admission gate."""
+    """Explain resource waiting separately from the start-up gate."""
     reason = capacity.get("reason")
     if reason == "hardware":
         return "Waiting for configured hardware — check the worker group's device"

@@ -2965,7 +2965,7 @@ class TestMigrateToV16:
             updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
         assert settings_manager.get("markers") == self.BLOCK
         assert settings_manager.get("_pending_migration_notice")["notes"] == [
             _USER_FACING_NOTES[16],
@@ -3004,7 +3004,7 @@ class TestMigrateToV17:
 
         settings_manager.apply_changes(updates={"_schema_version": start})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[21]]
 
@@ -3037,7 +3037,7 @@ class TestMigrateToV18:
 
         settings_manager.apply_changes(updates={"_schema_version": 17})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[21]]
         settings_manager.delete(DECIDE_AGAIN_KEY)
@@ -3094,7 +3094,7 @@ class TestMigrateToV20:
 
         settings_manager.apply_changes(updates={"_schema_version": 19, "media_servers": [self.PLEX_WITH_MARKERS_ON]})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
         assert settings_manager.get(DECIDE_AGAIN_KEY) is True
         assert settings_manager.get("_pending_migration_notice")["notes"] == [
             _USER_FACING_NOTES[20],
@@ -3220,7 +3220,7 @@ class TestMigrateToV19:
             }
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
         assert settings_manager.processing_auto_paused is False
         assert settings_manager.processing_pause_reasons == ["manual"]
 
@@ -3228,6 +3228,38 @@ class TestMigrateToV19:
         settings_manager.processing_paused = True
         _migrate_schema(settings_manager)
         assert settings_manager.get(_AUTO_PAUSED_KEY) is None
+
+
+class TestMigrateToV23:
+    """v23 drops ``max_concurrent_jobs``: workers decide how much runs at once."""
+
+    def test_it_deletes_the_setting_and_says_so_in_plain_words(self, settings_manager):
+        from media_preview_generator.upgrade import _migrate_to_v23
+
+        settings_manager.apply_changes(updates={"max_concurrent_jobs": 5, "cpu_threads": 2})
+
+        notes = _migrate_to_v23(settings_manager)
+
+        assert settings_manager.get("max_concurrent_jobs") is None
+        assert settings_manager.get("cpu_threads") == 2
+        assert notes and notes[0].startswith("v23:")
+        assert "Max concurrent jobs" in _USER_FACING_NOTES[23]
+
+    def test_it_changes_nothing_when_the_setting_is_already_gone(self, settings_manager):
+        from media_preview_generator.upgrade import _migrate_to_v23
+
+        assert _migrate_to_v23(settings_manager) == []
+
+    def test_the_schema_step_runs_once_and_tells_the_user(self, settings_manager):
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 22, "max_concurrent_jobs": 3})
+
+        _migrate_schema(settings_manager)
+
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
+        assert settings_manager.get("max_concurrent_jobs") is None
+        assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[23]]
 
 
 class TestUpgradedAutoPauseResumes:

@@ -201,7 +201,7 @@ def test_full_chain_from_v21_gives_the_v22_note_and_revision_bump(tmp_path):
     settings = _store_v21(tmp_path)
     settings.set("_schema_version", 21)
     _migrate_schema(settings)
-    assert settings.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 22
+    assert settings.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
     assert settings.worker_groups_revision == 7
     assert settings.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[22]]
     assert settings.worker_groups[0]["members"][0]["id"] == "m1"

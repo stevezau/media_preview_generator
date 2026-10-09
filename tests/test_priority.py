@@ -266,124 +266,75 @@ class TestDispatcherPriority:
     def test_empty_queue_returns_none(self):
         dispatcher = self._make_dispatcher()
         assert dispatcher._get_next_check_item() is None
-        assert dispatcher._get_next_item() is None
 
-
-class TestJobGateReservation:
-    """Issue #285 — the gate holds one slot back for high-priority work.
-
-    A full-library regeneration runs for hours, so "first in the waiting
-    line" buys an incoming webhook nothing once every slot is held by a
-    scan. These tests drive :class:`JobGate` directly (no threads, no
-    jobs) so the admission arithmetic is pinned independently of the
-    slower end-to-end journey tests.
-    """
-
-    @staticmethod
-    def _gate(cap):
-        from media_preview_generator.web.job_gate import JobGate
-
-        return JobGate(lambda: cap)
-
-    @staticmethod
-    def _admit(gate, priority):
-        """acquire() that never blocks — cancel immediately if not admitted."""
-        return gate.acquire(priority, cancel_check=lambda: True)
-
-    @pytest.mark.parametrize(
-        ("cap", "priority", "expected"),
-        [
-            # cap=1 is the escape hatch: reserving there would starve
-            # normal work completely, so the reservation is skipped.
-            (1, PRIORITY_HIGH, 1),
-            (1, PRIORITY_NORMAL, 1),
-            (1, PRIORITY_LOW, 1),
-            (2, PRIORITY_HIGH, 2),
-            (2, PRIORITY_NORMAL, 1),
-            (2, PRIORITY_LOW, 1),
-            (3, PRIORITY_HIGH, 3),
-            (3, PRIORITY_NORMAL, 2),
-            (3, PRIORITY_LOW, 2),
-            (10, PRIORITY_HIGH, 10),
-            (10, PRIORITY_NORMAL, 9),
-            (10, PRIORITY_LOW, 9),
-        ],
-    )
-    def test_effective_cap_matrix(self, cap, priority, expected):
-        """Every (cap, priority) cell — high sees the whole cap, everyone
-        else sees one fewer, floored at 1."""
-        assert self._gate(cap).effective_cap(priority) == expected
-
-    def test_normal_jobs_stop_one_short_of_the_cap(self):
-        gate = self._gate(3)
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is False, "third normal job must hit the reservation"
-
-    def test_high_priority_takes_the_reserved_slot(self):
-        gate = self._gate(3)
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_HIGH) is True, "the held-back slot exists for exactly this"
-
-    def test_reservation_never_pushes_past_the_cap(self):
-        """The reservation redistributes slots; it must not add one.
-
-        Exempting high priority from the cap instead would reinstate the
-        webhook-burst stampede the gate was built to stop.
-        """
-        gate = self._gate(2)
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_HIGH) is True
-        assert self._admit(gate, PRIORITY_HIGH) is False, "cap=2 means 2 in flight, high priority included"
-
-    def test_cap_of_one_still_admits_normal_work(self):
-        gate = self._gate(1)
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_HIGH) is False
-
-    def test_release_settles_against_the_priority_it_admitted(self):
-        """A finished high job must free the HIGH slot, not a normal one.
-
-        Decrementing only the total would leave the gate believing a
-        surviving normal job was the high one, so the next normal waiter
-        would slide into the reserved slot — the reservation silently
-        evaporating after the session's first webhook.
-        """
-        gate = self._gate(3)
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_HIGH) is True
-
-        gate.release(PRIORITY_HIGH)
-
-        assert self._admit(gate, PRIORITY_NORMAL) is False, (
-            "two normal jobs are still active — that is the whole normal budget at cap=3"
+    def test_check_pick_rotates_between_same_priority_jobs(self):
+        """A later one-file job is checked 2nd, not after every file of an earlier big job."""
+        dispatcher = self._make_dispatcher()
+        big = self._add_tracker(
+            dispatcher, "big-scan", [(f"k{i}", f"Item {i}", "movie") for i in range(5)], PRIORITY_NORMAL
         )
-        assert self._admit(gate, PRIORITY_HIGH) is True, "the freed slot is the reserved one"
+        self._add_tracker(dispatcher, "webhook", [("w1", "Webhook item", "movie")], PRIORITY_NORMAL)
 
-    def test_a_running_high_job_does_not_shrink_the_normal_budget(self):
-        """High-priority slots are counted separately.
+        order = []
+        while (picked := dispatcher._get_next_check_item()) is not None:
+            order.append(picked[0].job_id)
 
-        If the gate compared total-active against ``cap - 1``, one running
-        webhook job would cost a scan its slot: at cap=3 the legal steady
-        state is one high plus two normal.
-        """
-        gate = self._gate(3)
-        assert self._admit(gate, PRIORITY_HIGH) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is False
+        assert order == ["big-scan", "webhook", "big-scan", "big-scan", "big-scan", "big-scan"]
+        assert big.last_picked > 0
 
-    def test_release_does_not_underflow_below_zero(self):
-        gate = self._gate(3)
-        gate.release(PRIORITY_HIGH)
-        gate.release(PRIORITY_NORMAL)
-        assert gate.snapshot()[0] == 0
-        # A spurious release must not hand out a bonus slot.
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is True
-        assert self._admit(gate, PRIORITY_NORMAL) is False
+    def test_check_pick_still_lets_higher_priority_win_outright(self):
+        dispatcher = self._make_dispatcher()
+        self._add_tracker(dispatcher, "big-scan", [(f"k{i}", f"Item {i}", "movie") for i in range(3)], PRIORITY_NORMAL)
+        self._add_tracker(dispatcher, "urgent", [(f"u{i}", f"Urgent {i}", "movie") for i in range(2)], PRIORITY_HIGH)
+
+        order = []
+        while (picked := dispatcher._get_next_check_item()) is not None:
+            order.append(picked[0].job_id)
+
+        assert order == ["urgent", "urgent", "big-scan", "big-scan", "big-scan"]
+
+    def _assign_with_one_worker(self, dispatcher, picks):
+        """Run ``_assign_tasks`` against a pool that has one free worker for ``picks`` assignments."""
+        worker = MagicMock()
+        remaining = [picks]
+
+        def find_available_worker(claim, kind):
+            if remaining[0] == 0:
+                return None
+            remaining[0] -= 1
+            return worker
+
+        dispatcher.worker_pool._workers_lock = threading.RLock()
+        dispatcher.worker_pool._find_available_worker.side_effect = find_available_worker
+        dispatcher._assign_tasks()
+        return [call.kwargs["job_id"] for call in worker.assign_task.call_args_list]
+
+    def test_worker_pick_rotates_between_same_priority_jobs(self):
+        """With one worker, a later one-file job gets the 2nd file handed out, not the 6th."""
+        dispatcher = self._make_dispatcher()
+        big = self._add_tracker(dispatcher, "big-scan", [], PRIORITY_NORMAL)
+        big.item_queue.extend(MagicMock() for _ in range(5))
+        webhook = self._add_tracker(dispatcher, "webhook", [], PRIORITY_NORMAL)
+        webhook.item_queue.append(MagicMock())
+
+        assert self._assign_with_one_worker(dispatcher, picks=3) == ["big-scan", "webhook", "big-scan"]
+
+    def test_worker_pick_still_lets_higher_priority_win_outright(self):
+        dispatcher = self._make_dispatcher()
+        big = self._add_tracker(dispatcher, "big-scan", [], PRIORITY_NORMAL)
+        big.item_queue.extend(MagicMock() for _ in range(3))
+        urgent = self._add_tracker(dispatcher, "urgent", [], PRIORITY_HIGH)
+        urgent.item_queue.extend([MagicMock(), MagicMock()])
+
+        assert self._assign_with_one_worker(dispatcher, picks=3) == ["urgent", "urgent", "big-scan"]
+
+    def test_progress_says_waiting_for_a_free_worker_until_the_first_file_is_picked(self):
+        dispatcher = self._make_dispatcher()
+        tracker = self._add_tracker(dispatcher, "job", [("k1", "Item", "movie")], PRIORITY_NORMAL)
+
+        assert tracker.progress_message() == "Waiting for a free worker"
+        dispatcher._get_next_check_item()
+        assert tracker.progress_message() == "Checking existing previews… 0/1"
 
 
 class TestJobGateOnWait:
@@ -391,10 +342,8 @@ class TestJobGateOnWait:
     lock released: every other acquire and release would otherwise queue behind that I/O."""
 
     @staticmethod
-    def _gate(cap, poll_s):
-        from media_preview_generator.web.job_gate import JobGate
-
-        gate = JobGate(lambda: cap)
+    def _gate(make_gate, slots, poll_s):
+        gate = make_gate(slots)
         gate._POLL_SECONDS = poll_s
         return gate
 
@@ -415,12 +364,12 @@ class TestJobGateOnWait:
         prober.join(timeout=5)
         return took == [True]
 
-    def test_on_wait_runs_with_the_gate_lock_released(self):
-        gate = self._gate(1, poll_s=0.05)
+    def test_on_wait_runs_with_the_gate_lock_released(self, make_gate):
+        gate = self._gate(make_gate, 1, poll_s=0.05)
         assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
         free_during_on_wait: list[bool] = []
 
-        def on_wait(active, cap, effective_cap):
+        def on_wait(active):
             free_during_on_wait.append(self._another_thread_can_take(gate._cond))
 
         admitted = gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: bool(free_during_on_wait), on_wait=on_wait)
@@ -429,30 +378,30 @@ class TestJobGateOnWait:
         assert free_during_on_wait == [True]
         assert gate.snapshot() == (1, 0, 1), "the cancelled waiter left the heap and took no slot"
 
-    def test_a_slot_freed_while_on_wait_runs_is_taken_without_waiting_out_the_poll(self):
-        gate = self._gate(1, poll_s=5.0)
+    def test_a_slot_freed_while_on_wait_runs_is_taken_without_waiting_out_the_poll(self, make_gate):
+        gate = self._gate(make_gate, 1, poll_s=5.0)
         assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
-        calls: list[tuple] = []
+        calls: list[int] = []
 
-        def on_wait(active, cap, effective_cap):
-            calls.append((active, cap, effective_cap))
-            gate.release(PRIORITY_NORMAL)  # the running job ends while the queued state is being written
+        def on_wait(active):
+            calls.append(active)
+            gate.release()  # the running job ends while the queued state is being written
 
         started = time.monotonic()
         admitted = gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False, on_wait=on_wait)
 
         assert admitted is True
         assert time.monotonic() - started < 2.0, "the freed slot's notify came before the wait; look again first"
-        assert calls == [(1, 1, 1)]
+        assert calls == [1]
         assert gate.snapshot() == (1, 0, 1)
 
-    def test_waiters_are_admitted_in_priority_then_submission_order(self):
-        gate = self._gate(1, poll_s=0.05)
+    def test_waiters_are_admitted_in_priority_then_submission_order(self, make_gate):
+        gate = self._gate(make_gate, 1, poll_s=0.05)
         assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
         admitted: list[str] = []
         lock = threading.Lock()
 
-        def on_wait(active, cap, effective_cap):
+        def on_wait(active):
             time.sleep(0.01)  # widen the window in which the gate lock is down
 
         def wait_for_slot(name, priority):
@@ -470,16 +419,16 @@ class TestJobGateOnWait:
         _wait_until(lambda: gate.snapshot()[1] == 4)
 
         # Each release settles the slot of the job admitted before it: the first holder, then each waiter in turn.
-        for count, finished in enumerate([PRIORITY_NORMAL, PRIORITY_HIGH, PRIORITY_NORMAL, PRIORITY_NORMAL], start=1):
-            gate.release(finished)
+        for count in range(1, 5):
+            gate.release()
             _wait_until(lambda n=count: len(admitted) == n)
         for thread in threads:
             thread.join(timeout=5)
 
         assert admitted == ["high", "normal-1", "normal-2", "low"]
 
-    def test_a_cancelled_waiter_leaves_and_the_next_one_takes_the_slot(self):
-        gate = self._gate(1, poll_s=0.05)
+    def test_a_cancelled_waiter_leaves_and_the_next_one_takes_the_slot(self, make_gate):
+        gate = self._gate(make_gate, 1, poll_s=0.05)
         assert gate.acquire(PRIORITY_NORMAL, cancel_check=lambda: False) is True
         cancel_first = threading.Event()
         results: dict[str, bool] = {}
@@ -496,7 +445,7 @@ class TestJobGateOnWait:
 
         cancel_first.set()
         first.join(timeout=5)
-        gate.release(PRIORITY_NORMAL)
+        gate.release()
         second.join(timeout=5)
 
         assert results == {"first": False, "second": True}
@@ -511,33 +460,12 @@ def _wait_until(condition, timeout_s: float = 5.0) -> None:
 
 
 class TestFormatWaitMessage:
-    """The queued-job status line has to explain a non-obvious wait."""
+    """The queued-job status line says how many start-up places are taken."""
 
-    def test_plain_message_for_a_high_priority_waiter_at_a_full_gate(self):
+    def test_message_names_the_start_up_slots(self):
         from media_preview_generator.web.job_gate import format_wait_message
 
-        assert format_wait_message(3, 3, 3) == "Queued — waiting for active slot (3 of 3 busy)"
-
-    def test_plain_message_for_a_normal_waiter_at_a_genuinely_full_gate(self):
-        """A normal waiter always has ``effective_cap < cap``, but once the
-        gate is actually full the reservation is not what's blocking it.
-
-        Keying the clause on priority alone would tell a user staring at a
-        saturated queue to go looking at the reservation, when the fix is
-        to raise the cap or wait.
-        """
-        from media_preview_generator.web.job_gate import format_wait_message
-
-        assert format_wait_message(3, 3, 2) == "Queued — waiting for active slot (3 of 3 busy)"
-
-    def test_message_names_the_reservation_when_that_is_the_blocker(self):
-        """Without this clause the dashboard reads "2 of 3 busy" next to a
-        job that refuses to start, which looks like a bug in the gate."""
-        from media_preview_generator.web.job_gate import format_wait_message
-
-        assert format_wait_message(2, 3, 2) == (
-            "Queued — waiting for active slot (2 of 3 busy, 1 reserved for high priority)"
-        )
+        assert format_wait_message(3) == "Queued — waiting to start (3 of 3 jobs starting up)"
 
 
 class TestIncomingJobPriority:

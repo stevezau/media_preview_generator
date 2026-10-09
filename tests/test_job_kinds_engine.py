@@ -939,11 +939,14 @@ def test_the_periodic_banner_says_what_each_completion_says(handlers, checking):
     with dispatcher._trackers_lock:
         dispatcher._trackers["banner"] = tracker
     with patch("media_preview_generator.web.jobs.get_job_manager"):
+        tracker.emit_progress(0, force=True)
+        tracker.work_started = True  # a check was picked
+        tracker._last_progress_update = 0.0
         tracker.record_completion(True, "Lookup", "a")
         tracker._last_progress_update = 0.0
         dispatcher._emit_progress_updates()
         tracker.generation_started = True  # an item reached a worker
         tracker._last_progress_update = 0.0
         dispatcher._emit_progress_updates()
-    assert messages == [checking, checking, "1/3 completed"]
+    assert messages == ["Waiting for a free worker", checking, checking, "1/3 completed"]
     dispatcher.shutdown()

@@ -389,7 +389,7 @@ class TestRun:
         env.jm.start_job.assert_called_once_with("j1")
         env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_published": 1})
         env.jm.complete_job.assert_called_once_with("j1", warning="Couldn't list X")
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
 
     def test_the_detector_checks_run_before_the_job_takes_a_gate_slot(self, env, monkeypatch):
         # The first job of a process pays for them (ffmpeg listing its muxers, up to 30 s of the text detection
@@ -411,7 +411,7 @@ class TestRun:
 
         def acquire(*, on_wait, **kwargs):
             order.append("gate")
-            on_wait(4, 4, 3)
+            on_wait(3)
             return True
 
         env.gate.acquire.side_effect = acquire
@@ -621,7 +621,7 @@ class TestRun:
         with patch.object(job_runner, "start_fingerprint_sweep", side_effect=RuntimeError("can't start new thread")):
             self._run()
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
 
     def test_a_sweep_blocked_on_the_file_system_holds_neither_the_job_nor_its_slot(self, env, tmp_path, monkeypatch):
         from media_preview_generator.markers.audio import fingerprint as fpmod
@@ -648,7 +648,7 @@ class TestRun:
             return real_stat(path, *args, **kwargs)
 
         sweeping_at_release = []
-        env.gate.release.side_effect = lambda priority, *, kind: sweeping_at_release.append(fpmod._SWEEP_LOCK.locked())
+        env.gate.release.side_effect = lambda: sweeping_at_release.append(fpmod._SWEEP_LOCK.locked())
         try:
             with (
                 patch.object(fpmod.os, "stat", side_effect=stat),
@@ -744,7 +744,7 @@ class TestRun:
         env.job.priority = 1
         self._run()
         assert env.gate.acquire.call_args.kwargs["priority"] == 1
-        env.gate.release.assert_called_once_with(1, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
         assert env.dispatcher.submit_items.call_args.kwargs["priority"] == 1
 
     def test_pause_check_honours_slot_job_and_global_pause(self, env):
@@ -931,10 +931,12 @@ class TestRun:
         completed_at = next(i for i, c in enumerate(env.jm.method_calls) if c[0] == "complete_job")
         assert stored_at < completed_at
 
-    def test_paused_job_hands_back_its_slot_so_a_high_preview_job_is_admitted(self, env, monkeypatch):
+    def test_the_slot_is_given_back_once_the_files_are_submitted_and_a_pause_never_touches_the_gate(
+        self, env, monkeypatch
+    ):
         from media_preview_generator.web.job_gate import JobGate
 
-        gate = JobGate(lambda: 1)
+        gate = JobGate()
         monkeypatch.setattr(job_runner, "get_job_gate", lambda: gate)
         state = {"paused": False}
         env.jm.is_pause_requested.side_effect = lambda jid: state["paused"]
@@ -942,90 +944,20 @@ class TestRun:
 
         def during_wait(timeout=None):
             pause_check = env.dispatcher.submit_items.call_args.kwargs["callbacks"]["pause_check"]
-            step = len(steps)
-            steps.append(step)
-            if step == 0:
-                assert gate.snapshot()[0] == 1 and pause_check() is False
+            steps.append(len(steps))
+            assert gate.snapshot()[0] == 0, "start-up is over: no slot is held while the files run"
+            if len(steps) == 1:
                 state["paused"] = True
+                assert pause_check() is True
                 return False
-            if step == 1:
-                # Slot handed back: a HIGH preview job gets in at cap 1, and nothing of ours is dispatched.
-                assert gate.snapshot()[0] == 0 and pause_check() is True
-                assert gate.acquire(1, cancel_check=lambda: True) is True
-                gate.release(1)
-                state["paused"] = False
-                return False
-            # Resumed: slot re-acquired before dispatch continues.
-            assert gate.snapshot()[0] == 1 and pause_check() is False
+            state["paused"] = False
+            assert pause_check() is False
             return True
 
         env.tracker.wait.side_effect = during_wait
         self._run()
-        assert steps == [0, 1, 2]
+        assert steps == [0, 1]
         assert gate.snapshot()[0] == 0
-        env.jm.complete_job.assert_called_once_with("j1", warning=None)
-
-    def test_slot_is_retaken_at_the_priority_in_force_on_resume_and_released_at_it(self, env):
-        state = {"paused": False}
-        env.jm.is_pause_requested.side_effect = lambda jid: state["paused"]
-        calls = []
-        seen_while_readmitting = []
-
-        def during_wait(timeout=None):
-            calls.append(len(calls))
-            if len(calls) == 1:
-                state["paused"] = True
-                return False
-            if len(calls) == 2:
-                return False  # still paused on the next tick: the slot was already handed back
-            if len(calls) == 3:
-                env.job.priority = 1
-                state["paused"] = False
-                return False
-            return True
-
-        def acquire(priority, cancel_check, on_wait=None, *, kind, on_resource_wait):
-            assert kind == "intro_credits"
-            assert callable(on_resource_wait)
-            pause_check = env.dispatcher.submit_items.call_args
-            if pause_check is not None:
-                # Resumed but not yet re-admitted: nothing of this job may be dispatched.
-                seen_while_readmitting.append(pause_check.kwargs["callbacks"]["pause_check"]())
-            return True
-
-        env.gate.acquire.side_effect = acquire
-        env.tracker.wait.side_effect = during_wait
-        self._run()
-        assert [c.kwargs["priority"] for c in env.gate.acquire.call_args_list] == [3, 1]
-        assert [c.args for c in env.gate.release.call_args_list] == [(3,), (1,)]
-        assert seen_while_readmitting == [True]
-
-    def test_job_that_finished_while_paused_does_not_queue_for_a_slot(self, env, monkeypatch):
-        from media_preview_generator.web.job_gate import JobGate
-
-        gate = JobGate(lambda: 1)
-        monkeypatch.setattr(job_runner, "get_job_gate", lambda: gate)
-        state = {"paused": False}
-        env.jm.is_pause_requested.side_effect = lambda jid: state["paused"]
-        calls = []
-
-        def during_wait(timeout=None):
-            calls.append(len(calls))
-            if len(calls) == 1:
-                state["paused"] = True
-                return False
-            if len(calls) == 2:
-                # Slot handed back; a long scan takes it, the last in-flight item finishes, the user resumes.
-                assert gate.acquire(2, cancel_check=lambda: True) is True
-                env.tracker.done_event.set()
-                state["paused"] = False
-                return False
-            return True
-
-        env.tracker.wait.side_effect = during_wait
-        self._run()
-        assert calls == [0, 1, 2]
-        assert gate.snapshot()[0] == 1  # only the scan's slot; ours was never re-taken
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
 
     def test_cancel_while_paused_waits_for_the_dispatcher_without_retaking_a_slot(self, env):
@@ -1049,7 +981,7 @@ class TestRun:
         env.tracker.wait.side_effect = during_wait
         self._run()
         env.gate.acquire.assert_called_once()
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
         env.jm.complete_job.assert_not_called()
 
     @pytest.mark.parametrize("preview_priority", [1, 2, 3])
@@ -1092,7 +1024,7 @@ class TestRun:
         monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=fake_sleep))
         self._run()
         assert env.gate.acquire.call_args.kwargs["priority"] == 1
-        env.gate.release.assert_called_once_with(1, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
 
     @pytest.mark.parametrize("finished", ["completed", "failed", "cancelled"])
     def test_follow_up_starts_once_its_preview_job_has_ended_any_way(self, env, finished):
@@ -1257,7 +1189,7 @@ class TestRun:
         warning = env.jm.complete_job.call_args.kwargs["warning"]
         assert "no files" in warning.lower()
         assert all(w in warning for w in warnings)
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
 
     @pytest.mark.parametrize(
         ("warnings", "expected"),
@@ -1387,22 +1319,17 @@ class TestRun:
         env.jm.is_cancellation_requested.return_value = True
         assert kwargs["cancel_check"]() is True
 
-    def test_a_pause_during_the_read_back_hands_the_slot_back_until_resume(self, env, monkeypatch):
+    def test_a_pause_during_the_read_back_waits_for_resume(self, env, monkeypatch):
         env.job.config = {"reconcile": True, "source": "reconcile"}
-        env.job.priority = 2
         paused = iter([True, True, False])
         sleeps = []
-
-        def sleep(seconds):
-            sleeps.append(seconds)
-            env.job.priority = 1  # raised while paused: the slot taken on resume is a HIGH one
-
-        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=sleep))
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=sleeps.append))
         seen = []
 
         def listing(**kwargs):
             env.jm.is_pause_requested.side_effect = lambda job_id: next(paused, False)
-            seen.append((kwargs["cancel_check"](), env.gate.release.call_args_list[:], env.gate.acquire.call_count))
+            seen.append(kwargs["cancel_check"]())
+            seen.append(env.gate.release.call_count)  # still inside the listing, after the pause was waited out
             from media_preview_generator.markers import reconcile
 
             return reconcile.CheckServersListing([], [])
@@ -1411,19 +1338,28 @@ class TestRun:
 
         with patch.object(reconcile, "check_servers_listing", side_effect=listing):
             job_runner.run_intro_credits_job("j1")
-        [(cancelled, released, acquired)] = seen
-        assert cancelled is False
-        assert released == [call(2, kind="intro_credits")]  # handed back while paused
-        assert acquired == 2  # the job's first slot, then again on resume
-        assert env.gate.acquire.call_args_list[1].kwargs["priority"] == 1
-        assert len(sleeps) == 2
-        assert env.gate.release.call_args_list == [
-            call(2, kind="intro_credits"),
-            call(1, kind="intro_credits"),
-        ]  # the job's end gives back the slot it holds
-        env.jm.add_log.assert_any_call("j1", "INFO - Paused; active slot handed back until resume")
+        assert seen == [False, 1], "the start-up slot was given back while the listing waited out the pause"
+        assert len(sleeps) == 2  # one wait tick per paused answer
+        env.gate.acquire.assert_called_once()
+        env.gate.release.assert_called_once_with()
 
-    def test_all_processing_paused_waits_during_the_read_back_keeping_the_slot(self, env, monkeypatch):
+    def test_the_pause_wait_calls_on_pause_before_each_sleep_and_not_when_running(self, env, monkeypatch):
+        env.jm.is_pause_requested.return_value = True
+        calls = []
+
+        def sleep(_seconds):
+            env.jm.is_pause_requested.return_value = False
+
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=sleep))
+        check = job_runner._cancel_check_waiting_out_pause(
+            job_id="j1", cancel_check=lambda: False, on_pause=lambda: calls.append("paused")
+        )
+        assert check() is False
+        assert calls == ["paused"]
+        assert check() is False
+        assert calls == ["paused"]
+
+    def test_all_processing_paused_waits_during_the_read_back_without_the_slot(self, env, monkeypatch):
         env.job.config = {"reconcile": True, "source": "reconcile"}
         sleeps = []
 
@@ -1443,7 +1379,7 @@ class TestRun:
 
         with patch.object(reconcile, "check_servers_listing", side_effect=listing):
             job_runner.run_intro_credits_job("j1")
-        assert answers == [(False, False)]  # waited, slot kept (every job is paused)
+        assert answers == [(False, True)]  # waited, and gave the start-up slot back for the wait
         assert len(sleeps) == 1
 
     def test_a_cancel_while_paused_during_the_read_back_ends_the_wait(self, env, monkeypatch):
@@ -1464,51 +1400,8 @@ class TestRun:
             job_runner.run_intro_credits_job("j1")
         assert answers == [True]
         env.jm.cancel_job.assert_called_once_with("j1")
-        assert env.gate.release.call_args_list == [
-            call(3, kind="intro_credits")
-        ]  # handed back once while paused; not released again
-        assert env.gate.acquire.call_count == 1  # never taken again: the cancel came first
-
-    def test_a_pause_while_waiting_for_a_slot_after_resume_keeps_the_job_waiting_without_one(self, env, monkeypatch):
-        from media_preview_generator.markers import reconcile
-
-        env.job.config = {"reconcile": True, "source": "reconcile"}
-        state = {"paused": False}
-        env.jm.is_pause_requested.side_effect = lambda job_id: state["paused"]
-        sleeps = []
-
-        def sleep(seconds):
-            sleeps.append(seconds)
-            state["paused"] = False  # resumed
-
-        def acquire(priority, cancel_check, on_wait=None, *, kind, on_resource_wait):
-            assert kind == "intro_credits"
-            assert callable(on_resource_wait)
-            if env.gate.acquire.call_count == 2:  # the slot asked for on resume
-                state["paused"] = True  # paused again while waiting for it
-                assert cancel_check() is True
-                return False
-            return True
-
-        env.gate.acquire.side_effect = acquire
-        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=sleep))
-        seen = []
-
-        def listing(**kwargs):
-            state["paused"] = True
-            seen.append((kwargs["cancel_check"](), env.gate.release.call_args_list[:], env.gate.acquire.call_count))
-            return reconcile.CheckServersListing([], [])
-
-        with patch.object(reconcile, "check_servers_listing", side_effect=listing):
-            job_runner.run_intro_credits_job("j1")
-        [(cancelled, released, acquired)] = seen
-        assert cancelled is False
-        # Paused: handed back once. The acquire interrupted by the second pause took no slot, so there was nothing to
-        # hand back again; the job waited out that pause and took a slot on the next resume.
-        assert released == [call(3, kind="intro_credits")]
-        assert acquired == 3
-        assert len(sleeps) == 2
-        assert env.gate.release.call_args_list == [call(3, kind="intro_credits"), call(3, kind="intro_credits")]
+        env.gate.release.assert_called_once_with()
+        env.gate.acquire.assert_called_once()
 
     def test_cancel_during_enumeration_cancels_without_submitting(self, env):
         def build(cfg, **kwargs):
@@ -1545,7 +1438,7 @@ class TestRun:
         def acquire(priority, cancel_check, on_wait=None, *, kind, on_resource_wait):
             assert kind == "intro_credits"
             assert callable(on_resource_wait)
-            on_wait(3, 3, 2)
+            on_wait(3)
             env.jm.is_cancellation_requested.side_effect = lambda jid: jid == "j1"
             return not cancel_check()
 
@@ -1553,7 +1446,7 @@ class TestRun:
         job_runner.run_intro_credits_job("j1")
         env.jm.update_progress.assert_any_call(
             "j1",
-            current_item="Queued — waiting for active slot (3 of 3 busy)",
+            current_item="Queued — waiting to start (3 of 3 jobs starting up)",
         )
         env.jm.cancel_job.assert_called_once_with("j1")
 
@@ -1573,20 +1466,20 @@ class TestRun:
         env.jm.complete_job.assert_not_called()
         env.jm.cancel_job.assert_called_once_with("j1")
         env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_published": 1})
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
 
     def test_registry_unavailable_fails_the_job(self, env, monkeypatch):
         monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: None)
         self._run()
         assert "media servers" in env.jm.complete_job.call_args.kwargs["error"]
         env.dispatcher.submit_items.assert_not_called()
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
 
     def test_crash_marks_job_failed_and_releases_gate(self, env):
         with patch.object(job_runner, "build_items", side_effect=RuntimeError("enumeration exploded")):
             job_runner.run_intro_credits_job("j1")
         env.jm.complete_job.assert_called_once_with("j1", error="RuntimeError: enumeration exploded")
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
         env.jm.clear_pause_flag.assert_called_once_with("j1")
         env.dispatcher.cancel_job.assert_not_called()  # nothing was submitted
 
@@ -1598,7 +1491,7 @@ class TestRun:
         env.jm.complete_job.side_effect = lambda jid, **kw: order.append(("complete", jid, kw))
         self._run()
         assert order == [("cancel", "j1"), ("complete", "j1", {"error": "RuntimeError: wait exploded"})]
-        env.gate.release.assert_called_once_with(3, kind="intro_credits")
+        env.gate.release.assert_called_once_with()
 
     def test_crash_while_stopping_the_tracker_still_marks_the_job_failed(self, env):
         env.tracker.wait.side_effect = RuntimeError("wait exploded")

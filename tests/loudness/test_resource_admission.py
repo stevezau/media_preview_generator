@@ -1,18 +1,19 @@
-"""Busy CPU loudness jobs must leave admission available for independent GPU work."""
+"""Busy CPU loudness jobs must leave start-up available for independent GPU work."""
 
 import threading
 import time
 
 from media_preview_generator.loudness import job
-from media_preview_generator.web.job_gate import JobGate
 from media_preview_generator.web.jobs import JobStatus
 
 from .test_job_lifecycle import Lifecycle, lifecycle  # noqa: F401
 
 
-def test_one_cpu_loudness_lane_does_not_fill_four_ordinary_job_slots(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_busy_cpu_loudness_lane_holds_no_start_up_slot(lifecycle: Lifecycle, make_gate, monkeypatch):  # noqa: F811
+    """Loudness jobs queued behind the one CPU worker have all started up (listed their files) and given their
+    slot back, so independent GPU work starts up straight away."""
     lifecycle.api_ready = True
-    gate = JobGate(lambda: 5, kind_capacity_provider=lambda kind: 1 if kind == "loudness" else 4)
+    gate = make_gate(1, lambda kind: 1 if kind == "loudness" else 4)
     monkeypatch.setattr(job, "get_job_gate", lambda: gate)
     started = threading.Event()
     finish = threading.Event()
@@ -41,24 +42,19 @@ def test_one_cpu_loudness_lane_does_not_fill_four_ordinary_job_slots(lifecycle: 
     ]
     threads = [threading.Thread(target=job.run_loudness_job, args=(entry.id,), daemon=True) for entry in entries]
     try:
-        threads[0].start()
-        assert started.wait(3)
-        for thread in threads[1:]:
+        for thread in threads:
             thread.start()
-        # Every real runner must reach admission before we check occupancy.
+        assert started.wait(3)
         deadline = time.monotonic() + 3
-        while sum(gate.snapshot()[:2]) < 4 and time.monotonic() < deadline:
+        while sum(entry.status is JobStatus.RUNNING for entry in entries) < 4 and time.monotonic() < deadline:
             threading.Event().wait(0.01)
-        assert sum(gate.snapshot()[:2]) == 4
-        assert sum(entry.status is JobStatus.RUNNING for entry in entries) == 1
-        assert gate.snapshot()[0] == 1
-        assert sum(entry.status is JobStatus.PENDING for entry in entries) == 3
+        assert sum(entry.status is JobStatus.RUNNING for entry in entries) == 4
+        assert gate.snapshot() == (0, 0, 1), "every job gave its start-up slot back after submitting its files"
         preview_deadline = time.monotonic() + 1
         assert gate.acquire(priority=2, kind="previews", cancel_check=lambda: time.monotonic() > preview_deadline), (
-            "GPU work must pass the older loudness jobs waiting for the only CPU"
+            "GPU work must start up straight away while the CPU lane is busy"
         )
-        assert gate.snapshot()[0] == 2
-        gate.release(2, kind="previews")
+        gate.release()
     finally:
         for entry in entries:
             lifecycle.manager.request_cancellation(entry.id)
