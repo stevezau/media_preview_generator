@@ -20,7 +20,7 @@ from media_preview_generator.markers.publishers import plex_db as shared_db
 from media_preview_generator.output.plex_hash import calculate_plex_hash
 from media_preview_generator.servers.base import Library, ServerConfig, ServerType
 from media_preview_generator.servers.registry import ServerRegistry
-from media_preview_generator.web import jobs
+from media_preview_generator.web import jobs, settings_manager
 from media_preview_generator.web.job_gate import JobGate
 from media_preview_generator.web.jobs import Job, JobManager, JobStatus, is_user_visible_job
 
@@ -183,6 +183,9 @@ def lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(module, "get_job_manager", lambda: manager)
         monkeypatch.setattr(module, "get_settings_manager", lambda: settings)
         monkeypatch.setattr(module, "get_job_gate", lambda: gate)
+    # Admission's readiness policy imports the settings manager itself; without this it reads whatever
+    # process-wide singleton an earlier test on this xdist worker left behind (e.g. one with processing paused).
+    monkeypatch.setattr(settings_manager, "get_settings_manager", lambda: settings)
     monkeypatch.setattr(jobs, "get_job_manager", lambda: manager)
     monkeypatch.setattr(job, "load_config", lambda: config)
     monkeypatch.setattr(job, "_build_multi_server_registry", lambda config: registry)
