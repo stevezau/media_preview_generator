@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+from media_preview_generator import shutdown
 from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.audio import POINT_S, fingerprint, matcher, season
 from media_preview_generator.markers.decide import LONG_INTRO_CHAPTER_REASON, DecisionStatus
@@ -1130,6 +1131,33 @@ class TestMixedSpeeds:
             season.detect_season_audio(rec, ctx=_season_ctx(store, e4))
         assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is not None
         assert _evidence(store, e4, Source.SEASON_AUDIO) == []
+
+    @pytest.mark.parametrize("stopping", [True, False], ids=["app-stopping", "app-running"])
+    def test_a_fingerprint_that_failed_because_the_app_stopped_is_not_kept_against_the_file(
+        self, store, show, stopping
+    ):
+        # A stop kills ffmpeg along with the app: the file isn't unreadable. The running case proves the rows are
+        # otherwise written.
+        e1, e2, e3, e4 = show(1, 4)
+        rates = {e1: FILM, e2: FILM, e3: FILM, e4: 25.0}
+        rec = store.upsert_file(FileIdentity(e4, *_identity(e4)), duration_ms=DUR, season_key=None, is_movie=False)
+        store.set_frame_rate(rec.id, 25.0, identity=(rec.size, rec.mtime_ns))
+        shutdown._shutting_down = stopping
+        with (
+            Audio(points=speed_points({e4}), rates=rates, retimed=retimed_points, fail_retimed={e4}),
+            pytest.raises(pipeline.DetectorUnavailableError, match="ffmpeg exited 1"),
+        ):
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e4))
+        assert (store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None) is stopping
+
+    @pytest.mark.parametrize("stopping", [True, False], ids=["app-stopping", "app-running"])
+    def test_a_member_fingerprint_that_failed_because_the_app_stopped_is_not_remembered(self, store, show, stopping):
+        e1, e2 = show(1, 2)
+        shutdown._shutting_down = stopping
+        with Audio(fail={e1}):
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+        failed_at = store.member_fingerprint_failed_at(FileIdentity(e1, *_identity(e1)))
+        assert (failed_at is None) is stopping
 
     def test_the_end_picture_check_reads_each_file_at_its_own_seconds(self, store, show):
         e1, e2, e3 = show(1, 3)

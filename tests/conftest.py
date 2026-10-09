@@ -113,6 +113,16 @@ except ImportError:  # pragma: no cover
 
 
 @pytest.fixture(autouse=True)
+def _clear_shutdown_flag():
+    """The process-wide shutdown flag must never leak from a test that set it into the next one."""
+    from media_preview_generator import shutdown
+
+    shutdown._shutting_down = False
+    yield
+    shutdown._shutting_down = False
+
+
+@pytest.fixture(autouse=True)
 def _fail_unmocked_network_fast(monkeypatch):
     """Make an unmocked outbound connection fail instantly instead of stalling.
 

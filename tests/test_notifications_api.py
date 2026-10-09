@@ -78,7 +78,7 @@ def _mock_healthy_timezone():
 
 
 @pytest.fixture()
-def app_with_config(tmp_path):
+def app_with_config(tmp_path, monkeypatch):
     """Create a Flask test app against a temp config directory."""
     config_dir = str(tmp_path / "config")
     os.makedirs(config_dir, exist_ok=True)
@@ -87,18 +87,13 @@ def app_with_config(tmp_path):
     with open(os.path.join(config_dir, "settings.json"), "w") as fh:
         json.dump({"setup_complete": True}, fh)
 
-    with patch.dict(
-        os.environ,
-        {
-            "CONFIG_DIR": config_dir,
-            "WEB_AUTH_TOKEN": "test-token-12345678",
-            "WEB_PORT": "8099",
-        },
-    ):
-        flask_app = create_app(config_dir=config_dir)
-        flask_app.config["TESTING"] = True
-        flask_app.config["WTF_CSRF_ENABLED"] = False
-        yield flask_app, config_dir
+    monkeypatch.setenv("CONFIG_DIR", config_dir)
+    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+    monkeypatch.setenv("WEB_PORT", "8099")
+    flask_app = create_app(config_dir=config_dir)
+    flask_app.config["TESTING"] = True
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    yield flask_app, config_dir
 
 
 @pytest.fixture()

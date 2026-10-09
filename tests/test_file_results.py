@@ -1087,7 +1087,7 @@ class TestFileResultsAPI:
     """GET /api/jobs/{id}/files API endpoint."""
 
     @pytest.fixture()
-    def app(self, tmp_path):
+    def app(self, tmp_path, monkeypatch):
         from media_preview_generator.web.app import create_app
         from media_preview_generator.web.settings_manager import reset_settings_manager
 
@@ -1103,17 +1103,12 @@ class TestFileResultsAPI:
         with open(settings_file, "w") as f:
             json.dump({"setup_complete": True}, f)
 
-        with patch.dict(
-            os.environ,
-            {
-                "CONFIG_DIR": cfg,
-                "WEB_AUTH_TOKEN": "test-token-12345678",
-                "WEB_PORT": "8099",
-            },
-        ):
-            flask_app = create_app(config_dir=cfg)
-            flask_app.config["TESTING"] = True
-            yield flask_app
+        monkeypatch.setenv("CONFIG_DIR", cfg)
+        monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+        monkeypatch.setenv("WEB_PORT", "8099")
+        flask_app = create_app(config_dir=cfg)
+        flask_app.config["TESTING"] = True
+        yield flask_app
         reset_settings_manager()
 
     @pytest.fixture()

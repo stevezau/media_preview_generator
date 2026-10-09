@@ -106,14 +106,16 @@ def envs(monkeypatch):
 
 
 class Clock:
-    """The pool's monotonic clock, moved on by a test (a GPU's back-off) instead of waiting it out."""
+    """The pool's monotonic clock, moved on only by a test (a GPU's back-off) instead of waiting it out. It stands
+    still otherwise: real time passing while a loaded box starts a helper must not eat into a back-off a test is
+    checking the edge of."""
 
     def __init__(self, monkeypatch):
-        self.offset = 0.0
-        monkeypatch.setattr(th, "_monotonic", lambda: time.monotonic() + self.offset)
+        self.now = time.monotonic()
+        monkeypatch.setattr(th, "_monotonic", lambda: self.now)
 
     def advance(self, seconds: float) -> None:
-        self.offset += seconds
+        self.now += seconds
 
 
 @pytest.fixture

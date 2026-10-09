@@ -58,22 +58,21 @@ def _readable_video_unknown(monkeypatch):
 
 
 @pytest.fixture
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     """Same app fixture as tests/test_routes.py (setup complete, fixed API token)."""
     import json
-    import os
-    from unittest.mock import patch
 
     from media_preview_generator.web import settings_manager as sm_mod
     from media_preview_generator.web.app import create_app
 
     sm_mod.reset_settings_manager()
     (tmp_path / "settings.json").write_text(json.dumps({"setup_complete": True}))
-    with patch.dict(os.environ, {"CONFIG_DIR": str(tmp_path), "WEB_AUTH_TOKEN": "test-token-12345678"}):
-        flask_app = create_app(config_dir=str(tmp_path))
-        flask_app.config["TESTING"] = True
-        flask_app.config["WTF_CSRF_ENABLED"] = False
-        yield flask_app
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
+    flask_app = create_app(config_dir=str(tmp_path))
+    flask_app.config["TESTING"] = True
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    yield flask_app
     sm_mod.reset_settings_manager()
 
 

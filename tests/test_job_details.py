@@ -251,17 +251,18 @@ class TestJobFileList:
 
 
 @pytest.fixture()
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
     from media_preview_generator.web.app import create_app
 
     config_dir = str(tmp_path / "cfg")
     os.makedirs(config_dir, exist_ok=True)
     env = {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678", "WEB_PORT": "8099"}
-    with patch.dict(os.environ, env):
-        flask_app = create_app(config_dir=config_dir)
-        flask_app.config["TESTING"] = True
-        flask_app.config["WTF_CSRF_ENABLED"] = False
-        yield flask_app
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    flask_app = create_app(config_dir=config_dir)
+    flask_app.config["TESTING"] = True
+    flask_app.config["WTF_CSRF_ENABLED"] = False
+    yield flask_app
 
 
 _HEADERS = {"Authorization": "Bearer test-token-12345678"}

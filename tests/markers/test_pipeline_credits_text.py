@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from media_preview_generator import shutdown
 from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.credits import detector, frames
 from media_preview_generator.markers.credits.textdet_helper import TextDetState
@@ -723,6 +724,18 @@ class TestSkipDbAgainstACreditsChapter:
             fh.write(b"more")
         ctx = self._checked(store, media)
         assert self._credits(ctx, store, media) == self.WAITING
+
+    @pytest.mark.parametrize("stopping", [True, False], ids=["app-stopping", "app-running"])
+    def test_a_decode_that_failed_because_the_app_stopped_is_not_kept_against_the_file(
+        self, store, media, find, stopping
+    ):
+        # A stop kills ffmpeg along with the app; the running case proves the failure is otherwise stored.
+        find.answer = frames.FrameDecodeError("ffmpeg exited 255")
+        shutdown._shutting_down = stopping
+        self._run(store, media, self._ctx(store, media))
+
+        failure = store.get_detector_failure(store.get_file(media).id, Source.CREDITS_TEXT)
+        assert (failure is None) is stopping
 
     @pytest.mark.parametrize(
         ("error", "expected"),

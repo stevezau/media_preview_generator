@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from media_preview_generator import shutdown
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS, ItemOutcome, KindHandlers
 from media_preview_generator.jobs.dispatcher import reset_dispatcher
 from media_preview_generator.markers import job_runner, pipeline, triggers
@@ -1521,3 +1522,39 @@ class TestACancelStopsTheFileWheneverItLands:
         lab.source = "season_audio"
         job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="decode poll", arm_on="rawvideo")
         self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=1)
+
+
+class TestStopDuringAFile:
+    def test_a_file_killed_by_the_stop_is_not_failed_and_its_job_is_revived(self, engine, monkeypatch):
+        def check_fn(item, *, cancel_check=None):
+            shutdown.request_shutdown()  # the stop signal reaches the app; the file's FFmpeg exits 255 with it
+            return ItemOutcome("failed", "ffmpeg exited 255 decoding a.mkv: Exiting normally, received signal 15", [])
+
+        handlers = KindHandlers(
+            check_fn=check_fn,
+            process_fn=lambda item, **kw: ItemOutcome("failed", "unexpected worker stage"),
+            outcome_keys=("markers_published", "failed"),
+        )
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: MagicMock())
+        monkeypatch.setattr(
+            job_runner,
+            "build_context",
+            lambda **kw: MagicMock(decided_by=DecidedByTally(), **{"take_missing.return_value": 0}),
+        )
+        monkeypatch.setattr(job_runner, "kind_handlers", lambda ctx: handlers)
+        monkeypatch.setattr(job_runner, "build_items", lambda cfg, **kw: ([ProcessableItem("/m/a.mkv", "")], [], {}))
+        monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
+        job = triggers.create_intro_credits_job(library_name="stopped", priority=3, source="manual")
+
+        job_runner.run_intro_credits_job(job.id)
+
+        stored = engine.jm.get_job(job.id)
+        assert engine.jm.get_file_results(job.id) == []
+        assert (stored.status, stored.error, stored.completed_at) == (JobStatus.RUNNING, None, None)
+        engine.jm.close()
+        shutdown._shutting_down = False
+        restored = JobManager(config_dir=engine.jm.config_dir)
+        try:
+            assert [revived.id for revived in restored.requeue_interrupted_jobs()] == [job.id]
+        finally:
+            restored.close()

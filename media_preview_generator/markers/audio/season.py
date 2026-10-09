@@ -30,6 +30,7 @@ import numpy as np
 from loguru import logger
 
 from ...plex_client import VIDEO_EXTENSIONS
+from ...shutdown import is_shutting_down
 from ..decide import intro_chapter_length_ms, intro_chapter_limit_ms
 from ..external_ids import ids_from_path, is_extra, same_show_names, season_folder_number
 from ..freeze import Freeze
@@ -846,6 +847,8 @@ def _fingerprint_failed_lately(ctx: PipelineContext, member: FileRecord) -> bool
 
 
 def _record_fingerprint_failure(ctx: PipelineContext, rec: FileRecord) -> None:
+    if is_shutting_down():  # a stop kills ffmpeg with the app: the member isn't unreadable
+        return
     now = ctx.now()
     ctx.store.record_member_fingerprint_failure(_identity_of(rec), now, forget_before=now - UNREADABLE_MEMBER_RETRY)
 
@@ -1697,7 +1700,7 @@ def detect_season_audio(
             if not own_file:
                 logger.info("Season audio leaves out {} this time: {}", os.path.basename(member.canonical_path), exc)
                 return None
-            if not (cancel_check and cancel_check()):
+            if not ((cancel_check and cancel_check()) or is_shutting_down()):
                 attempted = _signature(ctx, _signature_paths(rec.canonical_path, group, configs))
                 ctx.store.set_detector_failure(rec.id, Source.SEASON_AUDIO, attempted)
             raise DetectorUnavailableError(str(exc), this_file=True) from exc
