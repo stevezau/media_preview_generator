@@ -107,6 +107,13 @@ function onScanModeChange() {
     const markersMode = document.getElementById('scheduleMarkersModeGroup');
     if (markersMode) markersMode.hidden = selected !== 'intro_credits';
     const checksServers = _scheduleChecksServers();
+    const modeHint = document.getElementById('scheduleMarkersModeHint');
+    if (modeHint) {
+        modeHint.hidden = selected !== 'intro_credits';
+        modeHint.textContent = checksServers
+            ? "Doesn't scan files. Quickly checks every server still has the markers this app added, and puts back any it lost."
+            : "Finds skip markers for new or changed files in the libraries below, and puts back any a server has lost.";
+    }
     ['scheduleServerGroup', 'scheduleLibrariesGroup', 'scheduleScopeSection'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.hidden = checksServers;

@@ -33,13 +33,6 @@
                                 <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
                             </div>
                         </div>
-                        <div class="ov-row" id="jobMarkersModeGroup" hidden>
-                            <div class="ov-seg" role="radiogroup" aria-label="Intro and credits mode">
-                                <span class="ov-seg-opt"><input type="radio" name="jobMarkersMode" id="jobMarkersModeFind" value="find" checked onchange="onMarkersModeChange()"><label for="jobMarkersModeFind">Find markers</label></span>
-                                <span class="ov-seg-opt"><input type="radio" name="jobMarkersMode" id="jobMarkersModeCheckServers" value="check_servers" onchange="onMarkersModeChange()"><label for="jobMarkersModeCheckServers">Check servers</label></span>
-                            </div>
-                            <button type="button" class="info-icon" id="jobMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks your servers still show the markers this app sent, and resends any missing or changed." data-explain-title="Check servers" data-explain-template="infoJobCheckServersTpl" aria-label="Checks your servers still show the markers this app sent, and resends any missing or changed."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
-                        </div>
                     </section>
                     <section class="ov-sec" id="jobLibrariesGroup">
                         <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Libraries
@@ -67,7 +60,6 @@
                         <div id="jobScopeBadge" class="ov-scope" data-scope="all"></div>
                         <div class="ov-err" id="jobLibrariesError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i>Pick at least one library, or turn on All Libraries.</div>
                     </section>
-                    <div class="ov-note" id="jobCheckServersNote" hidden><i class="bi bi-hdd-network" aria-hidden="true"></i><span>Checks every server. There are no libraries to pick.</span></div>
                     <section class="ov-sec" id="jobOptionsGroup">
                         <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Options</div>
                         <div class="ov-fld" id="jobProcessingModeGroup">

@@ -3582,8 +3582,6 @@ function showNewJobModal() {
     document.querySelectorAll('input[name="jobKind"]').forEach(cb => { cb.checked = cb.id === 'jobKindPreviews'; });
     const markersForce = document.getElementById('jobMarkersForce');
     if (markersForce) markersForce.checked = false;
-    const findMarkers = document.getElementById('jobMarkersModeFind');
-    if (findMarkers) findMarkers.checked = true;
     _showJobKindControls();
     if (wasOwnRunner) document.getElementById('jobPriority').value = '2';
 
@@ -3761,8 +3759,7 @@ function _syncJobDialog() {
     if (!modal) return;
     const kinds = _jobKinds();
     const types = kinds.map(kind => _JOB_DIALOG_TYPES[kind]);
-    const checksServers = _jobChecksServers();
-    modal.dataset.kind = checksServers ? 'check' : kinds[0];
+    modal.dataset.kind = kinds[0];
 
     const priority = document.getElementById('jobPriority');
     if (priority) {
@@ -3771,7 +3768,7 @@ function _syncJobDialog() {
     }
     const startLabel = document.getElementById('jobStartLabel');
     if (startLabel) {
-        startLabel.textContent = checksServers ? 'Check servers' : types.length > 1 ? `Start ${types.length} jobs` : types[0].start;
+        startLabel.textContent = types.length > 1 ? `Start ${types.length} jobs` : types[0].start;
     }
 
     const regenerate = document.getElementById('jobRegenerateAll')?.checked;
@@ -3787,7 +3784,7 @@ function _syncJobDialog() {
     if (summary) {
         const all = document.getElementById('jobLibraryAll')?.checked;
         const picked = document.querySelectorAll('.job-library-checkbox:checked').length;
-        const scope = checksServers ? 'Every server' : all ? 'All libraries' : `${picked} ${picked === 1 ? 'library' : 'libraries'}`;
+        const scope = all ? 'All libraries' : `${picked} ${picked === 1 ? 'library' : 'libraries'}`;
         const priorityName = _JOB_PRIORITY_NAMES[parseInt(priority?.value, 10)] || 'Normal';
         const taskChips = types.map(type => `<span class="ov-task"><i class="bi ${type.icon}" aria-hidden="true"></i>${escapeHtml(type.name)}</span>`).join('');
         summary.innerHTML = taskChips
@@ -3836,51 +3833,30 @@ function _jobDefaultPriority() {
     return _jobKindIsPreviews() ? '2' : '3';
 }
 
-// Intro & Credits · Check servers reads back every server, so it has no libraries and no "re-check" switch.
-function _jobChecksServers() {
-    const radio = document.getElementById('jobMarkersModeCheckServers');
-    return _jobKindIsMarkers() && !!(radio && radio.checked);
-}
-
 // Processing mode, order and scan filters belong to Previews alone: Intro & Credits and loudness check every file
 // (the former with a "re-check" switch instead).
 function _showJobKindControls() {
     const markers = _jobKindIsMarkers();
     const previews = _jobKindIsPreviews();
-    const checksServers = _jobChecksServers();
     const toggle = function (id, hidden) {
         const el = document.getElementById(id);
         if (el) el.hidden = hidden;
     };
-    toggle('jobMarkersModeGroup', !markers);
-    toggle('jobLibrariesGroup', checksServers);
     toggle('jobProcessingModeGroup', !previews);
     toggle('jobSortByGroup', !previews);
-    toggle('jobMarkersForceGroup', !markers || checksServers);
+    toggle('jobMarkersForceGroup', !markers);
     toggle('jobScanFiltersGroup', !previews);
-    toggle('jobOwnRunnerFiltersNote', previews || checksServers);
-    toggle('jobCheckServersNote', !checksServers);
+    toggle('jobOwnRunnerFiltersNote', previews);
     _updateJobScopeBadge();
 }
 
-// Ticking job types also picks the default priority. At least one type stays ticked, and Check servers cannot be
-// combined with another type, so ticking one drops back to Find markers.
+// Ticking job types also picks the default priority. At least one type stays ticked.
 function onJobKindChange(changed) {
     if (!_jobKinds().length && changed) changed.checked = true;
-    const findMarkers = document.getElementById('jobMarkersModeFind');
-    if (_jobChecksServers() && _jobKinds().length > 1 && findMarkers) findMarkers.checked = true;
     _showJobKindControls();
     const priority = document.getElementById('jobPriority');
     if (priority) priority.value = _jobDefaultPriority();
     _syncJobDialog();
-}
-
-function onMarkersModeChange() {
-    if (_jobChecksServers()) {
-        document.getElementById('jobKindPreviews').checked = false;
-        document.getElementById('jobKindLoudness').checked = false;
-    }
-    onJobKindChange();
 }
 
 function toggleAllLibraries(checkbox) {
@@ -3996,7 +3972,7 @@ function _buildLoudnessJob() {
     return { url: '/api/loudness/jobs', payload, message: 'Plex loudness job has been started', name: 'Plex loudness' };
 }
 
-// The answer to a Check servers request (POST /api/markers/reconcile, or Re-run on a Check servers job): job_id is
+// The answer to a Check servers request (Re-run on a Check servers job): job_id is
 // null when Intro & Credits is off everywhere; only one Check servers job is queued or running at a time.
 function _showCheckServersAnswer(result) {
     if (!result || !result.job_id) {
@@ -4016,26 +3992,8 @@ function _showCheckServersAnswer(result) {
     showToast('Job Started', 'Intro & Credits · Check servers has been queued', 'success');
 }
 
-async function _startCheckServersJob() {
-    const opening = modalOpening(document.getElementById('newJobModal'));
-    const payload = { priority: parseInt(document.getElementById('jobPriority').value, 10) || 3 };
-    let result;
-    try {
-        result = await apiPost('/api/markers/reconcile', payload);
-    } catch (error) {
-        showToast('Error', 'Failed to start job: ' + error.message, 'danger');
-        return;
-    }
-    hideModalSafely(document.getElementById('newJobModal'), opening);
-    _showCheckServersAnswer(result);
-}
-
 // Validates every ticked type first, then starts one job per type (previews, Intro & Credits, loudness).
 async function startNewJob() {
-    if (_jobChecksServers()) {
-        await _startCheckServersJob();
-        return;
-    }
     const builders = [
         [_jobKindIsPreviews, _buildPreviewsJob],
         [_jobKindIsMarkers, _buildMarkersJob],

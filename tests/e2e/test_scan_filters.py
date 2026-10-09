@@ -83,16 +83,13 @@ def test_job_combines_shared_tv_and_movie_filters(filter_page: Page) -> None:
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("check_servers", [False, True])
-def test_intro_credits_job_hides_and_omits_preview_filters(filter_page: Page, check_servers: bool) -> None:
+def test_intro_credits_job_hides_and_omits_preview_filters(filter_page: Page) -> None:
     page = filter_page
     page.locator("#jobAddedFilter").select_option("last_days")
     page.locator("#jobAddedLastDays").fill("0")
     pick_job_kind(page, "jobKindMarkers")
-    if check_servers:
-        page.locator("#jobMarkersModeCheckServers").check()
     expect(page.locator("#jobScanFilters")).to_be_hidden()
-    endpoint = "/api/markers/reconcile" if check_servers else "/api/markers/jobs"
+    endpoint = "/api/markers/jobs"
     page.route(f"**{endpoint}", lambda route: _fulfill_json(route, {"id": "markers", "job_id": "markers"}))
     with page.expect_request(lambda request: request.url.endswith(endpoint) and request.method == "POST") as sent:
         page.locator("#newJobModal .modal-footer .btn-primary").click()
