@@ -42,11 +42,10 @@ backfill. The app compares Plex's live identity with the mounted config, checks 
 matches the file's size and Plex bundle hash before analysis. Inside the write transaction it checks the file and
 stream snapshot again. A changed source is left unwritten and checked again later.
 
-Enabled files get a loudness follow-up after their previews and any relevant Intro & Credits jobs, including
-webhooks and scheduled preview scans. Recently Added processing uses the same follow-up flow.
-Chapter thumbnails remain part of the Previews job; Intro & Credits and loudness are separate jobs. Follow-ups can
-appear in the queue together while waiting for the preceding jobs' first passes; they do not wait through every
-retry of those jobs. For a loudness-only backfill,
+Enabled files get a loudness follow-up from webhooks and scheduled preview scans. Recently Added processing uses the
+same follow-up flow. Chapter thumbnails remain part of the Previews job; Intro & Credits and loudness are separate jobs.
+A loudness follow-up starts as soon as a loudness worker is free, without waiting for the file's previews or Intro &
+Credits. For a loudness-only backfill,
 start a **Plex loudness** job from the dashboard (**Start new job**), for chosen libraries or all of them. To process specific files or folders, choose **Process a file or folder**, select **Plex loudness**, and select or paste the targets. A file Plex
 hasn't added to its library yet, or met while Plex was restarting or its database busy, is checked again according to
 your retry settings. The same job row shows the countdown and attempt count; **Retry now** skips the wait.

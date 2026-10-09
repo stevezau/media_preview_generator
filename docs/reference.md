@@ -914,8 +914,8 @@ off until turned on per server.
 Same `Job` row, queue, priorities, pause and cancel as the other kinds (see [Jobs Endpoints](#jobs-endpoints)). `config`
 holds `kind` (`"loudness"`), `source`, `libraries` (`[{"server_id", "library_id"}]`; empty with no `file_paths` = every
 library loudness goes to), `file_paths`, and the originating `server_id` when pinned to one server. Automatic
-follow-ups retain `follows_job_id` and `follows_job_ids` for the preview and relevant Intro & Credits jobs they wait
-for. They wait for those jobs' first passes, not their entire retry chains. File outcomes:
+follow-ups keep the preview job they came from in `follows_job_id`, but never wait for it: they start as soon as a
+loudness worker is free. File outcomes:
 
 | Outcome | Meaning |
 |---|---|

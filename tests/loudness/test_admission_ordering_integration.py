@@ -135,10 +135,7 @@ def _recovery_scenario(
     old = manager.create_job(kind="loudness", priority=3, config={"source": "manual", "file_paths": ["/old"]})
     new = manager.create_job(kind="loudness", priority=3, config={"source": "manual", "file_paths": ["/new"]})
     old.created_at, new.created_at = "2026-10-05T00:00:00+00:00", "2026-10-07T00:00:00+00:00"
-    if blocked_old == "dependency":
-        parent = manager.create_job(kind="previews", config={})
-        old.config["follows_job_id"] = parent.id
-    elif blocked_old == "future_retry":
+    if blocked_old == "future_retry":
         old.config["retry_not_before"] = "2099-01-01T00:00:00+00:00"
     elif blocked_old == "manual_pause":
         manager.request_pause(old.id)
@@ -150,7 +147,6 @@ def _recovery_scenario(
     monkeypatch.setattr(manager, "restore_capacity_waits", lambda: [new])
     monkeypatch.setattr(manager, "requeue_interrupted_jobs", lambda **kwargs: [old])
     monkeypatch.setattr(manager, "requeue_interrupted_followers", lambda kept: [])
-    # Keep the parent outside this recovery batch: it is an external prerequisite.
     monkeypatch.setattr(manager, "get_pending_jobs", lambda: [new, old])
     monkeypatch.setattr(job_gate, "STARTUP_SLOTS", 1)
     gate = job_gate.JobGate(kind_capacity_provider=lambda kind: 1)
@@ -226,7 +222,7 @@ def _assert_delayed_older_keeps_place(lifecycle, monkeypatch, trigger: str) -> N
             assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("blocked_old", ["dependency", "future_retry", "manual_pause"])
+@pytest.mark.parametrize("blocked_old", ["future_retry", "manual_pause"])
 def test_deferred_older_job_does_not_block_ready_recovered_job(lifecycle: Lifecycle, monkeypatch, blocked_old):
     old, new, calls, threads, allow_old, release_old, cancel, new_entered, admitted = _recovery_scenario(
         lifecycle, monkeypatch, "startup", blocked_old=blocked_old
@@ -243,6 +239,29 @@ def test_deferred_older_job_does_not_block_ready_recovered_job(lifecycle: Lifecy
         for thread in threads:
             thread.join(3)
             assert not thread.is_alive()
+
+
+def test_loudness_ignores_unfinished_companion_jobs_but_markers_still_wait(lifecycle: Lifecycle, monkeypatch):
+    from types import SimpleNamespace
+
+    from media_preview_generator.jobs.admission import _policy
+    from media_preview_generator.web import settings_manager
+
+    manager = lifecycle.manager
+    monkeypatch.setattr(
+        settings_manager, "get_settings_manager", lambda *args: SimpleNamespace(processing_paused=False)
+    )
+    preview = manager.create_job(kind="previews", config={})
+    manager.start_job(preview.id)
+    intro = manager.create_job(kind="intro_credits", config={"follows_job_id": preview.id})
+    manager.start_job(intro.id)
+    loudness = manager.create_job(
+        kind="loudness",
+        config={"follows_job_id": preview.id, "follows_job_ids": [preview.id, intro.id], "file_paths": ["/m/a.mkv"]},
+    )
+    blocked_marker = manager.create_job(kind="intro_credits", config={"follows_job_id": preview.id})
+    assert _policy(manager, loudness.id, False) == (loudness.priority, True)
+    assert _policy(manager, blocked_marker.id, False) == (blocked_marker.priority, False)
 
 
 def test_recovery_failed_older_launcher_does_not_leave_a_reservation(lifecycle: Lifecycle, monkeypatch):

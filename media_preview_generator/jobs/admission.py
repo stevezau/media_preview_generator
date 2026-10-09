@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from ..job_kinds import JOB_KIND_PREVIEWS
+from ..job_kinds import JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS
 
 
 def preceding_job_ready(preceding) -> bool:
@@ -49,7 +49,10 @@ def _policy(manager, job_id: str, preflight_complete: bool) -> tuple[int, bool] 
         return priority, False
     if preflight_complete:
         return priority, True
-    dependencies = [cfg.get("follows_job_id"), *(cfg.get("follows_job_ids") or [])]
+    # Loudness never waits for other jobs: it checks Plex has the file itself and retries when not.
+    dependencies = (
+        [] if job.kind == JOB_KIND_LOUDNESS else [cfg.get("follows_job_id"), *(cfg.get("follows_job_ids") or [])]
+    )
     if any(parent and not preceding_job_ready(manager.get_job(parent)) for parent in dependencies):
         return priority, False
     if not cfg.get("force_fire_now"):
