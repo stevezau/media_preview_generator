@@ -2433,7 +2433,7 @@ const selectedJobIds = new Set();
 const _FINISHED_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 function _isSelectableJob(job) {
-    return job.status === 'pending' || _FINISHED_STATUSES.has(job.status);
+    return job.status === 'pending' || _FINISHED_STATUSES.has(job.status) || (job.status === 'running' && (job.paused || processingPaused));
 }
 
 function _visibleSelectableJobIds() {
@@ -2444,7 +2444,7 @@ function _selectedByKind() {
     const status = new Map(jobs.map((job) => [String(job.id), job.status]));
     const ids = Array.from(selectedJobIds);
     return {
-        queued: ids.filter((id) => status.get(id) === 'pending'),
+        queued: ids.filter((id) => !_FINISHED_STATUSES.has(status.get(id))),
         finished: ids.filter((id) => _FINISHED_STATUSES.has(status.get(id))),
     };
 }

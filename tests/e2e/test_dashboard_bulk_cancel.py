@@ -166,3 +166,24 @@ def test_select_all_checkbox_sits_in_its_own_column_left_of_id(authed_page: Page
 
     page.locator("#selectAllQueued").check()
     expect(page.locator("#selectionCount")).to_have_text("2 selected")
+
+
+def test_paused_running_rows_are_selectable_but_active_ones_are_not(authed_page: Page, app_url: str) -> None:
+    page = authed_page
+    mock_dashboard_defaults(page)
+    page.add_init_script(_SOCKET_STUB)
+    held = _job("r-held", status="running")
+    held["paused"] = True
+    jobs = {"r-held": held, "r-active": _job("r-active", status="running")}
+
+    def jobs_list(route) -> None:
+        _fulfill_json(route, {"jobs": list(jobs.values()), "total": len(jobs), "pages": 1, "page": 1})
+
+    page.route("**/api/jobs?**", jobs_list)
+    page.goto(f"{app_url}/")
+
+    expect(page.locator("#job-row-r-held")).to_be_visible()
+    expect(page.locator("#job-row-r-held .job-select-cb")).to_have_count(1)
+    expect(page.locator("#job-row-r-active .job-select-cb")).to_have_count(0)
+    page.locator("#job-row-r-held .job-select-cb").check()
+    expect(page.locator("#cancelSelectedButtonText")).to_have_text("Cancel queued (1)")

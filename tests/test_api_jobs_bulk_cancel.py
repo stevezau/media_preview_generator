@@ -95,6 +95,33 @@ class TestCancelBulk:
         assert jm.get_job(head.id).status == JobStatus.CANCELLED
         assert jm.get_job(child.id).status == JobStatus.CANCELLED
 
+    def test_cancels_running_job_held_by_its_own_pause(self, client):
+        jm = get_job_manager()
+        held, active = jm.create_job(library_name="H"), jm.create_job(library_name="A")
+        jm.start_job(held.id)
+        jm.start_job(active.id)
+        jm.get_job(held.id).paused = True
+
+        data = _post(client, {"job_ids": [held.id, active.id]}).get_json()
+
+        assert data["cancelled"] == [held.id]
+        assert data["skipped"] == [{"id": active.id, "reason": "not_pending (running)"}]
+        assert jm.get_job(held.id).status == JobStatus.CANCELLED
+        assert jm.get_job(active.id).status == JobStatus.RUNNING
+
+    def test_cancels_running_job_when_pause_all_is_on(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        jm = get_job_manager()
+        job = jm.create_job(library_name="G")
+        jm.start_job(job.id)
+        get_settings_manager().processing_paused = True
+
+        data = _post(client, {"job_ids": [job.id]}).get_json()
+
+        assert data == {"cancelled": [job.id], "skipped": []}
+        assert jm.get_job(job.id).status == JobStatus.CANCELLED
+
     def test_uses_atomic_pending_cancel_when_cancelling(self, client):
         jm = get_job_manager()
         job = jm.create_job(library_name="S")
@@ -103,6 +130,7 @@ class TestCancelBulk:
             data = _post(client, {"job_ids": [job.id]}).get_json()
 
         assert mock_cancel.call_args.args == (jm, job.id)
+        assert mock_cancel.call_args.kwargs == {"global_pause": False}
         assert data == {"cancelled": [job.id], "skipped": []}
 
     def test_job_started_between_listing_and_cancel_is_skipped_not_cancelled(self, client):
@@ -110,9 +138,9 @@ class TestCancelBulk:
         job = jm.create_job(library_name="Race")
         real = JobManager.cancel_job_if_pending
 
-        def flip_then_cancel(self_, job_id):
+        def flip_then_cancel(self_, job_id, **kwargs):
             self_.start_job(job_id)
-            return real(self_, job_id)
+            return real(self_, job_id, **kwargs)
 
         with patch.object(JobManager, "cancel_job_if_pending", autospec=True, side_effect=flip_then_cancel):
             data = _post(client, {"job_ids": [job.id]}).get_json()
