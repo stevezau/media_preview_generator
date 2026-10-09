@@ -23,7 +23,7 @@ html[data-bs-theme="light"] { --ov-panel: #fbfcfd; }
 .ov-modal :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: none; }
 .ov-tile { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border-radius: 10px; font-size: 18px; background: var(--tk-soft); color: var(--tk); transition: background-color 0.2s, color 0.2s; }
 .ov-sum > span:last-child { white-space: nowrap; }
-.ov-sum { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.ov-sum { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--muted); font-size: 13px; }
 .ov-sum b { color: var(--bs-body-color); }
 .ov-task { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 7px; background: var(--tk-soft); color: var(--tk); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .ov-sp { flex: 1; }

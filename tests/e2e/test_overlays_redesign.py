@@ -189,6 +189,21 @@ class TestStartNewJob:
         page.locator("#jobKindPreviews").click()
         expect(page.locator("#jobKindPreviews")).to_be_checked()
 
+    def test_footer_summary_chips_stay_inside_their_box_when_all_types_are_ticked(self, overlay_page) -> None:
+        page, _ = overlay_page
+        page.set_viewport_size({"width": 700, "height": 900})
+        _open_start(page)
+        page.locator("#jobKindMarkers").check()
+        page.locator("#jobKindLoudness").check()
+        overflow = page.evaluate(
+            """() => {
+                const box = document.getElementById('jobSummary').getBoundingClientRect();
+                return Math.max(...[...document.getElementById('jobSummary').children]
+                    .map(c => c.getBoundingClientRect().right)) - box.right;
+            }"""
+        )
+        assert overflow <= 1
+
     def test_ticking_several_types_posts_one_job_each_previews_first(self, overlay_page) -> None:
         page, writes = overlay_page
         _open_start(page)
