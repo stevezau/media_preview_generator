@@ -771,7 +771,7 @@ def bif_servers_search(server_id: str):
     if target is None:
         return jsonify({"error": f"server {server_id!r} not found", "results": []}), 404
 
-    registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    registry = ServerRegistry.from_settings(raw_servers)
     server = registry.get(server_id)
     server_cfg = registry.get_config(server_id)
     if server is None or server_cfg is None:
@@ -1051,7 +1051,7 @@ def trickplay_info():
     if target is None:
         return jsonify({"error": "server not found"}), 404
 
-    registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    registry = ServerRegistry.from_settings(raw_servers)
     server_cfg = registry.get_config(server_id)
     if server_cfg is None:
         return jsonify({"error": "server config missing"}), 500
@@ -1124,7 +1124,7 @@ def trickplay_frame():
 
     settings = get_settings_manager()
     raw_servers = settings.get("media_servers") or []
-    registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    registry = ServerRegistry.from_settings(raw_servers)
     server_cfg = registry.get_config(server_id)
     if server_cfg is None:
         return jsonify({"error": "server not found"}), 404

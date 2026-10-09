@@ -81,7 +81,7 @@ class TestReadOnlyMediaDir:
                 "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
             }
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         result = process_canonical_path(
             canonical_path=canonical,
@@ -147,7 +147,7 @@ class TestUnreadableSourceFile:
                     "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
                 }
             ]
-            registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+            registry = ServerRegistry.from_settings(raw_servers)
 
             result = process_canonical_path(
                 canonical_path=str(target),
@@ -245,7 +245,7 @@ class TestPartialFailureIsolation:
                     "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
                 },
             ]
-            registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+            registry = ServerRegistry.from_settings(raw_servers)
 
             # Use a path that exists under BOTH path_mappings — the
             # canonical_path itself is in the writable media_root, but

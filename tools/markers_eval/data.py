@@ -12,9 +12,15 @@ EVIDENCE_ENV = "MARKERS_EVAL_EVIDENCE"
 
 
 def evidence_dir() -> Path:
-    """``$MARKERS_EVAL_EVIDENCE``, else ``docs/design/intro-credits/evidence`` in this checkout."""
+    """Return ``$MARKERS_EVAL_EVIDENCE``.
+
+    Raises:
+        SystemExit: The variable is unset; the truth sets are local-only, so there is no default.
+    """
     env = os.environ.get(EVIDENCE_ENV)
-    return Path(env) if env else Path(__file__).resolve().parents[2] / "docs/design/intro-credits/evidence"
+    if not env:
+        raise SystemExit(f"Set {EVIDENCE_ENV} to the folder holding the local marker truth sets.")
+    return Path(env)
 
 
 @dataclass(frozen=True)

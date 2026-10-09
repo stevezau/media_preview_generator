@@ -1068,7 +1068,7 @@ def media_search():
     raw_servers = settings.get("media_servers") or []
     if not isinstance(raw_servers, list):
         raw_servers = []
-    registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    registry = ServerRegistry.from_settings(raw_servers)
 
     targets = []
     for cfg in registry.configs():

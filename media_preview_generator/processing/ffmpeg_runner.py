@@ -751,8 +751,23 @@ def create_ffmpeg_runner(
                 # Controller stops still need their bounded decoder evidence.
                 # Keep the stop marker so SIGKILL is not mistaken for an OOM.
                 _save_ffmpeg_failure_log(video_file, proc.returncode, _without_metadata_tags(ffmpeg_output_lines))
+        # A chapter seek past the last video frame fails to open the encoder ("No filtered frames"). That is
+        # not a crash: the chapter caller retries just before the end or reports the chapter itself.
+        chapter_without_frame = (
+            chapter_start_ms is not None
+            and proc.returncode != 0
+            and any("No filtered frames" in line for line in ffmpeg_output_lines)
+            and not any("File ended prematurely" in line for line in ffmpeg_output_lines)
+        )
+        if chapter_without_frame and not stalled:
+            logger.info(
+                "No video frame at {:.3f}s in {} (exit code {}); the chapter step handles it.",
+                chapter_start_ms / 1000,
+                video_file,
+                proc.returncode,
+            )
         # Error logging (skip generic failure log when we stopped FFmpeg ourselves; already logged above)
-        if proc.returncode != 0 and not stalled and not gpu_cant_decode:
+        if proc.returncode != 0 and not stalled and not gpu_cant_decode and not chapter_without_frame:
             exit_diagnosis = _diagnose_ffmpeg_exit_code(proc.returncode, ffmpeg_output_lines)
             no_decoder = exit_diagnosis == "no_decoder"
             if no_decoder:

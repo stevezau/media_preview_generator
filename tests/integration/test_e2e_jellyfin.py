@@ -53,7 +53,7 @@ def jf_registry(jellyfin_credentials, media_root):
             "output": {"adapter": "jellyfin_trickplay", "width": 320, "frame_interval": 5},
         }
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration

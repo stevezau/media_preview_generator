@@ -2649,7 +2649,6 @@ class TestRegistryWiring:
                     "auth": {"method": "api_key", "api_key": "k"},
                 }
             ],
-            legacy_config=None,
         )
         servers = registry.servers()
         assert len(servers) == 1

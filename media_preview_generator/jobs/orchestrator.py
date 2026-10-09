@@ -898,7 +898,7 @@ def _build_multi_server_registry(config):
         )
         return None
     try:
-        return ServerRegistry.from_settings(raw_servers, legacy_config=config)
+        return ServerRegistry.from_settings(raw_servers)
     except Exception as exc:
         logger.warning(
             "Could not build the media-server registry for multi-server scan ({}: {}). "
@@ -2067,7 +2067,7 @@ def run_processing(
         except Exception:
             _media_servers_raw = []
         if _media_servers_raw:
-            registry = _ServerRegistry.from_settings(_media_servers_raw, legacy_config=config)
+            registry = _ServerRegistry.from_settings(_media_servers_raw)
         else:
             registry = _ServerRegistry.from_legacy_config(config)
 

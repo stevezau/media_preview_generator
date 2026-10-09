@@ -133,7 +133,7 @@ def emby_registry(emby_credentials, media_root):
             "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
         }
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=None)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 # ---------------------------------------------------------------------------

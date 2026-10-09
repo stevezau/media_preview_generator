@@ -181,7 +181,7 @@ class TestFrameCacheTtlExpiry:
                 "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
             }
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"

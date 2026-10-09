@@ -82,7 +82,7 @@ def dedup_registry(emby_credentials, plex_credentials, dedup_config, media_root)
             },
         },
     ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=dedup_config)
+    return ServerRegistry.from_settings(raw_servers)
 
 
 @pytest.mark.integration

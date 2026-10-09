@@ -72,7 +72,7 @@ class TestPartialFailure:
                 "output": {"adapter": "jellyfin_trickplay", "width": 320, "frame_interval": 5},
             },
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=base_config)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         emby_sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
@@ -145,7 +145,7 @@ class TestPathMappingEdgeCases:
                 "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
             }
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=base_config)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         matches = registry.find_owning_servers(canonical)
@@ -176,7 +176,7 @@ class TestPathMappingEdgeCases:
                 "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
             }
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=base_config)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         # A canonical path under "Movies-Archive" shouldn't match the
         # "Movies" library prefix even though the strings share /em-media/Movies.
@@ -213,7 +213,7 @@ class TestDisabledLibrary:
                 "output": {"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
             }
         ]
-        registry = ServerRegistry.from_settings(raw_servers, legacy_config=base_config)
+        registry = ServerRegistry.from_settings(raw_servers)
 
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         matches = registry.find_owning_servers(canonical)
