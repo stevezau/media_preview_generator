@@ -131,7 +131,7 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
         monkeypatch.setattr(job_runner, "wait_for_preceding_job", lambda *args: True)
         about_to_read = threading.Event()
 
-        def registry(config):  # the runner's last step before it reads the files
+        def registry():  # the runner's last step before it reads the files
             about_to_read.set()
             return env.registry
 
@@ -454,7 +454,7 @@ class TestExplicitSeasonRefreshThroughTheRealEngine:
         marker_settings = load_global(validate_global(raw, None)[0])
         registry = FakeRegistry({"plex-1": server_config("plex-1", ServerType.PLEX, root=str(tmp_path / "media"))})
         publisher = ready_publisher()
-        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: registry)
 
         def build_context(*, registry, config, priority, force=False, **kwargs):
             return PipelineContext(

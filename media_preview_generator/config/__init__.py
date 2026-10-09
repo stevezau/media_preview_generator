@@ -547,7 +547,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
     log_level = get_value("log_level", "LOG_LEVEL", "INFO", str).upper()
 
     # Initialize validation lists
-    missing_params = []
+    missing_params: list[str] = []
     validation_errors = []
 
     # Validate log level

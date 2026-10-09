@@ -271,8 +271,8 @@ VENDOR_MATRIX = [
         lambda: _vaapi_node_for("INTEL"),
         lambda: _vaapi_node_for("INTEL") is not None,
         "no Intel render node whose VAAPI device FFmpeg can open",
-        "hdr10_intel_qsv_frame.jpg",
-        id="intel_qsv",
+        "hdr10_intel_vaapi_frame.jpg",
+        id="intel_vaapi",
     ),
 ]
 

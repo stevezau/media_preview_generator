@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 from requests import RequestException
@@ -442,7 +442,7 @@ def publish_chapters(
 
     if plan.target is None or not plan.target.chapters:
         return plan.outcome
-    images = {}
+    images: dict[str, dict[str, Any]] = {}
     total = len(plan.target.chapters)
     processed = failed = 0
 

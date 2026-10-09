@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
+from typing import Any
 
 from loguru import logger
 
@@ -281,7 +282,7 @@ def stream_starts(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> Stream
         raise ProbeError(f"ffprobe returned an unexpected stream list for {path}")
     streams = [stream for stream in streams if isinstance(stream, dict)]
     fmt = data.get("format") or {}
-    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
+    audio: dict[str, Any] = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
     picture = next(
         (
             stream

@@ -30,7 +30,7 @@ def scan(monkeypatch):
     plex, emby = _cfg("plex-1", ServerType.PLEX), _cfg("emby-1", ServerType.EMBY)
     registry = MagicMock()
     registry.configs.return_value = [plex, emby]
-    monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda config: registry)
+    monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda: registry)
     listed = {
         "plex-1": [ProcessableItem("/media/tv/S/a.mkv", "plex-1", {"plex-1": "11"})],
         "emby-1": [ProcessableItem("/media/tv/S/b.mkv", "emby-1", {"emby-1": "22"})],

@@ -8,10 +8,11 @@ by the web layer (job_runner.py).
 import os
 import random
 import shutil
-from datetime import UTC, datetime
+from datetime import datetime
 
 from loguru import logger
 
+from ..markers.models import utcnow as _utcnow
 from ..processing.generator import ProcessingResult, clear_failures, log_failure_summary
 from ..processing.retry_queue import CHAPTER_PUBLISHER_STATUSES, publisher_needs_retry
 from ..scan_filters import ScanFilters
@@ -877,7 +878,7 @@ def _enumerate_items_for_servers(
     return all_items, enumeration_errors
 
 
-def _build_multi_server_registry(config):
+def _build_multi_server_registry():
     """Load the live :class:`ServerRegistry` for a multi-server scan/dispatch.
 
     Wraps the pair of ``settings_manager.get + ServerRegistry.from_settings``
@@ -951,7 +952,7 @@ def _run_full_scan_multi_server(
     """
     counts = {r.value: 0 for r in ProcessingResult}
 
-    registry = _build_multi_server_registry(config)
+    registry = _build_multi_server_registry()
     if registry is None:
         return counts
 
@@ -1089,7 +1090,7 @@ def _run_recently_added_multi_server(
     """
     counts = {r.value: 0 for r in ProcessingResult}
 
-    registry = _build_multi_server_registry(config)
+    registry = _build_multi_server_registry()
     if registry is None:
         return counts
 
@@ -1169,10 +1170,6 @@ def _run_recently_added_multi_server(
     )
 
 
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
 def _remember_item_origins(job_id: str, items: list, config, registry) -> None:
     """Keep the item ids of the files an unpinned Recently Added scan publishes to their own server only, in its job.
 
@@ -1217,7 +1214,7 @@ def _remember_item_origins(job_id: str, items: list, config, registry) -> None:
 
 
 def _queue_intro_credits_follow_ups(job_id: str, items: list, pin: str | None) -> None:
-    """Queue the Intro & Credits jobs for a Recently Added scan's files, as a webhook's are queued (spec §6.4 item 9).
+    """Queue the Intro & Credits jobs for a Recently Added scan's files, as a webhook's are queued.
 
     Each follows this preview job and publishes where the file's previews do (``markers.triggers.submit_follow_ups``).
     Queued before the dispatch, like a webhook's: a job revived after a restart lists its files again, and files a
@@ -1914,7 +1911,7 @@ def run_processing(
     work_context = {}
     try:
         if continuation is not None:
-            registry = _build_multi_server_registry(config)
+            registry = _build_multi_server_registry()
             if registry is None:
                 raise RuntimeError("Could not restore media server configuration")
             context = continuation.get("context") or {}

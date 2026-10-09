@@ -35,7 +35,7 @@ from .store import DecisionRow, FileRecord, MarkerStore
 from .versions import AnswerVersion, answer_versions
 
 # The marker types each server can show at all. The editor refuses a type no enabled owner is in this table for
-# (spec §6.3: Plex and Emby take no recap or preview); an Emby credits *end* is not covered here -- it is accepted and
+# (Plex and Emby take no recap or preview); an Emby credits *end* is not covered here -- it is accepted and
 # published start-only with ``publishers.emby.CREDITS_BEFORE_END_NOTE``, which is a per-field note, not a type.
 CAN_SHOW: dict[ServerType, tuple[str, ...]] = {
     ServerType.PLEX: ("intro", "credits"),
@@ -604,7 +604,7 @@ def _kept_on_server(
     job, so it is left out here too.
 
     Locks are not read here, as in ``plex_db._kept_types``: this answers only what the **setting** would keep, and
-    ``_plan`` takes the locked types back out (spec §5.5 rule 1) and says so instead.
+    ``_plan`` takes the locked types back out and says so instead.
     """
     kept = set()
     for mtype in MarkerType:
@@ -648,7 +648,7 @@ def _expected(
     when the item shows a locked version's exact times reads as "will replace" where the publisher keeps what the
     item shows: the safe way round.
     """
-    expected = []
+    expected: list[dict[str, Any]] = []
     for mtype in dict.fromkeys(m.type for m in wanted):
         want = [m for m in wanted if m.type is mtype]
         kept = [m for m in ours if m.type is mtype]
@@ -694,7 +694,7 @@ def _plan(
         if keep_own and current is not None
         else frozenset()
     )
-    # A marker the user adjusted or locked wins over "Keep Plex's" / "Keep Emby's" (spec §5.5 rule 1, §14 2026-09-20),
+    # A marker the user adjusted or locked wins over "Keep Plex's" / "Keep Emby's",
     # so the next publish replaces this server's own markers of a locked type instead of leaving them.
     locked = {m.type for m in wanted if m.locked}
     kept = would_keep - locked
@@ -948,7 +948,7 @@ def _degraded_row(cfg: ServerConfig, exc: Exception) -> dict:
 
 
 def _shortened_by(decision: Any, registry: Any) -> dict | None:
-    """The servers whose own markers shortened a decided credits/preview start (spec §5.5 rule 7), by name."""
+    """The servers whose own markers shortened a decided credits/preview start, by name."""
     server_ids = shortened_by(decision.reason) if decision.status is DecisionStatus.DECIDED else None
     if server_ids is None:
         return None

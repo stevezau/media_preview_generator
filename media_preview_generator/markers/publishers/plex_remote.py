@@ -26,13 +26,13 @@ from .base import Capability, CapabilityReport, DatabaseBusyError, ItemNotFoundE
 from .plex_db import (
     ItemRead,
     LocalPlexDb,
+    Part,
     PlexDatabase,
     ShownAnswer,
     ShownAsk,
     ShownBatch,
     WriteRequest,
     WriteResult,
-    _Part,
 )
 
 # The wire contract. Bumped only when a request or answer changes shape; an agent says which protocols it implements
@@ -140,7 +140,7 @@ def _as_opt_str(value: Any) -> str | None:
     return value
 
 
-def part_to_json(part: _Part) -> dict:
+def part_to_json(part: Part) -> dict:
     """Serialise one ``media_parts`` row."""
     return {
         "id": part.id,
@@ -152,7 +152,7 @@ def part_to_json(part: _Part) -> dict:
     }
 
 
-def part_from_json(raw: Any) -> _Part:
+def part_from_json(raw: Any) -> Part:
     """Read one ``media_parts`` row.
 
     Raises:
@@ -161,7 +161,7 @@ def part_from_json(raw: Any) -> _Part:
     if not isinstance(raw, dict):
         raise ValueError("part must be an object")
     try:
-        return _Part(
+        return Part(
             _as_int(raw["id"]),
             _as_int(raw["media_item_id"]),
             str(raw["file"]),

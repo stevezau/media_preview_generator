@@ -27,16 +27,6 @@
 
 /* Overview decision list */
 .decision-list { display: flex; flex-direction: column; gap: 0.5rem; }
-.decision-list .decision-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.65rem 0.85rem;
-    border: 1px solid var(--bs-border-color);
-    border-radius: 0.375rem;
-    background: var(--bs-tertiary-bg);
-}
-.decision-list .decision-scenario { flex: 1 1 50%; min-width: 0; }
 
 /* Overview status grid */
 
@@ -51,8 +41,8 @@
 
 /* History table */
 .history-table { font-size: 0.875rem; }
-.decision-list .decision-row { padding: 1rem 0; border: 0; border-bottom: 1px solid var(--bs-border-color); border-radius: 0; background: transparent; align-items: flex-start; }
-.decision-list .decision-scenario { line-height: 1.6; }
+.decision-list .decision-row { display: flex; gap: 0.75rem; padding: 1rem 0; border: 0; border-bottom: 1px solid var(--bs-border-color); border-radius: 0; background: transparent; align-items: flex-start; }
+.decision-list .decision-scenario { flex: 1 1 50%; min-width: 0; line-height: 1.6; }
 .upgrade-caveat { border-left-width: 1px; }
 @media (max-width: 767.98px) {
     .decision-list .decision-row { display: block; }

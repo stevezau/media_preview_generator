@@ -86,7 +86,7 @@ def test_forced_marker_job_parks_then_keeps_counts_and_verify_obligations(tmp_pa
         "get_job_gate": lambda: gate,
         "get_settings_manager": lambda: settings,
         "load_config": lambda: config,
-        "_build_multi_server_registry": lambda cfg: registry,
+        "_build_multi_server_registry": lambda: registry,
         "build_context": context,
         "kind_handlers": handlers,
         "run_detector_checks": lambda value: None,

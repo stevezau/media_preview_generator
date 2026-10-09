@@ -105,7 +105,7 @@ def _get_gpu_devices() -> list[tuple[str, str, str]]:
         List[Tuple[str, str, str]]: List of (card_name, render_device, driver) tuples
 
     """
-    devices = []
+    devices: list[tuple[str, str, str]] = []
     drm_dir = "/sys/class/drm"
 
     # Skip Linux DRM scan entirely on non-Linux platforms to avoid misleading logs

@@ -25,13 +25,13 @@ from media_preview_generator.markers.publishers.base import (
 from media_preview_generator.markers.publishers.plex_db import (
     ItemRead,
     LocalPlexDb,
+    Part,
     PlexMarkerPublisher,
     ShownAnswer,
     ShownAsk,
     ShownBatch,
     WriteRequest,
     WriteResult,
-    _Part,
 )
 from media_preview_generator.markers.publishers.plex_remote import AgentError, RemotePlexDb, plex_database
 from media_preview_generator.markers.settings import ServerMarkersSettings
@@ -42,7 +42,7 @@ TOKEN = "s3cret-key-nobody-should-see"
 URL = "http://plex-host.lan:9494"
 INTRO = Marker(T.INTRO, 11_000, 37_000, ("chapters",))
 CREDITS = Marker(T.CREDITS, 1_299_000, 1_320_000, ("chapters", "user"), locked=True)
-PART = _Part(1, 1, "/plexmedia/tv/S01E01.mkv", '{"pv:intros":"x","url":"y"}', None)
+PART = Part(1, 1, "/plexmedia/tv/S01E01.mkv", '{"pv:intros":"x","url":"y"}', None)
 
 
 def _deadline(seconds: float = 8.0) -> float:
@@ -99,7 +99,7 @@ class TestCodec:
 
     @pytest.mark.parametrize(
         "part",
-        [PART, _Part(3, 4, "/x.mkv", None, 42), _Part(5, 6, "/y.mkv", "pv%3Aintros=%7B%7D", None)],
+        [PART, Part(3, 4, "/x.mkv", None, 42), Part(5, 6, "/y.mkv", "pv%3Aintros=%7B%7D", None)],
         ids=["json-extra", "optimized-copy", "url-form-extra"],
     )
     def test_a_part_round_trips(self, part):

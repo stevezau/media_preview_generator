@@ -926,7 +926,7 @@ def get_media_items_by_paths(plex, config: Config, file_paths: list[str]) -> Web
 
     matched_items = []
     seen_keys = set()
-    matched_targets = set()
+    matched_targets: set[str] = set()
     excluded_by_path_targets: set[str] = set()
     matched_target_to_plex_path: dict[str, str] = {}
     selected_match_libraries_by_target: dict[str, set[str]] = {}
@@ -969,7 +969,7 @@ def get_media_items_by_paths(plex, config: Config, file_paths: list[str]) -> Web
 
     def _search_by_file_path(target_paths: set[str]) -> set[str]:
         """Resolve paths by querying Plex with file= basename filter. Returns matched targets."""
-        pass_matches = set()
+        pass_matches: set[str] = set()
         unresolved_inputs = [p for p in input_paths if not input_to_targets.get(p, set()).intersection(matched_targets)]
         basename_to_targets: dict[str, set[str]] = {}
         for p in unresolved_inputs:
@@ -1075,7 +1075,7 @@ def get_media_items_by_paths(plex, config: Config, file_paths: list[str]) -> Web
 
     def _search_excluded_sections_by_file_path(target_paths: set[str]):
         """Return target paths that match Plex items in excluded libraries (file-path search)."""
-        excluded_matches = set()
+        excluded_matches: set[str] = set()
         excluded_sections = set()
         unresolved_inputs = [p for p in input_paths if not input_to_targets.get(p, set()).intersection(matched_targets)]
         basename_to_targets: dict[str, set[str]] = {}

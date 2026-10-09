@@ -990,7 +990,7 @@ class WorkerPool:
             selected_gpus: List of (gpu_type, gpu_device, gpu_info) tuples for GPU workers
 
         """
-        self.workers = []
+        self.workers: list[Worker] = []
         self._workers_lock = threading.RLock()
         self._progress_lock = threading.Lock()  # Thread-safe progress updates
         self.selected_gpus = selected_gpus
@@ -999,7 +999,7 @@ class WorkerPool:
         self._next_type_index: dict[str, int] = defaultdict(lambda: 1)
         # Deferred scale-down requests by worker type; busy workers are retired
         # when they finish their current task.
-        self._pending_removals = defaultdict(int)
+        self._pending_removals: defaultdict[str, int] = defaultdict(int)
         # Optional event set by worker threads on task completion to wake
         # the dispatch loop immediately (set by JobDispatcher).
         self._worker_done_event: threading.Event | None = None

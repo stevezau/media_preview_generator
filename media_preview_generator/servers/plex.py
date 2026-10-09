@@ -1020,7 +1020,7 @@ class PlexServer(MediaServer):
             }
         )
 
-        # --- Intro & Credits (spec §7 item 6) -----------------------
+        # --- Intro & Credits -----------------------
         # Built from the facts the Intro & Credits tab already asked for, never a second probe — except Plex's
         # per-library "Intro markers" / "Credits markers" settings, read fresh (see markers_readiness.marker_facts);
         # a server with the feature off gets the one row that says so and nothing else (plan P-R6).

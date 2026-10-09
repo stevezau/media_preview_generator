@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from . import rule_j
-from .rule_j import Row, _inside, boxes_of
+from .rule_j import Row, boxes_of, inside
 
 # The card the start lands on is found in this much of the file from the start (1 fps): the longest card measured stays
 # 20 s (A Beautiful Imperfection's epilogue, its sentences appearing one by one).
@@ -59,7 +59,7 @@ class Card:
 
 
 def _within(boxes: Sequence, holders: Sequence) -> bool:
-    return all(any(_inside(box, holder) >= rule_j.OVERLAY_CONTAINMENT for holder in holders) for box in boxes)
+    return all(any(inside(box, holder) >= rule_j.OVERLAY_CONTAINMENT for holder in holders) for box in boxes)
 
 
 def _continues(before: Sequence, after: Sequence) -> bool:

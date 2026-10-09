@@ -6,11 +6,8 @@ html {
     margin-bottom: 1.5rem;
 }
 
-/* Shared dashboard components (.pill, .ibtn, .seg) are scoped to .dashboard-layout, so this page restates the
-   few it needs under .automation-page, using the same tokens. */
-.automation-page .pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); white-space: nowrap; letter-spacing: normal; text-transform: none; }
-.automation-page .pill.ok { background: var(--ok-soft); color: var(--ok); }
-.automation-page .pill.warn { background: var(--warn-soft); color: var(--warn); }
+/* Shared dashboard components (.ibtn, .seg) are scoped to .dashboard-layout, so this page restates the
+   few it needs under .automation-page, using the same tokens. (.pill is shared in style.css.) */
 .automation-page .ibtn { width: 32px; height: 32px; display: inline-grid; place-items: center; flex: none; padding: 0; border: 1px solid transparent; border-radius: var(--radius-xs); background: transparent; color: var(--muted); transition: background-color .16s ease-out, color .16s ease-out; }
 .automation-page .ibtn:hover { background: var(--inset); color: var(--bs-body-color); }
 .automation-page .ibtn.danger:hover { background: var(--bad-soft); color: var(--bad); }

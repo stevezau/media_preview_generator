@@ -16,6 +16,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
+from typing import Any
 
 from flask import Blueprint, g, jsonify, request
 from loguru import logger
@@ -1948,7 +1949,7 @@ def _resolve_plex_source_server_id(payload: dict) -> str | None:
     """
     pin_id = (request.args.get("server_id") or "").strip() or None
 
-    raw_servers = []
+    raw_servers: list[dict[str, Any]] = []
     try:
         raw_servers = get_settings_manager().get("media_servers") or []
     except Exception as exc:

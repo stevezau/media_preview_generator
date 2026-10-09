@@ -359,9 +359,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 LOCKED_BY_USER = "locked by user"
 # The reason a just-unlocked type carries until the next detection run decides it again (`unlock_markers`).
 UNLOCKED_PENDING = "unlocked; the next run decides this type again"
-# The status older rules stored for a type they couldn't settle ("Needs review"). Nothing writes it any
-# more: a stored row reads as no evidence (``_status``) until the file is decided again (``upgrade._migrate_to_v20``
-# queues that for the files on disk), and a decided marker it never pulled stays as it is.
+# The status older rules stored for a type they couldn't settle ("Needs review"). Nothing writes it any more,
+# but old databases still hold such rows: kept so they load, read as no evidence (``_status``) until the file is
+# decided again.
 LEGACY_NEEDS_REVIEW = "needs_review"
 
 

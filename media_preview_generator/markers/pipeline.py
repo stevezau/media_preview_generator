@@ -1,4 +1,4 @@
-"""Intro & Credits per-file pipeline (spec §6.2).
+"""Intro & Credits per-file pipeline.
 
 owners → identity → kind → evidence in the user's source order (a normal run stops asking once every enabled type is
 decided by more than chapters alone, but still reads a server never asked for the file; a forced re-detect asks every
@@ -189,7 +189,7 @@ PARSER_VERSIONS = {
 _STORED_LOOKUPS = ("ok", "no_data")
 _CHAPTERS_AND_SERVERS = frozenset({Source.CHAPTERS.value, *(s.value for s in SERVER_SOURCES)})
 # An intro season audio decided alone (with the previous season's hint, or beside agreeing server markers): an online
-# answer may still disagree and send it to review, so the sources keep being asked on their schedule (owner, 2026-09-24).
+# answer may still disagree and send it to review, so the sources keep being asked on their schedule.
 _SEASON_AUDIO_AND_SERVERS = frozenset(
     {Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value, *(s.value for s in SERVER_SOURCES)}
 )
@@ -280,7 +280,7 @@ class DetectorAnswer:
 
 @dataclass(frozen=True)
 class LocalDetectorSpec:
-    """A detector that reads the file itself (phase 2: season audio; phase 3: credit text).
+    """A detector that reads the file itself (season audio, credit text).
 
     Attributes:
         source: The source whose place in the user's order the detector runs at.
@@ -307,7 +307,7 @@ class LocalDetectorSpec:
             never).
         checks_chapters: It reads the file even for a type chapters decided alone, so the decision rules can check the
             chapter against the file itself (credit text: a release's "Credits" chapter is often seconds to minutes
-            off the first card, spec §5.5 rule 3).
+            off the first card).
         compared: ``compared(file, ctx)``: whether its answer at this version had something to compare the file with,
             so finding nothing there checked a marker (season audio: another episode of the season has a fingerprint);
             None: always. A marker published before a rule change is taken off only by a detector that did
@@ -375,7 +375,7 @@ class PipelineContext:
             when the job started; consent is read from here before every write.
         recheck_empty_server_markers: Check servers: a server whose stored answer for a file is empty (or unusable) is
             read again on its backoff even when everything is decided, since its own detection may have run since
-            (spec §5.5 rule 7 shortening). With a type still undecided, an unusable answer is read again as on any run,
+            (server-marker shortening). With a type still undecided, an unusable answer is read again as on any run,
             and an empty one a day old waits for the backoff too; a re-read that fails still counts.
         chromaprint: What the job's check for an ffmpeg with chromaprint found. Without a registered season audio
             detector, any state but UNKNOWN keeps stored season audio answers from helping decide (``_decide``);
@@ -1190,7 +1190,7 @@ def _decide(
     """
     order = _decision_order(ctx.settings)
     evidence = ctx.store.get_evidence(rec.id)
-    # A lock always wins (spec §5.5 rule 1): the editor only ever writes a lock the user asked for, and dropping it here
+    # A lock always wins: the editor only ever writes a lock the user asked for, and dropping it here
     # would silently republish over that edit with no way back (the detected answer a lock replaced isn't stored). To
     # let detection decide a type again the user unlocks it.
     locked = ctx.store.get_locked(rec.id)
@@ -1226,9 +1226,9 @@ def _decide(
     if ctx.credits_text is TextDetState.UNKNOWN:
         unavailable -= {Source.CREDITS_TEXT.value}
     # A local detector with nothing stored stays in the order only while it may still answer this file: a rule waiting
-    # for its answer (credit text checking a credits chapter SkipDB contradicts, spec §5.5 rule 3) must not wait for
+    # for its answer (credit text checking a credits chapter SkipDB contradicts) must not wait for
     # a detector that can't run here, that found nothing at its version now, or that failed to read the file as it is
-    # (the owner's rule: decisions are automatic, never an open-ended wait). An older version's
+    # (decisions are automatic, never an open-ended wait). An older version's
     # "nothing" is read again (``_detector_pending``), so the rule waits for that.
     answered = {c.source.value for c in evidence}
     order = tuple(
@@ -1281,7 +1281,7 @@ def _carry_over(
     owners: list[_Owning],
     decisions: dict[MarkerType, TypeDecision],
 ) -> dict[MarkerType, TypeDecision]:
-    """The file's final decisions with the carry-over (spec §5.5 rule 15, ``carry_over``): a type no source answered
+    """The file's final decisions with the carry-over (``carry_over``): a type no source answered
     for keeps what the file it replaced had decided, at the same length, unless only content detectors that read this
     file now decided it. The servers' item ids are asked only when a type has no evidence (publishing asks them next
     anyway); a server that can't name the item, or a replaced file's disk that can't tell, leaves a marker carried
@@ -1442,8 +1442,8 @@ def _rests_only_on(decision: TypeDecision, sources: frozenset[str]) -> bool:
 
 def _decided_beyond_chapters(decision: TypeDecision) -> bool:
     """Decided, and not by chapters alone nor by season audio alone: two agreeing sources may still veto a chapter
-    (spec §5.5 rule 3), and one disagreeing source sends a season-audio intro to review (owner, 2026-09-24). A marker
-    carried over from a replaced file (rule 15) stands only until the file has evidence of its own.
+    and one disagreeing source sends a season-audio intro to review. A marker
+    carried over from a replaced file stands only until the file has evidence of its own.
 
     A chapter or season audio answer that markers already on servers shortened or confirmed still stands alone: server
     markers never decide on their own (rule 7).
@@ -1839,7 +1839,7 @@ def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | 
 
 
 def _counted_as(ctx: PipelineContext, owner: _Owning, found: list[Candidate]) -> tuple[Source, list[Candidate], str]:
-    """The source a server's markers count as, the markers, and the detail stored with them (spec §5.5 rule 8).
+    """The source a server's markers count as, the markers, and the detail stored with them.
 
     Markers on a server with an importer plugin are that database's copy; on one whose plugin list couldn't be read
     they may be, so they count as "none there" and are read again like an empty answer.
@@ -1870,8 +1870,8 @@ def _read_server_markers(
         servers: The file's owning servers and their item ids.
         refresh: A forced run: read every server we never published to.
         first_read_only: Every wanted type is already decided, so only a server never asked for this file (or asked by
-            an older reader), and not showing our markers, is read -- its own markers can still shorten decided credits
-            (spec §5.5 rule 7). An empty or unusable answer isn't asked again on such a run, unless the job checks
+            an older reader), and not showing our markers, is read -- its own markers can still shorten decided credits.
+            An empty or unusable answer isn't asked again on such a run, unless the job checks
             servers (``ctx.recheck_empty_server_markers``): then it is on its backoff
             (``MarkerStore.server_recheck_due``). A Plex answer stored while Plex couldn't tell whether its markers
             were made for this file is read again once it can (``_staleness_known_now``). A server showing our markers
@@ -2112,7 +2112,7 @@ def _own_types_now(
 
     Not from stored evidence: a stored answer with markers is never read again, and a server that lost its marker must
     be seen on the next run. The evidence read shares this answer (``_ItemServers.markers``), so a server the run
-    reads anyway is asked once. "Own" is rule 7's (spec §5.5), from the same code the evidence comes from: the reader
+    reads anyway is asked once. "Own" comes from the same code the evidence comes from: the reader
     answers None for another cut (a Plex item with a version more than 2 s apart, another version's Emby item), an
     importer plugin's copy counts as its database (``_counted_as``), and Jellyfin's and Emby's readers leave ours out.
     Plex can't tell ours from its own, so a type this app has on the item or left there from this file is never the
@@ -2179,7 +2179,7 @@ def _kept_by_every_destination(
     undecided has no answer of ours (``stale_counts``: see ``_own_types_now``).
 
     A type qualifies when every server the file's markers go to keeps its own markers ("Keep Plex's", "Keep Emby's")
-    and shows its own of that type now; a locked type never does (a lock wins, spec §5.5 rule 1). Worked out on every
+    and shows its own of that type now; a locked type never does (a lock wins). Worked out on every
     run from the saved settings and what the servers show, and never stored, so switching a server to "Use ours", a
     server losing its marker or a new destination without one reads the file again. Every server's setting is checked
     before any server is asked.
@@ -2216,7 +2216,7 @@ def _row(
     reason_code: str | None = None,
     kept_types: frozenset[MarkerType] = frozenset(),
 ) -> dict:
-    row = {
+    row: dict[str, Any] = {
         "server_id": cfg.id,
         "server_name": cfg.name,
         "server_type": cfg.type.value,
@@ -2308,7 +2308,7 @@ def _acquire_briefly(lock: threading.Lock, wait_s: float) -> bool:
 
 
 def identity_changed(rec: FileRecord) -> bool:
-    """Whether the file on disk is no longer the one this record describes (spec §6.1: path + size + mtime).
+    """Whether the file on disk is no longer the one this record describes (path + size + mtime).
 
     Args:
         rec: The stored file record.
@@ -2496,7 +2496,7 @@ def _publish_to(
     if not report.ready:
         return _not_written(ServerStatus.SKIPPED, report.message or report.state.value, name=publisher.name)
     if _plex_pass_unknown(report):
-        # Plex serves no markers without a Pass (spec §6.3). Usually Plex is restarting: a file a few seconds later
+        # Plex serves no markers without a Pass. Usually Plex is restarting: a file a few seconds later
         # asks again and the job retries this one.
         return _not_written(
             ServerStatus.WAITING,
@@ -2585,7 +2585,7 @@ def _publish_to(
                 if shown is None:
                     return {**_up_to_date(item_row.kept_types), READ_BACK_FAILED: True}
                 # A kept type goes back to ours once the server is set to use ours — and once the user locks it, since
-                # a marker the user adjusted or locked wins over "Keep Plex's" / "Keep Emby's" (spec §5.5 rule 1).
+                # a marker the user adjusted or locked wins over "Keep Plex's" / "Keep Emby's".
                 # A lock alone doesn't change the decided times, so without this the unchanged test above would leave
                 # the server showing its own markers for a type the user just took over.
                 released = bool(item_row.kept_types) and (
@@ -2676,7 +2676,7 @@ def _publish_to(
 
         def _says_override(row: dict) -> dict:
             # The user's lock took the server's own markers off it although the server keeps its own: the row names
-            # the types so the Inspector and the editor can say which servers that happened on (spec §5.5 rule 1).
+            # the types so the Inspector and the editor can say which servers that happened on.
             if not replaced_own:
                 return row
             return {**row, REPLACED_OWN: [t.value for t in MarkerType if t in replaced_own]}
@@ -3032,8 +3032,8 @@ def _attempt(
     # A normal run stops asking once stored answers decide everything beyond chapters alone (answers from an older
     # parser, reader or detector version are still asked again; ``_detector_pending`` says when a detector runs); a
     # forced run asks every source and runs every detector once, so no stale answer is left behind. A server never
-    # asked for this file is still read once everything is decided: its own markers can shorten decided credits
-    # (spec §5.5 rule 7); once we publish to a server its markers are never read again.
+    # asked for this file is still read once everything is decided: its own markers can shorten decided credits.
+    # Once we publish to a server its markers are never read again.
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types, intro_limit)
     lookup_ids: MediaIds | None = None

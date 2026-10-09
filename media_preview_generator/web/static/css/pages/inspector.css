@@ -142,15 +142,8 @@ html[data-bs-theme="light"] .insp {
 .insp-card {
     background: var(--insp-card);
     border: 1px solid var(--insp-line);
-    border-radius: 14px;
-    padding: 22px 24px;
 }
 
-.insp-card-title,
-.insp-card-heading {
-    font-size: 16px;
-    font-weight: 600;
-}
 
 .insp-card-heading {
     padding-bottom: 8px;
@@ -805,7 +798,6 @@ button.insp-row:focus-visible {
 .insp-stats {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 16px;
 }
 
 .insp-stat {
@@ -1878,7 +1870,6 @@ button.insp-frame:focus-visible {
 .insp-grid-2 {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 20px;
     align-items: start;
 }
 
@@ -1892,15 +1883,11 @@ button.insp-frame:focus-visible {
 }
 
 .insp-ev-icon {
-    width: 24px;
-    height: 24px;
-    border-radius: 12px;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 12px;
     box-sizing: border-box;
-    border: 1px solid var(--insp-control);
     color: var(--insp-faint);
 }
 

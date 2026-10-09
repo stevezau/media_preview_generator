@@ -1556,34 +1556,14 @@ class JellyfinServer(EmbyApiClient):
         # Probe plugin first — all downstream checks depend on its state.
         plugin = self.check_plugin_installed()
         plugin_installed = bool(plugin.get("installed"))
-
         # Fetch library options up-front so the plugin section can decide
         # whether plugin absence is a real break (any library in Mode A —
         # ``ExtractTrickplayImagesDuringLibraryScan = false`` — requires
         # the plugin to adopt our tiles; without it, scrubbing previews
         # never render). The library-settings section below reuses the
         # same ``folders`` payload.
-        try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
-        except Exception as exc:
-            logger.debug("Library flags probe failed for {!r}: {}", self.name, exc)
-            folders = []
-
-        mode_a_library_names: list[str] = []
-        if isinstance(folders, list):
-            for raw in folders:
-                if not isinstance(raw, dict):
-                    continue
-                # Issue #237: music/photo libraries don't influence
-                # plugin-required logic — they can't be in Mode A
-                # meaningfully (no video tiles to register).
-                if not is_video_library_folder(raw):
-                    continue
-                options = raw.get("LibraryOptions") or {}
-                if options.get("ExtractTrickplayImagesDuringLibraryScan") is False:
-                    mode_a_library_names.append(str(raw.get("Name") or "").strip() or "library")
+        folders = self._fetch_library_folders()
+        mode_a_library_names = self._mode_a_library_names(folders)
         # Off-media mode requires the plugin unconditionally: the app writes
         # tiles into Jellyfin's data folder and the plugin is the only thing
         # that registers them there with the correct ThumbnailCount.
@@ -1599,8 +1579,85 @@ class JellyfinServer(EmbyApiClient):
         plugin_required = bool(mode_a_library_names) or off_media or markers_on
 
         sections: list[dict[str, Any]] = []
+        connection_sections, connection_ok, version_ok = self._connection_version_sections()
+        sections.extend(connection_sections)
 
-        # --- Connection + version (combined into one section) ---------
+        plugin_sections, plugin_ok = self._plugin_sections(
+            plugin, plugin_installed, plugin_required, mode_a_library_names, off_media, marker_facts
+        )
+        sections.extend(plugin_sections)
+
+        if off_media:
+            sections.append(self._config_folder_section())
+
+        library_section, library_section_ok = self._library_settings_section(folders, plugin_installed)
+        sections.append(library_section)
+
+        server_section, server_ok = self._server_options_section()
+        sections.append(server_section)
+
+        sections.append(self._vendor_extraction_section(plugin_installed))
+
+        scheduled_section = self._scheduled_trickplay_section(plugin_installed)
+        if scheduled_section is not None:
+            sections.append(scheduled_section)
+        sched_section_ok = scheduled_section is None or bool(scheduled_section["ok"])
+
+        overall_ok = (
+            connection_ok and version_ok and plugin_ok and library_section_ok and server_ok and sched_section_ok
+        )
+        return {
+            "vendor": "jellyfin",
+            "overall_ok": overall_ok,
+            "sections": sections,
+        }
+
+    def _fetch_library_folders(self) -> Any:
+        """Fetch ``/Library/VirtualFolders``, returning ``[]`` when the probe fails.
+
+        Returns:
+            The decoded JSON payload (normally a list of folder dicts).
+        """
+        try:
+            response = self._request("GET", "/Library/VirtualFolders")
+            response.raise_for_status()
+            folders = response.json()
+        except Exception as exc:
+            logger.debug("Library flags probe failed for {!r}: {}", self.name, exc)
+            folders = []
+        return folders
+
+    def _mode_a_library_names(self, folders: Any) -> list[str]:
+        """Names of video libraries with scan-time trickplay extraction disabled (Mode A).
+
+        Args:
+            folders: Payload from :meth:`_fetch_library_folders`.
+
+        Returns:
+            Library names, in folder order.
+        """
+        mode_a_library_names: list[str] = []
+        if isinstance(folders, list):
+            for raw in folders:
+                if not isinstance(raw, dict):
+                    continue
+                # Issue #237: music/photo libraries don't influence
+                # plugin-required logic — they can't be in Mode A
+                # meaningfully (no video tiles to register).
+                if not is_video_library_folder(raw):
+                    continue
+                options = raw.get("LibraryOptions") or {}
+                if options.get("ExtractTrickplayImagesDuringLibraryScan") is False:
+                    mode_a_library_names.append(str(raw.get("Name") or "").strip() or "library")
+        return mode_a_library_names
+
+    def _connection_version_sections(self) -> tuple[list[dict[str, Any]], bool, bool]:
+        """Build the ``connection`` and ``version`` sections.
+
+        Returns:
+            ``(sections, connection_ok, version_ok)``.
+        """
+        sections: list[dict[str, Any]] = []
         version_value, connection_reason = self._probe_system_version()
         connection_ok = not connection_reason
         version_ok = True
@@ -1682,7 +1739,34 @@ class JellyfinServer(EmbyApiClient):
                 ],
             }
         )
+        return sections, connection_ok, version_ok
 
+    def _plugin_sections(
+        self,
+        plugin: dict[str, Any],
+        plugin_installed: bool,
+        plugin_required: bool,
+        mode_a_library_names: list[str],
+        off_media: bool,
+        marker_facts: Any,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Build the ``plugin`` section (plus the Intro & Credits off section when markers are disabled).
+
+        Args:
+            plugin: Result of :meth:`check_plugin_installed`.
+            plugin_installed: Whether the plugin is installed.
+            plugin_required: Whether Mode A libraries, off-media or markers need the plugin.
+            mode_a_library_names: Libraries with scan-time extraction disabled.
+            off_media: Whether off-media trickplay is on for this server.
+            marker_facts: Intro & Credits facts for this server.
+
+        Returns:
+            ``(sections, plugin_ok)``.
+        """
+        from ..markers import readiness as markers_readiness
+
+        markers_on = marker_facts.on
+        sections: list[dict[str, Any]] = []
         # --- Plugin section ------------------------------------------
         # User-facing labels avoid "Mode A/B" jargon — users don't know
         # what the modes mean and the row label is the first thing they
@@ -1853,108 +1937,122 @@ class JellyfinServer(EmbyApiClient):
         )
         if marker_facts.enabled is False:
             sections.append(markers_readiness.off_section())
+        return sections, plugin_ok
 
+    def _config_folder_section(self) -> dict[str, Any]:
+        """Build the off-media ``jellyfin_config_folder`` section (read-only mount probe).
+
+        Returns:
+            The section dict.
+        """
         # --- Off-media config-dir mount (off-media only) -------------
         # In off-media mode this app writes tiles into Jellyfin's config dir,
         # so that dir must be mounted into THIS container read-write. Mirror
         # Plex's config-folder probe exactly: a pure read-only check —
         # os.access(W_OK) only, never a test-write/tempfile/chmod.
-        if off_media:
-            config_folder = str((self._config.output or {}).get("jellyfin_config_folder") or "").strip()
-            folder_ok = True
-            folder_current = "unset"
-            folder_reason: str | None = None
-            if config_folder:
-                exists = os.path.isdir(config_folder)
-                writable = exists and os.access(config_folder, os.W_OK)
-                # "Right folder" check — mirrors Plex's Media/localhost probe.
-                # A real Jellyfin config dir holds the data/ folder off-media
-                # trickplay writes into (<config>/<trickplay_root>/…), plus
-                # plugins/ and config/. Pointing this at a media folder or an
-                # unrelated path is the common mistake — catch it here rather
-                # than silently writing tiles Jellyfin will never find. Shared
-                # with the inline field validator via looks_like_jellyfin_config_dir
-                # so the two can never disagree. (It can't catch pointing one
-                # level too deep, e.g. <config>/data, since that still nests
-                # data/ + plugins/ — only a wrong/unrelated root is rejected.)
-                from ..output.jellyfin_trickplay import (
-                    jellyfin_config_data_marker,
-                    looks_like_jellyfin_config_dir,
-                )
-
-                _root = self.offmedia_trickplay_root or "data/trickplay"
-                data_marker = jellyfin_config_data_marker(_root)
-                looks_like_jellyfin = looks_like_jellyfin_config_dir(config_folder, _root)
-                if not exists:
-                    folder_ok = False
-                    folder_current = "missing"
-                    folder_reason = (
-                        f"{config_folder!r} does not exist in this container. Verify the "
-                        "Jellyfin config dir is bind-mounted here at this path."
-                    )
-                elif not writable:
-                    folder_ok = False
-                    folder_current = "read-only"
-                    folder_reason = (
-                        f"{config_folder!r} is not writable by this process. "
-                        "Check the Docker mount (not :ro) and PUID/PGID permissions."
-                    )
-                elif not looks_like_jellyfin:
-                    folder_ok = False
-                    folder_current = "wrong folder"
-                    folder_reason = (
-                        f"{config_folder!r} exists and is writable, but it doesn't look like "
-                        f"Jellyfin's config directory — none of '{data_marker}/', 'plugins/', 'config/' "
-                        "(or other standard Jellyfin files) are inside it. Point this at the folder "
-                        "Jellyfin uses as its config dir (the one mounted into Jellyfin as /config, "
-                        f"containing '{data_marker}/'), not a media folder or unrelated path."
-                    )
-                else:
-                    folder_current = "writable"
-            else:
-                folder_ok = False
-                folder_reason = (
-                    "Off-media trickplay needs the Jellyfin config folder set to this "
-                    "container's read-write mount of Jellyfin's config dir."
-                )
-            sections.append(
-                {
-                    "id": "jellyfin_config_folder",
-                    "title": "Jellyfin config folder (off-media)",
-                    "docs_anchor": "jellyfin-config-folder",
-                    "ok": folder_ok,
-                    "severity": "critical" if not folder_ok else "info",
-                    "checks": [
-                        {
-                            "id": "config_folder_writable",
-                            "label": "Config dir mounted read-write & valid",
-                            "docs_anchor": "jellyfin-config-folder",
-                            "tooltip": "Off-media writes trickplay into Jellyfin's config dir",
-                            "explanation": (
-                                "<p><strong>Why:</strong> with 'Store trickplay off the media drive' on, "
-                                "this app writes tile sheets into Jellyfin's data folder "
-                                "(<code>&lt;config&gt;/data/trickplay/…</code>) instead of next to the media. "
-                                "That means Jellyfin's config dir must be bind-mounted into THIS container "
-                                "read-write, and the 'Jellyfin config folder' setting must point at that mount.</p>"
-                                "<p>This is a read-only probe — it checks the path (1) exists, (2) is writable "
-                                "(<code>os.access</code>), and (3) actually looks like Jellyfin's config dir "
-                                "(contains <code>data/</code>, <code>plugins/</code>, <code>config/</code>, or "
-                                "other standard Jellyfin files) so a wrong path is caught instead of silently "
-                                "writing tiles Jellyfin can't find. "
-                                "It never writes a test file.</p>"
-                            ),
-                            "ok": folder_ok,
-                            "severity": "critical" if not folder_ok else "info",
-                            "current": folder_current,
-                            "recommended": "writable",
-                            "actions": {},  # read-only / manual — fix the Docker mount + setting
-                            "reason": folder_reason,
-                            "meta": {"path": config_folder},
-                        }
-                    ],
-                }
+        config_folder = str((self._config.output or {}).get("jellyfin_config_folder") or "").strip()
+        folder_ok = True
+        folder_current = "unset"
+        folder_reason: str | None = None
+        if config_folder:
+            exists = os.path.isdir(config_folder)
+            writable = exists and os.access(config_folder, os.W_OK)
+            # "Right folder" check — mirrors Plex's Media/localhost probe.
+            # A real Jellyfin config dir holds the data/ folder off-media
+            # trickplay writes into (<config>/<trickplay_root>/…), plus
+            # plugins/ and config/. Pointing this at a media folder or an
+            # unrelated path is the common mistake — catch it here rather
+            # than silently writing tiles Jellyfin will never find. Shared
+            # with the inline field validator via looks_like_jellyfin_config_dir
+            # so the two can never disagree. (It can't catch pointing one
+            # level too deep, e.g. <config>/data, since that still nests
+            # data/ + plugins/ — only a wrong/unrelated root is rejected.)
+            from ..output.jellyfin_trickplay import (
+                jellyfin_config_data_marker,
+                looks_like_jellyfin_config_dir,
             )
 
+            _root = self.offmedia_trickplay_root or "data/trickplay"
+            data_marker = jellyfin_config_data_marker(_root)
+            looks_like_jellyfin = looks_like_jellyfin_config_dir(config_folder, _root)
+            if not exists:
+                folder_ok = False
+                folder_current = "missing"
+                folder_reason = (
+                    f"{config_folder!r} does not exist in this container. Verify the "
+                    "Jellyfin config dir is bind-mounted here at this path."
+                )
+            elif not writable:
+                folder_ok = False
+                folder_current = "read-only"
+                folder_reason = (
+                    f"{config_folder!r} is not writable by this process. "
+                    "Check the Docker mount (not :ro) and PUID/PGID permissions."
+                )
+            elif not looks_like_jellyfin:
+                folder_ok = False
+                folder_current = "wrong folder"
+                folder_reason = (
+                    f"{config_folder!r} exists and is writable, but it doesn't look like "
+                    f"Jellyfin's config directory — none of '{data_marker}/', 'plugins/', 'config/' "
+                    "(or other standard Jellyfin files) are inside it. Point this at the folder "
+                    "Jellyfin uses as its config dir (the one mounted into Jellyfin as /config, "
+                    f"containing '{data_marker}/'), not a media folder or unrelated path."
+                )
+            else:
+                folder_current = "writable"
+        else:
+            folder_ok = False
+            folder_reason = (
+                "Off-media trickplay needs the Jellyfin config folder set to this "
+                "container's read-write mount of Jellyfin's config dir."
+            )
+        return {
+            "id": "jellyfin_config_folder",
+            "title": "Jellyfin config folder (off-media)",
+            "docs_anchor": "jellyfin-config-folder",
+            "ok": folder_ok,
+            "severity": "critical" if not folder_ok else "info",
+            "checks": [
+                {
+                    "id": "config_folder_writable",
+                    "label": "Config dir mounted read-write & valid",
+                    "docs_anchor": "jellyfin-config-folder",
+                    "tooltip": "Off-media writes trickplay into Jellyfin's config dir",
+                    "explanation": (
+                        "<p><strong>Why:</strong> with 'Store trickplay off the media drive' on, "
+                        "this app writes tile sheets into Jellyfin's data folder "
+                        "(<code>&lt;config&gt;/data/trickplay/…</code>) instead of next to the media. "
+                        "That means Jellyfin's config dir must be bind-mounted into THIS container "
+                        "read-write, and the 'Jellyfin config folder' setting must point at that mount.</p>"
+                        "<p>This is a read-only probe — it checks the path (1) exists, (2) is writable "
+                        "(<code>os.access</code>), and (3) actually looks like Jellyfin's config dir "
+                        "(contains <code>data/</code>, <code>plugins/</code>, <code>config/</code>, or "
+                        "other standard Jellyfin files) so a wrong path is caught instead of silently "
+                        "writing tiles Jellyfin can't find. "
+                        "It never writes a test file.</p>"
+                    ),
+                    "ok": folder_ok,
+                    "severity": "critical" if not folder_ok else "info",
+                    "current": folder_current,
+                    "recommended": "writable",
+                    "actions": {},  # read-only / manual — fix the Docker mount + setting
+                    "reason": folder_reason,
+                    "meta": {"path": config_folder},
+                }
+            ],
+        }
+
+    def _library_settings_section(self, folders: Any, plugin_installed: bool) -> tuple[dict[str, Any], bool]:
+        """Build the per-library per-flag ``library_settings`` section.
+
+        Args:
+            folders: Payload from :meth:`_fetch_library_folders`.
+            plugin_installed: Whether the Bridge plugin is installed.
+
+        Returns:
+            ``(section, library_section_ok)``.
+        """
         # --- Library settings — per-library per-flag rows ------------
         # ``folders`` was fetched above (needed for the plugin section's
         # Mode A detection). Reuse it here instead of hitting Jellyfin twice.
@@ -2018,17 +2116,22 @@ class JellyfinServer(EmbyApiClient):
                         }
                     )
 
-        sections.append(
-            {
-                "id": "library_settings",
-                "title": "Library settings",
-                "docs_anchor": "library-settings",
-                "ok": library_section_ok,
-                "severity": library_severity,
-                "checks": library_checks,
-            }
-        )
+        library_section = {
+            "id": "library_settings",
+            "title": "Library settings",
+            "docs_anchor": "library-settings",
+            "ok": library_section_ok,
+            "severity": library_severity,
+            "checks": library_checks,
+        }
+        return library_section, library_section_ok
 
+    def _server_options_section(self) -> tuple[dict[str, Any], bool]:
+        """Build the ``server_options`` section (server-wide TrickplayOptions geometry).
+
+        Returns:
+            ``(section, server_ok)``.
+        """
         # --- Server-wide TrickplayOptions geometry -------------------
         options_check = self._check_trickplay_options()
         server_ok = bool(options_check.get("ok"))
@@ -2050,50 +2153,58 @@ class JellyfinServer(EmbyApiClient):
                     ),
                 },
             }
-        sections.append(
-            {
-                "id": "server_options",
-                "title": "Server trickplay options",
-                "docs_anchor": "trickplay-options",
-                "ok": server_ok,
-                "severity": "critical" if not server_ok else "info",
-                "checks": [
-                    {
-                        "id": "trickplay_geometry",
-                        "label": "Tile geometry matches adapter",
-                        "docs_anchor": "trickplay-options",
-                        "tooltip": "Server tile geometry must match what this app writes",
-                        "explanation": (
-                            "<p><strong>What it checks:</strong> Jellyfin's server-wide "
-                            "<code>TrickplayOptions</code> — tile width, tile height, frame interval, "
-                            "and resolution list — match the geometry this app uses when writing "
-                            "tile sheets.</p>"
-                            "<p><strong>Why it matters:</strong> Jellyfin synthesises the client-"
-                            "facing <code>TrickplayInfo</code> row from server-wide "
-                            "<code>TrickplayOptions</code> VERBATIM — not measured from the tile "
-                            "files themselves. A mismatch (e.g. server <code>TileWidth=8</code> vs "
-                            "app <code>10</code>) means Jellyfin tells the client to slice tiles "
-                            "at the wrong pixel coordinates. The preview loads, but renders "
-                            "wrong: stretched, sheared, or showing the wrong frame at each "
-                            "scrubber position.</p>"
-                            "<p><strong>What 'Sync options' does:</strong> rewrites only the "
-                            "fields we control (TileWidth, TileHeight, Interval, adds our width "
-                            "to WidthResolutions if missing) and POSTs the full config back. "
-                            "Admin-customised fields are preserved. No restart required; no "
-                            "tiles deleted.</p>"
-                        ),
-                        "ok": server_ok,
-                        "severity": "critical" if not server_ok else "info",
-                        "current": options_check.get("server"),
-                        "recommended": options_check.get("ours"),
-                        "actions": server_actions,
-                        "reason": options_check.get("reason") or None,
-                        "meta": {},
-                    }
-                ],
-            }
-        )
+        server_section = {
+            "id": "server_options",
+            "title": "Server trickplay options",
+            "docs_anchor": "trickplay-options",
+            "ok": server_ok,
+            "severity": "critical" if not server_ok else "info",
+            "checks": [
+                {
+                    "id": "trickplay_geometry",
+                    "label": "Tile geometry matches adapter",
+                    "docs_anchor": "trickplay-options",
+                    "tooltip": "Server tile geometry must match what this app writes",
+                    "explanation": (
+                        "<p><strong>What it checks:</strong> Jellyfin's server-wide "
+                        "<code>TrickplayOptions</code> — tile width, tile height, frame interval, "
+                        "and resolution list — match the geometry this app uses when writing "
+                        "tile sheets.</p>"
+                        "<p><strong>Why it matters:</strong> Jellyfin synthesises the client-"
+                        "facing <code>TrickplayInfo</code> row from server-wide "
+                        "<code>TrickplayOptions</code> VERBATIM — not measured from the tile "
+                        "files themselves. A mismatch (e.g. server <code>TileWidth=8</code> vs "
+                        "app <code>10</code>) means Jellyfin tells the client to slice tiles "
+                        "at the wrong pixel coordinates. The preview loads, but renders "
+                        "wrong: stretched, sheared, or showing the wrong frame at each "
+                        "scrubber position.</p>"
+                        "<p><strong>What 'Sync options' does:</strong> rewrites only the "
+                        "fields we control (TileWidth, TileHeight, Interval, adds our width "
+                        "to WidthResolutions if missing) and POSTs the full config back. "
+                        "Admin-customised fields are preserved. No restart required; no "
+                        "tiles deleted.</p>"
+                    ),
+                    "ok": server_ok,
+                    "severity": "critical" if not server_ok else "info",
+                    "current": options_check.get("server"),
+                    "recommended": options_check.get("ours"),
+                    "actions": server_actions,
+                    "reason": options_check.get("reason") or None,
+                    "meta": {},
+                }
+            ],
+        }
+        return server_section, server_ok
 
+    def _vendor_extraction_section(self, plugin_installed: bool) -> dict[str, Any]:
+        """Build the advisory ``vendor_extraction`` section.
+
+        Args:
+            plugin_installed: Whether the Bridge plugin is installed.
+
+        Returns:
+            The section dict.
+        """
         # --- Vendor-side extraction (advisory for Jellyfin) ----------
         vendor_probe_ok = True
         vendor_probe_reason = ""
@@ -2179,45 +2290,52 @@ class JellyfinServer(EmbyApiClient):
                 },
             }
 
-        sections.append(
-            {
-                "id": "vendor_extraction",
-                "title": "Vendor-side preview generation",
-                "docs_anchor": "vendor-extraction",
-                # Advisory only — the per-library rows carry the real
-                # severity for this flag. When the probe itself fails we
-                # surface that (ok=False, info) so the UI doesn't lie
-                # about state we couldn't read.
-                "ok": vendor_probe_ok,
-                "severity": "info",
-                "checks": [
-                    {
-                        "id": "vendor_extraction_state",
-                        "label": "Jellyfin scan-time extraction",
-                        "docs_anchor": "vendor-extraction",
-                        "tooltip": vendor_tooltip,
-                        "explanation": (
-                            "<p><strong>What this controls:</strong> whether Jellyfin runs its own "
-                            "trickplay extraction during library scans across every configured "
-                            "library in one batch. This is a shortcut for flipping "
-                            "<code>ExtractTrickplayImagesDuringLibraryScan</code> + "
-                            "<code>SaveTrickplayWithMedia</code> on every library at once.</p>" + vendor_why
-                        ),
-                        "ok": vendor_probe_ok,
-                        "severity": "info",
-                        "current": vendor_current,
-                        "recommended": vendor_recommended,
-                        # ``recommended`` is a descriptive string, so the JS
-                        # direction-picker needs this hint to pick the right key.
-                        "fix_action": vendor_fix_action,
-                        "actions": vendor_actions,
-                        "reason": vendor_probe_reason or None,
-                        "meta": extraction_status,
-                    }
-                ],
-            }
-        )
+        return {
+            "id": "vendor_extraction",
+            "title": "Vendor-side preview generation",
+            "docs_anchor": "vendor-extraction",
+            # Advisory only — the per-library rows carry the real
+            # severity for this flag. When the probe itself fails we
+            # surface that (ok=False, info) so the UI doesn't lie
+            # about state we couldn't read.
+            "ok": vendor_probe_ok,
+            "severity": "info",
+            "checks": [
+                {
+                    "id": "vendor_extraction_state",
+                    "label": "Jellyfin scan-time extraction",
+                    "docs_anchor": "vendor-extraction",
+                    "tooltip": vendor_tooltip,
+                    "explanation": (
+                        "<p><strong>What this controls:</strong> whether Jellyfin runs its own "
+                        "trickplay extraction during library scans across every configured "
+                        "library in one batch. This is a shortcut for flipping "
+                        "<code>ExtractTrickplayImagesDuringLibraryScan</code> + "
+                        "<code>SaveTrickplayWithMedia</code> on every library at once.</p>" + vendor_why
+                    ),
+                    "ok": vendor_probe_ok,
+                    "severity": "info",
+                    "current": vendor_current,
+                    "recommended": vendor_recommended,
+                    # ``recommended`` is a descriptive string, so the JS
+                    # direction-picker needs this hint to pick the right key.
+                    "fix_action": vendor_fix_action,
+                    "actions": vendor_actions,
+                    "reason": vendor_probe_reason or None,
+                    "meta": extraction_status,
+                }
+            ],
+        }
 
+    def _scheduled_trickplay_section(self, plugin_installed: bool) -> dict[str, Any] | None:
+        """Build the ``scheduled_trickplay`` section for Jellyfin's daily trickplay task.
+
+        Args:
+            plugin_installed: Whether the Bridge plugin is installed.
+
+        Returns:
+            The section dict, or ``None`` when the task isn't present.
+        """
         # --- Scheduled "Generate Trickplay Images" task --------------
         # Jellyfin ships with a daily 3 AM task that walks every video
         # and generates its own trickplay tiles via FFmpeg. The decision
@@ -2239,240 +2357,236 @@ class JellyfinServer(EmbyApiClient):
         # red "Critical" when we're warning a Mode B user that disabling
         # would break trickplay registration entirely.
         sched_state = self.get_scheduled_trickplay_state()
-        if sched_state.get("found"):
-            triggers_count = int(sched_state.get("triggers_count") or 0)
-            task_state = (sched_state.get("state") or "").lower()
-            task_running_note = (
-                " (currently running — Jellyfin is mid-pass right now)" if task_state == "running" else ""
-            )
-
-            sched_explanation_common = (
-                "<p><strong>What this task does:</strong> Jellyfin's built-in "
-                "<code>Generate Trickplay Images</code> scheduled task runs daily at 3 AM "
-                "by default. It walks every video in your libraries and creates trickplay "
-                "tiles (the scrub-bar previews) for any file that doesn't already have "
-                "them, using its own FFmpeg pass.</p>"
-                "<p><strong>How this app handles trickplay:</strong> when a webhook fires "
-                "(Sonarr/Radarr import), this app generates tiles to disk and tells "
-                "Jellyfin about them. The path depends on whether the Media Preview Bridge "
-                "plugin is installed:</p>"
-                "<ul>"
-                "<li><strong>With the plugin (Mode A):</strong> this app calls the plugin's "
-                "<code>/MediaPreviewBridge/Trickplay/{itemId}</code> endpoint, which writes "
-                "the trickplay row in Jellyfin's database directly. Registration is instant. "
-                "The scheduled daily task ends up scanning the same files Jellyfin already "
-                "knows about — wasted CPU and IO that also competes with library scans "
-                "(slower scans = longer retry windows when new files arrive).</li>"
-                "<li><strong>Without the plugin (Mode B):</strong> this app writes tiles to "
-                "disk and crosses its fingers. Jellyfin's only chance to discover them is "
-                "the daily scheduled task. Disabling it means tiles sit on disk forever "
-                "with no DB row — trickplay silently never appears in the player.</li>"
-                "</ul>"
-            )
-
-            if plugin_installed:
-                # Mode A — plugin handles registration. Daily task is wasted CPU.
-                if triggers_count > 0:
-                    sched_check = {
-                        "id": "scheduled_trickplay_task",
-                        "label": "Jellyfin's daily 'Generate Trickplay Images' task",
-                        "docs_anchor": "scheduled-trickplay",
-                        "tooltip": (
-                            "The Bridge plugin already registers trickplay instantly, so this daily task only "
-                            "repeats the work. Recommend disabling it."
-                        ),
-                        "explanation": (
-                            sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin <em>is</em> "
-                            "installed, so disabling the daily task is safe — trickplay "
-                            "registration will continue to work instantly via the plugin's "
-                            "direct DB write. You'll free up CPU and your library scans will "
-                            "finish faster (which also shortens the retry window when new "
-                            "files arrive before Jellyfin has indexed them).</p>"
-                            "<p><strong>If you ever uninstall the plugin:</strong> re-enable "
-                            "this task — it becomes the only way Jellyfin discovers tiles this "
-                            "app published.</p>"
-                        ),
-                        "ok": False,
-                        "severity": "recommended",
-                        "current": f"enabled ({triggers_count} active trigger{'s' if triggers_count != 1 else ''}){task_running_note}",
-                        "recommended": "disabled (Bridge plugin handles registration)",
-                        # Explicit hint for both the per-row "Apply
-                        # recommended" button and the bulk fix-plan:
-                        # use the ``disable`` action key. Required
-                        # because ``recommended`` is a descriptive
-                        # string (truthy) — the JS direction-picker's
-                        # boolean fallback would otherwise pick
-                        # ``enable`` and do the OPPOSITE of the
-                        # recommendation.
-                        "fix_action": "disable",
-                        "actions": {
-                            "disable": {
-                                "action": "set_scheduled_trickplay",
-                                "args": {"enabled": False},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Clears all triggers on Jellyfin's daily "
-                                        "<code>Generate Trickplay Images</code> task. The task "
-                                        "will no longer auto-fire at 3 AM. You can still run it "
-                                        "manually from Jellyfin's Dashboard → Scheduled Tasks. "
-                                        "<br><br><strong>Why this is safe for you:</strong> the "
-                                        "Bridge plugin is installed, so this app registers "
-                                        "trickplay instantly — Jellyfin already knows about every "
-                                        "tile this app publishes."
-                                    ),
-                                },
-                            },
-                            "enable": {
-                                "action": "set_scheduled_trickplay",
-                                "args": {"enabled": True},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Restores the default daily 3 AM trigger on the "
-                                        "<code>Generate Trickplay Images</code> task. Useful if "
-                                        "you plan to uninstall the Bridge plugin or want a "
-                                        "safety-net pass that re-scans for missing tiles."
-                                    ),
-                                },
-                            },
-                        },
-                        "reason": None,
-                        "meta": sched_state,
-                    }
-                else:
-                    sched_check = {
-                        "id": "scheduled_trickplay_task",
-                        "label": "Jellyfin's daily 'Generate Trickplay Images' task",
-                        "docs_anchor": "scheduled-trickplay",
-                        "tooltip": "Disabled — the Bridge plugin handles registration directly.",
-                        "explanation": (
-                            sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin handles "
-                            "registration and the daily task is disabled. Optimal — no duplicate "
-                            "work, library scans aren't fighting an extra background pass.</p>"
-                        ),
-                        "ok": True,
-                        "severity": "info",
-                        "current": "disabled (no triggers)",
-                        "recommended": "disabled (Bridge plugin handles registration)",
-                        # ok=True row has no "fix" — the row is already
-                        # in the recommended state. The enable action is
-                        # an opt-out (override the recommendation), not
-                        # the fix; no fix_action hint needed.
-                        "actions": {
-                            "enable": {
-                                "action": "set_scheduled_trickplay",
-                                "args": {"enabled": True},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Restores the default daily 3 AM trigger. Useful if you "
-                                        "plan to uninstall the Bridge plugin and need Jellyfin's "
-                                        "scheduled task to take over registration."
-                                    ),
-                                },
-                            },
-                        },
-                        "reason": None,
-                        "meta": sched_state,
-                    }
-            else:
-                # Mode B — no plugin. The daily task is the registration path.
-                if triggers_count > 0:
-                    sched_check = {
-                        "id": "scheduled_trickplay_task",
-                        "label": "Jellyfin's daily 'Generate Trickplay Images' task",
-                        "docs_anchor": "scheduled-trickplay",
-                        "tooltip": (
-                            "Keep enabled — without the Bridge plugin, this task is how Jellyfin "
-                            "discovers the tiles this app publishes."
-                        ),
-                        "explanation": (
-                            sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin is NOT "
-                            "installed, so this task is the only way Jellyfin ever sees the "
-                            "tiles this app publishes. Keep it enabled.</p>"
-                            "<p><strong>Better alternative:</strong> install the Media Preview "
-                            "Bridge plugin (separate row in this card) for instant registration "
-                            "instead of waiting up to 24 hours for the daily pass to run.</p>"
-                        ),
-                        "ok": True,
-                        "severity": "info",
-                        "current": f"enabled ({triggers_count} active trigger{'s' if triggers_count != 1 else ''}){task_running_note}",
-                        "recommended": "keep enabled (no Bridge plugin)",
-                        "actions": {},
-                        "reason": None,
-                        "meta": sched_state,
-                    }
-                else:
-                    sched_check = {
-                        "id": "scheduled_trickplay_task",
-                        "label": "Jellyfin's daily 'Generate Trickplay Images' task",
-                        "docs_anchor": "scheduled-trickplay",
-                        "tooltip": (
-                            "Critical: without the Bridge plugin AND without this task running, "
-                            "Jellyfin will never see the tiles this app publishes."
-                        ),
-                        "explanation": (
-                            sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin is NOT "
-                            "installed AND the daily task has no triggers. Tiles this app "
-                            "publishes will sit on disk indefinitely with no Jellyfin DB row "
-                            "— trickplay never appears in the player.</p>"
-                            "<p><strong>Fix:</strong> either install the Bridge plugin "
-                            "(recommended — instant registration) or re-enable this task "
-                            "(slow — registration happens up to 24h after each new file).</p>"
-                        ),
-                        "ok": False,
-                        "severity": "critical",
-                        "current": "disabled (no triggers)",
-                        "recommended": "enabled (no Bridge plugin → this is the only registration path)",
-                        # Mode B + no triggers: the fix is to re-enable.
-                        "fix_action": "enable",
-                        "actions": {
-                            "enable": {
-                                "action": "set_scheduled_trickplay",
-                                "args": {"enabled": True},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Restores the default daily 3 AM trigger. Without this "
-                                        "task AND without the Bridge plugin, Jellyfin has no way "
-                                        "to discover the tiles this app publishes — trickplay "
-                                        "never appears in the player."
-                                    ),
-                                },
-                            },
-                        },
-                        "reason": None,
-                        "meta": sched_state,
-                    }
-
-            sched_section_ok = bool(sched_check.get("ok"))
-            sched_section_severity = sched_check["severity"]
-            sections.append(
-                {
-                    "id": "scheduled_trickplay",
-                    "title": "Scheduled trickplay task",
-                    "docs_anchor": "scheduled-trickplay",
-                    "ok": sched_section_ok,
-                    "severity": sched_section_severity,
-                    "checks": [sched_check],
-                }
-            )
-        else:
-            sched_section_ok = True  # task not present → nothing to flag
-
-        overall_ok = (
-            connection_ok and version_ok and plugin_ok and library_section_ok and server_ok and sched_section_ok
-        )
+        if not sched_state.get("found"):
+            return None
+        sched_check = self._scheduled_trickplay_check(sched_state, plugin_installed)
         return {
-            "vendor": "jellyfin",
-            "overall_ok": overall_ok,
-            "sections": sections,
+            "id": "scheduled_trickplay",
+            "title": "Scheduled trickplay task",
+            "docs_anchor": "scheduled-trickplay",
+            "ok": bool(sched_check.get("ok")),
+            "severity": sched_check["severity"],
+            "checks": [sched_check],
         }
+
+    def _scheduled_trickplay_check(self, sched_state: dict[str, Any], plugin_installed: bool) -> dict[str, Any]:
+        """Build the single check row for the daily trickplay task.
+
+        Args:
+            sched_state: Result of :meth:`get_scheduled_trickplay_state` (task found).
+            plugin_installed: Whether the Bridge plugin is installed.
+
+        Returns:
+            The check dict.
+        """
+        triggers_count = int(sched_state.get("triggers_count") or 0)
+        task_state = (sched_state.get("state") or "").lower()
+        task_running_note = " (currently running — Jellyfin is mid-pass right now)" if task_state == "running" else ""
+
+        sched_explanation_common = (
+            "<p><strong>What this task does:</strong> Jellyfin's built-in "
+            "<code>Generate Trickplay Images</code> scheduled task runs daily at 3 AM "
+            "by default. It walks every video in your libraries and creates trickplay "
+            "tiles (the scrub-bar previews) for any file that doesn't already have "
+            "them, using its own FFmpeg pass.</p>"
+            "<p><strong>How this app handles trickplay:</strong> when a webhook fires "
+            "(Sonarr/Radarr import), this app generates tiles to disk and tells "
+            "Jellyfin about them. The path depends on whether the Media Preview Bridge "
+            "plugin is installed:</p>"
+            "<ul>"
+            "<li><strong>With the plugin (Mode A):</strong> this app calls the plugin's "
+            "<code>/MediaPreviewBridge/Trickplay/{itemId}</code> endpoint, which writes "
+            "the trickplay row in Jellyfin's database directly. Registration is instant. "
+            "The scheduled daily task ends up scanning the same files Jellyfin already "
+            "knows about — wasted CPU and IO that also competes with library scans "
+            "(slower scans = longer retry windows when new files arrive).</li>"
+            "<li><strong>Without the plugin (Mode B):</strong> this app writes tiles to "
+            "disk and crosses its fingers. Jellyfin's only chance to discover them is "
+            "the daily scheduled task. Disabling it means tiles sit on disk forever "
+            "with no DB row — trickplay silently never appears in the player.</li>"
+            "</ul>"
+        )
+
+        if plugin_installed:
+            # Mode A — plugin handles registration. Daily task is wasted CPU.
+            if triggers_count > 0:
+                sched_check = {
+                    "id": "scheduled_trickplay_task",
+                    "label": "Jellyfin's daily 'Generate Trickplay Images' task",
+                    "docs_anchor": "scheduled-trickplay",
+                    "tooltip": (
+                        "The Bridge plugin already registers trickplay instantly, so this daily task only "
+                        "repeats the work. Recommend disabling it."
+                    ),
+                    "explanation": (
+                        sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin <em>is</em> "
+                        "installed, so disabling the daily task is safe — trickplay "
+                        "registration will continue to work instantly via the plugin's "
+                        "direct DB write. You'll free up CPU and your library scans will "
+                        "finish faster (which also shortens the retry window when new "
+                        "files arrive before Jellyfin has indexed them).</p>"
+                        "<p><strong>If you ever uninstall the plugin:</strong> re-enable "
+                        "this task — it becomes the only way Jellyfin discovers tiles this "
+                        "app published.</p>"
+                    ),
+                    "ok": False,
+                    "severity": "recommended",
+                    "current": f"enabled ({triggers_count} active trigger{'s' if triggers_count != 1 else ''}){task_running_note}",
+                    "recommended": "disabled (Bridge plugin handles registration)",
+                    # Explicit hint for both the per-row "Apply
+                    # recommended" button and the bulk fix-plan:
+                    # use the ``disable`` action key. Required
+                    # because ``recommended`` is a descriptive
+                    # string (truthy) — the JS direction-picker's
+                    # boolean fallback would otherwise pick
+                    # ``enable`` and do the OPPOSITE of the
+                    # recommendation.
+                    "fix_action": "disable",
+                    "actions": {
+                        "disable": {
+                            "action": "set_scheduled_trickplay",
+                            "args": {"enabled": False},
+                            "confirm": {
+                                "kind": "button",
+                                "phrase": "",
+                                "body": (
+                                    "Clears all triggers on Jellyfin's daily "
+                                    "<code>Generate Trickplay Images</code> task. The task "
+                                    "will no longer auto-fire at 3 AM. You can still run it "
+                                    "manually from Jellyfin's Dashboard → Scheduled Tasks. "
+                                    "<br><br><strong>Why this is safe for you:</strong> the "
+                                    "Bridge plugin is installed, so this app registers "
+                                    "trickplay instantly — Jellyfin already knows about every "
+                                    "tile this app publishes."
+                                ),
+                            },
+                        },
+                        "enable": {
+                            "action": "set_scheduled_trickplay",
+                            "args": {"enabled": True},
+                            "confirm": {
+                                "kind": "button",
+                                "phrase": "",
+                                "body": (
+                                    "Restores the default daily 3 AM trigger on the "
+                                    "<code>Generate Trickplay Images</code> task. Useful if "
+                                    "you plan to uninstall the Bridge plugin or want a "
+                                    "safety-net pass that re-scans for missing tiles."
+                                ),
+                            },
+                        },
+                    },
+                    "reason": None,
+                    "meta": sched_state,
+                }
+            else:
+                sched_check = {
+                    "id": "scheduled_trickplay_task",
+                    "label": "Jellyfin's daily 'Generate Trickplay Images' task",
+                    "docs_anchor": "scheduled-trickplay",
+                    "tooltip": "Disabled — the Bridge plugin handles registration directly.",
+                    "explanation": (
+                        sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin handles "
+                        "registration and the daily task is disabled. Optimal — no duplicate "
+                        "work, library scans aren't fighting an extra background pass.</p>"
+                    ),
+                    "ok": True,
+                    "severity": "info",
+                    "current": "disabled (no triggers)",
+                    "recommended": "disabled (Bridge plugin handles registration)",
+                    # ok=True row has no "fix" — the row is already
+                    # in the recommended state. The enable action is
+                    # an opt-out (override the recommendation), not
+                    # the fix; no fix_action hint needed.
+                    "actions": {
+                        "enable": {
+                            "action": "set_scheduled_trickplay",
+                            "args": {"enabled": True},
+                            "confirm": {
+                                "kind": "button",
+                                "phrase": "",
+                                "body": (
+                                    "Restores the default daily 3 AM trigger. Useful if you "
+                                    "plan to uninstall the Bridge plugin and need Jellyfin's "
+                                    "scheduled task to take over registration."
+                                ),
+                            },
+                        },
+                    },
+                    "reason": None,
+                    "meta": sched_state,
+                }
+        else:
+            # Mode B — no plugin. The daily task is the registration path.
+            if triggers_count > 0:
+                sched_check = {
+                    "id": "scheduled_trickplay_task",
+                    "label": "Jellyfin's daily 'Generate Trickplay Images' task",
+                    "docs_anchor": "scheduled-trickplay",
+                    "tooltip": (
+                        "Keep enabled — without the Bridge plugin, this task is how Jellyfin "
+                        "discovers the tiles this app publishes."
+                    ),
+                    "explanation": (
+                        sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin is NOT "
+                        "installed, so this task is the only way Jellyfin ever sees the "
+                        "tiles this app publishes. Keep it enabled.</p>"
+                        "<p><strong>Better alternative:</strong> install the Media Preview "
+                        "Bridge plugin (separate row in this card) for instant registration "
+                        "instead of waiting up to 24 hours for the daily pass to run.</p>"
+                    ),
+                    "ok": True,
+                    "severity": "info",
+                    "current": f"enabled ({triggers_count} active trigger{'s' if triggers_count != 1 else ''}){task_running_note}",
+                    "recommended": "keep enabled (no Bridge plugin)",
+                    "actions": {},
+                    "reason": None,
+                    "meta": sched_state,
+                }
+            else:
+                sched_check = {
+                    "id": "scheduled_trickplay_task",
+                    "label": "Jellyfin's daily 'Generate Trickplay Images' task",
+                    "docs_anchor": "scheduled-trickplay",
+                    "tooltip": (
+                        "Critical: without the Bridge plugin AND without this task running, "
+                        "Jellyfin will never see the tiles this app publishes."
+                    ),
+                    "explanation": (
+                        sched_explanation_common + "<p><strong>Your setup:</strong> the Bridge plugin is NOT "
+                        "installed AND the daily task has no triggers. Tiles this app "
+                        "publishes will sit on disk indefinitely with no Jellyfin DB row "
+                        "— trickplay never appears in the player.</p>"
+                        "<p><strong>Fix:</strong> either install the Bridge plugin "
+                        "(recommended — instant registration) or re-enable this task "
+                        "(slow — registration happens up to 24h after each new file).</p>"
+                    ),
+                    "ok": False,
+                    "severity": "critical",
+                    "current": "disabled (no triggers)",
+                    "recommended": "enabled (no Bridge plugin → this is the only registration path)",
+                    # Mode B + no triggers: the fix is to re-enable.
+                    "fix_action": "enable",
+                    "actions": {
+                        "enable": {
+                            "action": "set_scheduled_trickplay",
+                            "args": {"enabled": True},
+                            "confirm": {
+                                "kind": "button",
+                                "phrase": "",
+                                "body": (
+                                    "Restores the default daily 3 AM trigger. Without this "
+                                    "task AND without the Bridge plugin, Jellyfin has no way "
+                                    "to discover the tiles this app publishes — trickplay "
+                                    "never appears in the player."
+                                ),
+                            },
+                        },
+                    },
+                    "reason": None,
+                    "meta": sched_state,
+                }
+        return sched_check
 
     def trickplay_fix_all(self, *, install_plugin: bool = True) -> dict[str, Any]:
         """Auto-fix every readiness issue in one call.

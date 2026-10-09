@@ -1,4 +1,4 @@
-"""TheIntroDB v3 client (spec §4). Used without written permission — user key optional; must degrade gracefully.
+"""TheIntroDB v3 client. The user key is optional; failures must degrade gracefully.
 
 ``GET /v3/media?tmdb_id|tvdb_id|imdb_id&season&episode&duration_ms``: each segment type is an array (several entries
 are normal); ``start_ms: null`` means the start of the file and ``end_ms: null`` the end of the file. The API returns
