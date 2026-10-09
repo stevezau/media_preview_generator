@@ -382,8 +382,17 @@ def validate_worker_groups(value: object) -> list[dict[str, Any]]:
     return groups
 
 
-def groups_from_legacy(settings: dict) -> list[dict]:
-    """Preserve explicitly configured allocations; zero CPU remains zero."""
+def groups_from_legacy(settings: dict, detected: list[dict] | None = None) -> list[dict]:
+    """Preserve explicitly configured allocations; zero CPU remains zero.
+
+    Args:
+        settings: Settings holding ``cpu_threads`` and ``gpu_config``.
+        detected: Detected GPUs (dicts with ``device`` and ``name``). Each one missing from ``gpu_config`` gets an
+            enabled 1-worker group, as the pre-groups release used it.
+
+    Returns:
+        The validated worker groups.
+    """
     groups = []
 
     def append(group_id: str, name: str, resource: str, count: int, device: str | None, enabled: bool) -> None:
@@ -405,23 +414,44 @@ def groups_from_legacy(settings: dict) -> list[dict]:
             }
         )
 
+    gpu_budget = MAX_GPU_WORKERS
+
+    def append_gpu(device: str, name: str, workers: int, enabled: bool) -> None:
+        # The old release allowed 16 workers per GPU with no total, so five busy GPUs would fail the 64 total cap
+        # and stop the app from starting. Later GPUs get what is left; one with nothing left is kept but disabled.
+        nonlocal gpu_budget
+        count = max(1, min(workers, MAX_GPU_WORKERS))
+        enabled = enabled and workers > 0
+        if enabled:
+            if gpu_budget <= 0:
+                enabled = False
+            else:
+                count = min(count, gpu_budget)
+                gpu_budget -= count
+        group_id = "legacy-gpu-" + hashlib.sha256(device.encode()).hexdigest()[:16]
+        append(group_id, name[:80], "gpu", count, device, enabled)
+
     cpu = settings.get("cpu_threads", 1)
     cpu = int(cpu) if cpu not in (None, "") else 1
     if cpu > 0:
         append("legacy-cpu", "CPU workers", "cpu", cpu, None, True)
+    seen: set[str] = set()
     for entry in settings.get("gpu_config") or []:
         if not isinstance(entry, dict) or not entry.get("device"):
             continue
         device = str(entry["device"])
-        group_id = "legacy-gpu-" + hashlib.sha256(device.encode()).hexdigest()[:16]
-        append(
-            group_id,
-            str(entry.get("name") or device)[:80],
-            "gpu",
-            int(entry.get("workers", 1)),
-            device,
-            bool(entry.get("enabled", True)),
-        )
+        if device in seen:
+            continue
+        seen.add(device)
+        workers = entry.get("workers", 1)
+        workers = workers if isinstance(workers, int) and not isinstance(workers, bool) else 1
+        append_gpu(device, str(entry.get("name") or device), workers, bool(entry.get("enabled", True)))
+    for gpu in detected or []:
+        device = str(gpu.get("device") or "")
+        if not device or device in seen:
+            continue
+        seen.add(device)
+        append_gpu(device, str(gpu.get("name") or device), 1, True)
     return validate_worker_groups(groups)
 
 

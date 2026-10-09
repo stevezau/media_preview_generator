@@ -1,9 +1,13 @@
 """Upgrade preserves capacity, overnight meaning and intended global holds."""
 
+from datetime import UTC, datetime
+
 import pytest
 
+from media_preview_generator import worker_groups
 from media_preview_generator.quiet_hours import quiet_hours_weekly_mask
 from media_preview_generator.upgrade import _USER_FACING_NOTES, _migrate_to_v21, _migrate_to_v22
+from media_preview_generator.web.routes import _helpers as helpers
 from media_preview_generator.web.settings_manager import SettingsManager
 
 
@@ -41,6 +45,93 @@ def test_ambiguous_existing_pause_remains_manual(tmp_path):
     assert settings.get("processing_pause_preserved") is True
     settings.set_processing_pause_reason("quiet_hours", False)
     assert settings.processing_paused
+
+
+_MONDAY_NOON = datetime(2026, 5, 4, 12, 0)
+_MONDAY_EVENING = datetime(2026, 5, 4, 20, 0)
+_WORKDAY_QUIET_HOURS = {"enabled": True, "windows": [{"start": "08:00", "end": "17:00", "days": ["mon"]}]}
+
+
+def _migrate_paused_at(settings, monkeypatch, now):
+    monkeypatch.setattr(worker_groups, "local_now", lambda _now=None: _now or now.replace(tzinfo=UTC))
+    settings.update({"processing_paused": True, "cpu_threads": 2, "quiet_hours": _WORKDAY_QUIET_HOURS})
+    _migrate_to_v21(settings)
+
+
+def test_pause_inside_active_quiet_hours_belongs_to_quiet_hours(tmp_path, monkeypatch):
+    settings = SettingsManager(str(tmp_path))
+    _migrate_paused_at(settings, monkeypatch, _MONDAY_NOON)
+    assert settings.processing_pause_reasons == ["quiet_hours"]
+    assert settings.get("processing_pause_preserved") is None
+    settings.set_processing_pause_reason("quiet_hours", False)
+    assert not settings.processing_paused
+
+
+def test_pause_outside_quiet_hours_window_remains_manual(tmp_path, monkeypatch):
+    settings = SettingsManager(str(tmp_path))
+    _migrate_paused_at(settings, monkeypatch, _MONDAY_EVENING)
+    assert settings.processing_pause_reasons == ["manual"]
+    assert settings.get("processing_pause_preserved") is True
+
+
+def _detected(*devices):
+    return [{"type": "NVIDIA", "device": device, "name": f"GPU {device}"} for device in devices]
+
+
+def test_detected_gpu_missing_from_gpu_config_gets_a_one_worker_group(tmp_path, monkeypatch):
+    settings = SettingsManager(str(tmp_path))
+    settings.update({"cpu_threads": 0, "gpu_config": []})
+    monkeypatch.setattr(helpers, "_ensure_gpu_cache", lambda: _detected("cuda:0"))
+    notes = _migrate_to_v21(settings)
+    (group,) = settings.worker_groups
+    assert group["enabled"] is True
+    assert group["members"][0]["device"] == "cuda:0"
+    assert group["members"][0]["count"] == 1
+    assert any("cuda:0" in note for note in notes)
+
+
+def test_disabled_configured_gpu_stays_disabled_and_is_not_duplicated(tmp_path, monkeypatch):
+    settings = SettingsManager(str(tmp_path))
+    settings.update(
+        {"cpu_threads": 0, "gpu_config": [{"device": "cuda:0", "name": "GPU", "workers": 2, "enabled": False}]}
+    )
+    monkeypatch.setattr(helpers, "_ensure_gpu_cache", lambda: _detected("cuda:0"))
+    _migrate_to_v21(settings)
+    (group,) = settings.worker_groups
+    assert group["enabled"] is False
+    assert group["members"][0]["count"] == 2
+
+
+def test_gpu_detection_failure_adds_nothing_and_does_not_fail_the_migration(tmp_path, monkeypatch):
+    settings = SettingsManager(str(tmp_path))
+    settings.update({"cpu_threads": 0, "gpu_config": [{"device": "cuda:0", "workers": 2}]})
+
+    def boom():
+        raise RuntimeError("no driver")
+
+    monkeypatch.setattr(helpers, "_ensure_gpu_cache", boom)
+    _migrate_to_v21(settings)
+    assert [g["members"][0]["device"] for g in settings.worker_groups] == ["cuda:0"]
+
+
+def test_hand_edited_gpu_config_migrates_without_raising(tmp_path, monkeypatch):
+    settings = SettingsManager(str(tmp_path))
+    monkeypatch.setattr(helpers, "_ensure_gpu_cache", lambda: [])
+    settings.update(
+        {
+            "cpu_threads": 0,
+            "gpu_config": [
+                {"device": "cuda:0", "workers": 3},
+                {"device": "cuda:0", "workers": 5},
+                {"device": "cuda:1", "workers": None},
+                {"device": "cuda:2", "workers": 80, "enabled": False},
+                {"device": "cuda:3"},
+            ],
+        }
+    )
+    _migrate_to_v21(settings)
+    counts = {g["members"][0]["device"]: g["members"][0]["count"] for g in settings.worker_groups}
+    assert counts == {"cuda:0": 3, "cuda:1": 1, "cuda:2": 64, "cuda:3": 1}
 
 
 def test_proven_no_worker_pause_becomes_resource_wait(tmp_path):
@@ -233,3 +324,22 @@ def test_crash_after_v22_wrote_groups_but_before_the_stamp_only_restamps(tmp_pat
     assert settings.get("worker_groups") == converted
     assert settings.worker_groups_revision == 7
     assert settings.get("_pending_migration_notice") is None
+
+
+def test_legacy_gpus_past_the_total_cap_are_trimmed_not_fatal() -> None:
+    """Five GPUs at the old per-GPU maximum of 16 exceed the 64 total; the app must still start."""
+    from media_preview_generator.worker_groups import groups_from_legacy
+
+    gpu_config = [{"device": f"/dev/dri/renderD{128 + i}", "workers": 16, "enabled": True} for i in range(5)]
+    groups = groups_from_legacy({"cpu_threads": 0, "gpu_config": gpu_config})
+
+    enabled = [(g["enabled"], g["members"][0]["count"]) for g in groups]
+    assert enabled == [(True, 16), (True, 16), (True, 16), (True, 16), (False, 16)]
+
+
+def test_legacy_gpu_with_zero_workers_stays_off() -> None:
+    from media_preview_generator.worker_groups import groups_from_legacy
+
+    groups = groups_from_legacy({"cpu_threads": 0, "gpu_config": [{"device": "/dev/dri/renderD128", "workers": 0}]})
+
+    assert groups[0]["enabled"] is False
