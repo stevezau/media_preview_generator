@@ -539,7 +539,11 @@ class SettingsManager:
         return []
 
     def set_processing_pause_reason(self, reason: str, active: bool) -> bool:
-        """Change only one owner's pause, returning whether effective pause changed."""
+        """Change only one owner's pause, returning whether effective pause changed.
+
+        Writes nothing (no save, no backup) when the stored pause state already matches, since the quiet-hours
+        recheck calls this every minute.
+        """
         if reason not in {"manual", "quiet_hours"}:
             raise ValueError("Unknown processing pause reason")
         with self._lock:
@@ -549,8 +553,15 @@ class SettingsManager:
                 reasons.add(reason)
             else:
                 reasons.discard(reason)
+            new_reasons = sorted(reasons)
+            if (
+                self.get("processing_pause_reasons") == new_reasons
+                and self.get("processing_paused") == bool(reasons)
+                and _AUTO_PAUSED_KEY not in self.get_all()
+            ):
+                return False
             self.apply_changes(
-                updates={"processing_pause_reasons": sorted(reasons), "processing_paused": bool(reasons)},
+                updates={"processing_pause_reasons": new_reasons, "processing_paused": bool(reasons)},
                 deletes=[_AUTO_PAUSED_KEY],
             )
             return previous != bool(reasons)

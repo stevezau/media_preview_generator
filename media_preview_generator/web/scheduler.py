@@ -84,9 +84,10 @@ def is_now_in_any_quiet_window(quiet_hours: dict | None, now: datetime | None = 
 
 
 def _quiet_hours_recompute_and_apply(*, drain: bool = True) -> None:
-    """Idempotent state flip — set processing_paused to whether ANY window is active.
+    """Set the quiet-hours pause reason to whether ANY window is active, acting only when that changes the pause.
 
-    Called by the per-minute recheck job and from the boot-time gate.
+    Called by the per-minute recheck job and from the boot-time gate. An unchanged state writes nothing, so the
+    per-minute call never rewrites settings.json or rotates its backups.
     """
     try:
         from .jobs import get_job_manager

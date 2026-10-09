@@ -950,3 +950,21 @@ class TestResolveFrameInterval:
         # SettingsManager singleton was reset by the fixture; .get returns None.
         assert resolve_frame_interval({}) == 10
         assert resolve_frame_interval(None) == 10
+
+
+def test_unchanged_pause_reason_writes_no_file_or_backup(tmp_path):
+    from media_preview_generator.utils import timestamped_backups
+    from media_preview_generator.web.settings_manager import SettingsManager
+
+    sm = SettingsManager(str(tmp_path))
+    assert sm.set_processing_pause_reason("quiet_hours", True) is True
+    path = Path(sm.settings_file)
+    content, mtime_ns = path.read_text(), path.stat().st_mtime_ns
+    backups = timestamped_backups(str(path))
+
+    for _ in range(3):
+        assert sm.set_processing_pause_reason("quiet_hours", True) is False
+
+    assert path.read_text() == content
+    assert path.stat().st_mtime_ns == mtime_ns
+    assert timestamped_backups(str(path)) == backups

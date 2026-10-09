@@ -441,7 +441,9 @@ class TestMigrateSchema:
         msg = str(exc_info.value)
         assert "Refusing to start" in msg
         assert ".bak" in msg  # always points users at the recovery file
-        # Saves write settings.json.<timestamp>.bak; a bare settings.json.bak is never created, so don't name it.
+        # The upgrade copy is settings.json.pre-v<N>.bak; saves write settings.json.<timestamp>.bak. A bare
+        # settings.json.bak is never created, so don't name it.
+        assert f"{settings_manager.settings_file}.pre-v<N>.bak" in msg
         assert f"{settings_manager.settings_file}.<timestamp>.bak" in msg
         assert f"{settings_manager.settings_file}.bak" not in msg
 
@@ -2713,7 +2715,6 @@ class TestMigrationNoticeBackupAndDismissal:
     @pytest.mark.parametrize("kind", ["version_move", "retry_boot"])
     def test_notice_names_a_backup_holding_the_settings_as_they_were_before_the_migration(self, tmp_path, kind):
         from media_preview_generator.upgrade import _migrate_schema
-        from media_preview_generator.utils import timestamped_backups
 
         seeded = self._seed(kind)
         sm = self._boot(tmp_path, seeded)
@@ -2721,7 +2722,7 @@ class TestMigrationNoticeBackupAndDismissal:
         _migrate_schema(sm)
 
         notice = sm.get("_pending_migration_notice")
-        assert notice["backup"] in timestamped_backups(str(sm.settings_file))
+        assert Path(notice["backup"]).name.startswith("settings.json.pre-v")
         assert json.loads(Path(notice["backup"]).read_text()) == seeded
 
     @pytest.mark.parametrize("kind", ["version_move", "retry_boot"])
@@ -2731,7 +2732,6 @@ class TestMigrationNoticeBackupAndDismissal:
     ):
         """The card keeps the unread notice's "from", so it keeps the backup from that version when there is one."""
         from media_preview_generator.upgrade import _migrate_schema
-        from media_preview_generator.utils import timestamped_backups
 
         earlier = tmp_path / "settings.json.20260101-000000.bak"
         if earlier_backup_on_disk:
@@ -2747,11 +2747,49 @@ class TestMigrationNoticeBackupAndDismissal:
         if earlier_backup_on_disk:
             assert notice["backup"] == str(earlier)
         else:
-            assert notice["backup"] in timestamped_backups(str(sm.settings_file))
+            assert Path(notice["backup"]).name.startswith("settings.json.pre-v")
             assert json.loads(Path(notice["backup"]).read_text()) == seeded
 
-    def test_notice_names_no_backup_when_none_could_be_written(self, tmp_path, monkeypatch):
+    def test_the_notice_backup_survives_fifteen_ordinary_saves(self, tmp_path, monkeypatch):
+        """Saves rotate timestamped backups (keep 10); the pre-upgrade copy must not be one of them."""
+        from datetime import UTC, datetime, timedelta
+
         from media_preview_generator import utils
+        from media_preview_generator.upgrade import _migrate_schema
+
+        clock = iter(datetime(2026, 5, 4, tzinfo=UTC) + timedelta(seconds=n) for n in range(1000))
+
+        class SteppingDatetime:
+            @staticmethod
+            def now(_tz=None):
+                return next(clock)
+
+        # Backups are named to the second, so saves in one second share a file and would never rotate.
+        monkeypatch.setattr(utils, "datetime", SteppingDatetime)
+
+        seeded = self._seed("version_move")
+        sm = self._boot(tmp_path, seeded)
+
+        _migrate_schema(sm)
+        for i in range(15):
+            sm.set("thumbnail_interval", 100 + i)
+
+        backup = Path(sm.get("_pending_migration_notice")["backup"])
+        assert backup.exists()
+        assert json.loads(backup.read_text()) == seeded
+
+    def test_an_existing_pre_upgrade_copy_is_kept(self, tmp_path):
+        from media_preview_generator.upgrade import _backup_settings_before_migrating
+
+        sm = self._boot(tmp_path, self._seed("version_move"))
+        existing = Path(f"{sm.settings_file}.pre-v13.bak")
+        existing.write_text("earliest")
+
+        assert _backup_settings_before_migrating(sm, 13) == str(existing)
+        assert existing.read_text() == "earliest"
+
+    def test_notice_names_no_backup_when_none_could_be_written(self, tmp_path, monkeypatch):
+        from media_preview_generator import upgrade
         from media_preview_generator.upgrade import _migrate_schema
 
         sm = self._boot(tmp_path, self._seed("version_move"))
@@ -2759,13 +2797,13 @@ class TestMigrationNoticeBackupAndDismissal:
         def no_space(*_args, **_kwargs):
             raise OSError("No space left on device")
 
-        monkeypatch.setattr(utils.shutil, "copy2", no_space)
+        monkeypatch.setattr(upgrade.shutil, "copy2", no_space)
 
         _migrate_schema(sm)
 
         assert sm.get("_schema_version") == _CURRENT_SCHEMA_VERSION
         assert sm.get("_pending_migration_notice")["backup"] == ""
-        assert utils.timestamped_backups(str(sm.settings_file)) == []
+        assert not Path(f"{sm.settings_file}.pre-v13.bak").exists()
 
     @pytest.mark.parametrize("kind", ["version_move", "retry_boot"])
     def test_a_new_notice_shows_even_when_the_card_was_dismissed_permanently_before(self, tmp_path, kind):
@@ -2793,7 +2831,6 @@ class TestMigrationNoticeBackupAndDismissal:
     def test_an_earlier_notice_is_merged_into_the_new_one_only_while_it_is_unread(self, tmp_path, kind, earlier_notice):
         """Older versions dismissed the card by storing its id and left the notice itself in settings.json."""
         from media_preview_generator.upgrade import _USER_FACING_NOTES, _migrate_schema
-        from media_preview_generator.utils import timestamped_backups
         from media_preview_generator.web.notifications import SCHEMA_MIGRATION_ID
 
         earlier_backup = tmp_path / "settings.json.20260101-000000.bak"
@@ -2817,7 +2854,7 @@ class TestMigrationNoticeBackupAndDismissal:
         else:
             assert notice["notes"] == this_upgrades_notes
             assert notice.get("from") == (13 if kind == "version_move" else None)
-            assert notice["backup"] in timestamped_backups(str(sm.settings_file))
+            assert Path(notice["backup"]).name.startswith("settings.json.pre-v")
             assert notice["backup"] != str(earlier_backup)
         assert sm.dismissed_notifications == []
 

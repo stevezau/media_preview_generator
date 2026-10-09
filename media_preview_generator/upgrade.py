@@ -12,6 +12,7 @@ application-level configuration.
 import copy
 import json
 import os
+import shutil
 import sqlite3
 import uuid
 from datetime import UTC
@@ -356,11 +357,15 @@ def _migrate_env_vars(sm) -> None:
 # =========================================================================
 
 
-def _backup_settings_before_migrating(sm) -> str:
-    """Back up settings.json as it is before any migration step saves over it.
+def _backup_settings_before_migrating(sm, from_schema: int) -> str:
+    """Copy settings.json to ``{settings_file}.pre-v{from_schema}.bak`` before any migration step saves over it.
+
+    The name is not a timestamped one, so the save-time pruner never deletes it; ordinary saves would otherwise
+    rotate the pre-upgrade copy out within minutes.
 
     Args:
         sm: The settings manager about to be migrated.
+        from_schema: The schema version the file is at now.
 
     Returns:
         The backup's path, or "" when there is no file yet or the copy failed (a migration never waits on it).
@@ -368,10 +373,13 @@ def _backup_settings_before_migrating(sm) -> str:
     settings_file = getattr(sm, "settings_file", None)
     if not settings_file or not os.path.isfile(str(settings_file)):
         return ""
-    from .utils import backup_file
-
+    bak_path = f"{settings_file}.pre-v{from_schema}.bak"
+    # The earliest copy is the one that matches the version the user came from; a retry boot must not replace it.
+    if os.path.isfile(bak_path):
+        return bak_path
     try:
-        return backup_file(str(settings_file))
+        shutil.copy2(str(settings_file), bak_path)
+        return bak_path
     except OSError as exc:
         logger.warning(
             "Could not back up {} before updating your settings to the current format ({}: {}). The update goes "
@@ -465,8 +473,9 @@ def _migrate_schema(sm) -> None:
             f"settings.json was written by schema v{current} but this binary supports up to "
             f"v{_CURRENT_SCHEMA_VERSION}. Refusing to start (would silently drop fields on next save). "
             f"Either run a newer build of the app, or restore a settings.json from before the upgrade "
-            f"(the app's backups sit next to it as {settings_path}.<timestamp>.bak) and start the older app "
-            f"version that wrote it."
+            f"(the copy taken just before the upgrade is {settings_path}.pre-v<N>.bak, where N is the schema "
+            f"version you upgraded from; the app's other backups sit next to it as {settings_path}.<timestamp>.bak) "
+            f"and start the older app version that wrote it."
         )
     # A pending v14 retry has to get past the version gate: the failure that
     # set it happened AFTER _schema_version was already bumped, so `current`
@@ -475,7 +484,7 @@ def _migrate_schema(sm) -> None:
     if current == _CURRENT_SCHEMA_VERSION and not v14_retry:
         return
 
-    bak_path = _backup_settings_before_migrating(sm)
+    bak_path = _backup_settings_before_migrating(sm, current)
     log_notes: list[str] = []
     user_notes: list[str] = []
 
@@ -1704,19 +1713,52 @@ def _migrate_to_v20(sm) -> list:
     return ["v20: removed Needs review; run Find markers manually or with a schedule to decide those files again"]
 
 
+def _detected_gpus_for_legacy_groups() -> list[dict]:
+    """Detected, non-failed GPUs from the app's cached detection; empty (with a warning) when detection fails."""
+    try:
+        from .web.routes._helpers import _ensure_gpu_cache
+
+        return [g for g in _ensure_gpu_cache() if isinstance(g, dict) and g.get("status") != "failed"]
+    except Exception as exc:
+        logger.warning(
+            "Could not detect GPUs while migrating worker groups ({}: {}). GPUs missing from your GPU settings "
+            "get no worker group; add them under Settings > Workers.",
+            type(exc).__name__,
+            exc,
+        )
+        return []
+
+
 def _migrate_to_v21(sm) -> list[str]:
     """Introduce authoritative worker groups and separately owned global pauses."""
     from .quiet_hours import migrate_quiet_hours
+    from .web.scheduler import is_now_in_any_quiet_window
     from .worker_groups import groups_from_legacy, validate_worker_groups
 
     stored = sm.get_all()
-    groups = (
-        validate_worker_groups(stored["worker_groups"]) if "worker_groups" in stored else groups_from_legacy(stored)
-    )
+    notes = ["v21: migrated worker groups and preserved independently owned pauses"]
+    if "worker_groups" in stored:
+        groups = validate_worker_groups(stored["worker_groups"])
+    else:
+        # Only a finished install ran on the old auto-include rule; a fresh one picks its GPUs in setup.
+        detected = _detected_gpus_for_legacy_groups() if stored.get("setup_complete") else []
+        groups = groups_from_legacy(stored, detected)
+        configured = {
+            str(e["device"]) for e in stored.get("gpu_config") or [] if isinstance(e, dict) and e.get("device")
+        }
+        added = sorted({str(g["device"]) for g in detected if g.get("device")} - configured)
+        if added:
+            notes.append(
+                f"v21: added a 1-worker group for detected GPU(s) the old release also used: {', '.join(added)}"
+            )
     reasons = stored.get("processing_pause_reasons")
     ambiguous_pause = reasons is None and stored.get("processing_paused") and not stored.get("processing_auto_paused")
+    quiet_hours = migrate_quiet_hours(stored["quiet_hours"]) if "quiet_hours" in stored else None
+    # 4.4.2 saved a quiet-hours pause as a bare processing_paused=True and the window end cleared any pause, so an
+    # ambiguous pause inside an active window belongs to quiet hours; as "manual" it would never lift.
+    quiet_hours_pause = bool(ambiguous_pause and quiet_hours and is_now_in_any_quiet_window(quiet_hours))
     if not isinstance(reasons, list):
-        reasons = ["manual"] if ambiguous_pause else []
+        reasons = (["quiet_hours"] if quiet_hours_pause else ["manual"]) if ambiguous_pause else []
     reasons = sorted(set(reasons) & {"manual", "quiet_hours"})
     updates: dict[str, Any] = {
         "worker_groups": groups,
@@ -1724,12 +1766,12 @@ def _migrate_to_v21(sm) -> list[str]:
         "processing_pause_reasons": reasons,
         "processing_paused": bool(reasons),
     }
-    if "quiet_hours" in stored:
-        updates["quiet_hours"] = migrate_quiet_hours(stored["quiet_hours"])
-    if ambiguous_pause:
+    if quiet_hours is not None:
+        updates["quiet_hours"] = quiet_hours
+    if ambiguous_pause and not quiet_hours_pause:
         updates["processing_pause_preserved"] = True
     sm.apply_changes(updates=updates, deletes=["processing_auto_paused"])
-    return ["v21: migrated worker groups and preserved independently owned pauses"]
+    return notes
 
 
 def _migrate_to_v22(sm) -> list[str]:
