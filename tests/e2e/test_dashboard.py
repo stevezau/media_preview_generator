@@ -238,7 +238,7 @@ class TestActiveJobWaitingToRetry:
         expect(row).to_contain_text("Retry starting in 5 min")
         expect(row.locator(".job-kind-badge")).to_have_text("Previews")
         expect(authed_page.locator("#activeJobsContainer")).to_have_count(0)
-        expect(authed_page.locator(".jobs-table thead th:nth-child(2)")).to_have_text("Job")
+        expect(authed_page.locator(".jobs-table thead th:nth-child(3)")).to_have_text("Job")
         row.get_by_role("button", name="Job details", exact=True).click()
         detail = authed_page.locator(f"#job-detail-{job['id']}")
         expect(detail).to_be_visible()

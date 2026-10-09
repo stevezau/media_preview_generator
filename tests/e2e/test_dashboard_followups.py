@@ -377,7 +377,7 @@ class TestQueueColumns:
         id_cell = authed_page.locator(".jobs-table .job-row .queue-id")
         expect(id_cell).to_be_visible()
         assert id_cell.evaluate("e => e.getBoundingClientRect().width") <= 100
-        header = authed_page.locator(".jobs-table thead th").first
+        header = authed_page.locator(".jobs-table thead th").nth(1)
         assert (
             abs(
                 header.evaluate("e => e.getBoundingClientRect().left")
