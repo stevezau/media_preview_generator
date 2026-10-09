@@ -173,7 +173,9 @@ def test_partial_stream_failure_resumes_only_missing_stream(lifecycle: Lifecycle
 
     assert parent.status is JobStatus.COMPLETED
     assert {key: count for key, count in parent.progress.outcome.items() if count} == {job.WRITTEN: 1}
-    assert lifecycle.analyses == [(path, 1), (path, 2), (path, 2)]
+    # The first batch touches both streams, then ordinary batch failure retries each individually; resume retries only
+    # the stream whose separate analysis failed.
+    assert lifecycle.analyses == [(path, 1), (path, 2), (path, 1), (path, 2), (path, 2)]
 
 
 def test_all_restored_finishes_without_creating_an_empty_dispatcher_tracker(lifecycle: Lifecycle, monkeypatch):  # noqa: F811

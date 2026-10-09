@@ -1,10 +1,11 @@
-"""Run Plex's loudnorm analysis of one audio stream and turn its report into Plex's ``ln:*`` fields."""
+"""Run Plex's loudnorm analysis of one or more audio streams and turn each report into Plex's ``ln:*`` fields."""
 
 from __future__ import annotations
 
 import json
 import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -30,7 +31,8 @@ _FIELDS = {
     "input_thresh": "ln:threshold",
     "target_offset": "ln:gainOffset",
 }
-# A stalled mount must not hold a worker for ever; a long file still gets well past real time.
+# A stalled mount must not hold a worker for ever; a long file still gets well past real time. The cap is per track:
+# a batch gets the sum of its tracks' limits, the same worst case as analysing them one after another.
 MIN_TIMEOUT_S = 600.0
 MAX_TIMEOUT_S = 4 * 3600.0
 _POLL_S = 0.5
@@ -53,6 +55,14 @@ def resolve_ffmpeg(fallback: str) -> str:
 
 class LoudnessError(Exception):
     """ffmpeg failed, timed out, was cancelled, or printed no loudnorm report."""
+
+
+class LoudnessCancelled(LoudnessError):
+    """The job was cancelled while analysing audio."""
+
+
+class LoudnessTimeout(LoudnessError):
+    """ffmpeg exceeded its unpaused analysis time limit."""
 
 
 def command(ffmpeg: str, path: str, index: int, codec: str = "") -> list[str]:
@@ -92,6 +102,33 @@ def command(ffmpeg: str, path: str, index: int, codec: str = "") -> list[str]:
     ]
 
 
+def command_many(ffmpeg: str, path: str, tracks: list[tuple[int, str, int | None]]) -> list[str]:
+    """Build one input with an independent, named loudnorm output for each absolute stream index."""
+    indices = [index for index, _codec, _duration_ms in tracks]
+    if not 2 <= len(indices) <= 3 or any(type(index) is not int or index < 0 for index in indices):
+        raise LoudnessError("A loudness batch needs two or three nonnegative stream indices")
+    if len(set(indices)) != len(indices):
+        raise LoudnessError("A loudness batch cannot repeat a stream index")
+    args = [ffmpeg, "-hide_banner", "-nostats", "-progress", "pipe:1", "-filter_threads", "1"]
+    for index, codec, _duration_ms in tracks:
+        if codec in NO_DRC_CODECS:
+            args.extend((f"-drc_scale:{index}", "0"))
+    args.extend(("-i", path))
+    for index in indices:
+        args.extend(
+            (
+                "-map",
+                f"0:{index}",
+                "-af",
+                LOUDNORM_FILTER.replace("loudnorm=", f"loudnorm@track{index}="),
+                "-f",
+                "null",
+                "-",
+            )
+        )
+    return args
+
+
 def timeout_for(duration_ms: int | None) -> float:
     """Three times the file's length, kept between ``MIN_TIMEOUT_S`` and ``MAX_TIMEOUT_S``."""
     return min(MAX_TIMEOUT_S, max(MIN_TIMEOUT_S, 3 * (duration_ms or 0) / 1000))
@@ -112,6 +149,50 @@ def parse(stderr: str) -> dict[str, str]:
     except ValueError as exc:
         raise LoudnessError("ffmpeg printed an unreadable loudnorm report") from exc
     return report
+
+
+_NAMED_PREFIX = re.compile(r"\[loudnorm@track(?P<index>\d+) @ [^\]\n]+\]")
+
+
+def parse_many(stderr: str, indices: list[int]) -> dict[int, dict[str, str] | LoudnessError]:
+    """Attribute each named loudnorm report to exactly one requested absolute stream index.
+
+    A stream whose own report is missing or unreadable comes back as a ``LoudnessError`` value, so its
+    siblings' valid reports are kept.
+
+    Args:
+        stderr: ffmpeg's stderr from a ``command_many`` run.
+        indices: The absolute stream indices that were requested.
+
+    Returns:
+        For each requested index, its report or the (unraised) error for that stream.
+
+    Raises:
+        LoudnessError: A report names an unexpected or repeated stream, so no attribution can be trusted.
+    """
+    expected = set(indices)
+    reports: dict[int, dict[str, str] | LoudnessError] = {}
+    for match in _NAMED_PREFIX.finditer(stderr):
+        index = int(match["index"])
+        if index not in expected or index in reports:
+            raise LoudnessError(f"ffmpeg printed an unexpected or duplicate loudnorm report for stream {index}")
+        try:
+            report_text = stderr[match.end() :].lstrip()
+            if not report_text.startswith("{"):
+                raise ValueError("the named report is missing its JSON object")
+            report, _end = json.JSONDecoder().raw_decode(report_text)
+        except ValueError as exc:
+            error = LoudnessError(f"ffmpeg printed an unreadable loudnorm report for stream {index}")
+            error.__cause__ = exc
+            reports[index] = error
+            continue
+        if not isinstance(report, dict):
+            reports[index] = LoudnessError(f"ffmpeg printed an invalid loudnorm report for stream {index}")
+            continue
+        reports[index] = report
+    for index in sorted(expected - reports.keys()):
+        reports[index] = LoudnessError(f"ffmpeg omitted the loudnorm report for stream {index}")
+    return reports
 
 
 def ln_fields(report: dict[str, str]) -> dict[str, str]:
@@ -232,45 +313,46 @@ def _reap_without_reading(proc: subprocess.Popen, what: str) -> None:
         logger.warning("Couldn't start a thread to collect {}: {}", what, exc)
 
 
-def run(
-    ffmpeg: str,
+def _run_command(
+    args: list[str],
     path: str,
-    index: int,
     *,
-    duration_ms: int | None,
-    codec: str = "",
+    timeout_s: float,
+    description: str,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | Freeze | None = None,
     on_progress: Callable[[float, float | None], None] | None = None,
-) -> dict[str, str]:
-    """Analyse one stream and return its ``ln:*`` fields.
+) -> str:
+    """Run an analysis command under the existing pause, cancellation, and reader supervision.
 
     Args:
-        ffmpeg: The ffmpeg binary.
-        path: The media file (read only).
-        index: The stream's index in the file.
-        duration_ms: The file's length, for the time limit.
-        codec: The stream's codec (see ``command``).
-        cancel_check: True once the job is cancelled; ffmpeg is killed.
-        pause_check: True while everything is paused: ffmpeg is stopped where it is and the time limit moves out.
-        on_progress: Called from a reader thread with (seconds processed, speed as a multiple of real time or None)
-            as ffmpeg reports them.
+        args: The ffmpeg command line.
+        path: The media file, for messages.
+        timeout_s: Unpaused seconds allowed before the process is killed.
+        description: Which stream(s) this is, for messages.
+        cancel_check: Returns True when the job was cancelled.
+        pause_check: Holds the process while paused.
+        on_progress: Called with (seconds of audio processed, speed or None).
+
+    Returns:
+        ffmpeg's stderr.
 
     Raises:
-        LoudnessError: ffmpeg failed, timed out, was cancelled, or its report was unusable.
+        LoudnessCancelled: The job was cancelled.
+        LoudnessTimeout: ffmpeg exceeded ``timeout_s``.
+        LoudnessError: ffmpeg could not start, kept its output open, or exited non-zero.
     """
     name = os.path.basename(path)
-    timeout_s = timeout_for(duration_ms)
     freeze = Freeze.of(pause_check)
     if cancel_check and cancel_check():
-        raise LoudnessError(f"Loudness analysis of {name} cancelled")
+        raise LoudnessCancelled(f"Loudness analysis of {name} cancelled")
     freeze.hold(cancel_check=cancel_check, name=name)
     if cancel_check and cancel_check():
-        raise LoudnessError(f"Loudness analysis of {name} cancelled")
+        raise LoudnessCancelled(f"Loudness analysis of {name} cancelled")
     # Its own session, so a pause stops ffmpeg's whole group and never the app's.
     try:
         proc = subprocess.Popen(
-            command(ffmpeg, path, index, codec),
+            args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -294,8 +376,9 @@ def run(
                 freeze.hold(proc, cancel_check=cancel_check, name=name)
                 cancelled = bool(cancel_check and cancel_check())
                 if cancelled or freeze.clock() > deadline:
-                    why = "cancelled" if cancelled else f"timed out after {timeout_s:.0f} s"
-                    raise LoudnessError(f"Loudness analysis of {name} {why}") from None
+                    if cancelled:
+                        raise LoudnessCancelled(f"Loudness analysis of {name} cancelled") from None
+                    raise LoudnessTimeout(f"Loudness analysis of {name} timed out after {timeout_s:.0f} s") from None
     except BaseException:
         proc.kill()
         what = f"ffmpeg analysing loudness of {name}"
@@ -311,8 +394,101 @@ def run(
     for stream in (proc.stdout, proc.stderr):
         stream.close()
     if cancel_check and cancel_check():
-        raise LoudnessError(f"Loudness analysis of {name} cancelled")
+        raise LoudnessCancelled(f"Loudness analysis of {name} cancelled")
     text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
     if proc.returncode != 0:
-        raise LoudnessError(f"ffmpeg exited {proc.returncode} analysing {name} stream {index}: {text.strip()[-200:]}")
+        raise LoudnessError(f"ffmpeg exited {proc.returncode} analysing {name} {description}: {text.strip()[-200:]}")
+    return text
+
+
+def run(
+    ffmpeg: str,
+    path: str,
+    index: int,
+    *,
+    duration_ms: int | None,
+    codec: str = "",
+    cancel_check: Callable[[], bool] | None = None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
+    on_progress: Callable[[float, float | None], None] | None = None,
+) -> dict[str, str]:
+    """Analyse one stream and return its ``ln:*`` fields.
+
+    Args:
+        ffmpeg: The ffmpeg binary.
+        path: The media file.
+        index: The stream's index in the file.
+        duration_ms: The file's length, for the time limit.
+        codec: The stream's codec.
+        cancel_check: Returns True when the job was cancelled.
+        pause_check: Holds the process while paused.
+        on_progress: Called with (seconds of audio processed, speed or None).
+
+    Returns:
+        The stream's ``ln:*`` fields.
+
+    Raises:
+        LoudnessCancelled: The job was cancelled.
+        LoudnessTimeout: ffmpeg exceeded its time limit.
+        LoudnessError: ffmpeg failed or printed no usable report.
+    """
+    text = _run_command(
+        command(ffmpeg, path, index, codec),
+        path,
+        timeout_s=timeout_for(duration_ms),
+        description=f"stream {index}",
+        cancel_check=cancel_check,
+        pause_check=pause_check,
+        on_progress=on_progress,
+    )
     return ln_fields(parse(text))
+
+
+def run_many(
+    ffmpeg: str,
+    path: str,
+    tracks: list[tuple[int, str, int | None]],
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+    pause_check: Callable[[], bool] | Freeze | None = None,
+    on_progress: Callable[[float, float | None], None] | None = None,
+) -> dict[int, dict[str, str] | LoudnessError]:
+    """Analyse two or three streams in one input pass, validating each stream's report on its own.
+
+    Args:
+        ffmpeg: The ffmpeg binary.
+        path: The media file.
+        tracks: ``(stream index, codec, duration_ms)`` for each stream.
+        cancel_check: Returns True when the job was cancelled.
+        pause_check: Holds the process while paused.
+        on_progress: Called with (seconds of audio processed, speed or None).
+
+    Returns:
+        For each stream, its ``ln:*`` fields, or the (unraised) error for that stream alone.
+
+    Raises:
+        LoudnessCancelled: The job was cancelled.
+        LoudnessTimeout: ffmpeg exceeded the sum of its tracks' time limits.
+        LoudnessError: The batch is invalid, ffmpeg failed, or its reports can't be attributed.
+    """
+    args = command_many(ffmpeg, path, tracks)
+    indices = [index for index, _codec, _duration_ms in tracks]
+    text = _run_command(
+        args,
+        path,
+        timeout_s=sum(timeout_for(duration_ms) for _index, _codec, duration_ms in tracks),
+        description=f"streams {indices}",
+        cancel_check=cancel_check,
+        pause_check=pause_check,
+        on_progress=on_progress,
+    )
+    results: dict[int, dict[str, str] | LoudnessError] = {}
+    for index, report in parse_many(text, indices).items():
+        if isinstance(report, LoudnessError):
+            results[index] = report
+            continue
+        try:
+            results[index] = ln_fields(report)
+        except LoudnessError as exc:
+            results[index] = exc
+    return results

@@ -406,3 +406,327 @@ def test_dispatcher_preserves_pending_publisher_details_in_callback(ctx, media, 
     finally:
         dispatcher.shutdown()
         set_file_result_callback(None, job_id="mixed")
+
+
+def _add_audio_stream(database, stream_id: int, index: int, codec: str = "aac") -> None:
+    with sqlite3.connect(database._path()) as conn:
+        conn.execute(
+            'INSERT INTO media_streams (id, stream_type_id, "index", codec, extra_data, media_part_id, media_item_id) '
+            "VALUES (?, 2, ?, ?, NULL, 1, 1)",
+            (stream_id, index, codec),
+        )
+
+
+def test_batch_progress_spans_the_batch_once_and_estimates_later_streams():
+    calls = []
+    first_batch = job._batch_progress_reporter(
+        lambda *values: calls.append(values), first=1, count=3, streams=4, duration_s=100.0, later_s=100.0
+    )
+    first_batch(50.0, 2.0)
+    last_stream = job._batch_progress_reporter(
+        lambda *values: calls.append(values), first=4, count=1, streams=4, duration_s=100.0, later_s=0.0
+    )
+    last_stream(50.0, 2.0)
+
+    assert calls == [
+        (37.5, 50.0, 100.0, "2.0x", 75.0),
+        (87.5, 50.0, 100.0, "2.0x", 25.0),
+    ]
+
+
+@pytest.mark.parametrize("extra_tracks", [0, 1])
+def test_worker_batches_two_or_three_missing_streams_by_absolute_index(ctx, db, media, extra_tracks):  # noqa: F811
+    tracks = [(1, "aac", 424000), (2, "aac", 424000)]
+    expected_ids = [(11, 1), (12, 2)]
+    if extra_tracks:
+        _add_audio_stream(db, 13, 7, "eac3")
+        tracks.append((7, "eac3", 424000))
+        expected_ids.append((13, 7))
+    fields_by_index = {index: {**FIELDS, "ln:loudness": f"-{20 + index}.00"} for index, _codec, _duration in tracks}
+
+    with (
+        patch.object(job.analyze, "run_many", return_value=fields_by_index) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert run_many.call_args.args == (ctx.ffmpeg, media, tracks)
+    assert run_many.call_args.kwargs == {"cancel_check": None, "pause_check": None, "on_progress": None}
+    run.assert_not_called()
+    assert outcome.outcome_key == job.WRITTEN
+    stored = _streams(db)
+    for stream_id, index in expected_ids:
+        assert json.loads(stored[stream_id])["ln:loudness"] == fields_by_index[index]["ln:loudness"]
+
+
+def test_worker_limits_batches_to_three_then_uses_the_single_stream_path(ctx, db, media):  # noqa: F811
+    for stream_id, index in ((13, 3), (14, 5)):
+        _add_audio_stream(db, stream_id, index)
+
+    with (
+        patch.object(job.analyze, "run_many", return_value={1: FIELDS, 2: FIELDS, 3: FIELDS}) as run_many,
+        patch.object(job.analyze, "run", return_value=FIELDS) as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert run_many.call_args.args[2] == [(1, "aac", 424000), (2, "aac", 424000), (3, "aac", 424000)]
+    assert run.call_args.args[2] == 5
+    assert outcome.outcome_key == job.WRITTEN
+
+
+def test_worker_batches_only_uncached_streams_then_keeps_single_stream_path(ctx, db, media):  # noqa: F811
+    job.write_stream(db, 11, FIELDS, deadline=1e12)
+    _add_audio_stream(db, 13, 7, "eac3")
+    expected = {2: FIELDS, 7: FIELDS}
+
+    with (
+        patch.object(job.analyze, "run_many", return_value=expected) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert run_many.call_args.args[2] == [(2, "aac", 424000), (7, "eac3", 424000)]
+    run.assert_not_called()
+    assert outcome.outcome_key == job.WRITTEN
+    assert json.loads(_streams(db)[11])["ln:loudness"] == FIELDS["ln:loudness"]
+
+    _add_audio_stream(db, 14, 9)
+    with (
+        patch.object(job.analyze, "run_many") as run_many,
+        patch.object(job.analyze, "run", return_value=FIELDS) as run,
+    ):
+        job.process_item(_item(media), ctx=ctx)
+    run_many.assert_not_called()
+    assert run.call_args.args[2] == 9
+
+
+def test_worker_analyses_a_repeated_absolute_index_once_and_writes_each_plex_row(ctx, db, media):  # noqa: F811
+    _add_audio_stream(db, 13, 2)
+    with (
+        patch.object(job.analyze, "run_many", return_value={1: FIELDS, 2: FIELDS}) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert run_many.call_args.args[2] == [(1, "aac", 424000), (2, "aac", 424000)]
+    run.assert_not_called()
+    assert outcome.outcome_key == job.WRITTEN
+    stored = _streams(db)
+    assert all("ln:loudness" in stored[stream_id] for stream_id in (11, 12, 13))
+
+
+def test_worker_falls_back_once_per_stream_after_an_ordinary_batch_failure(ctx, db, media):  # noqa: F811
+    _add_audio_stream(db, 13, 7)
+
+    def analyse(_ffmpeg, _path, index, **_kwargs):
+        if index == 2:
+            raise job.analyze.LoudnessError("one track is corrupt")
+        return FIELDS
+
+    with (
+        patch.object(job.analyze, "run_many", side_effect=job.analyze.LoudnessError("batch failed")) as run_many,
+        patch.object(job.analyze, "run", side_effect=analyse) as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert run_many.call_args.args == (
+        ctx.ffmpeg,
+        media,
+        [(1, "aac", 424000), (2, "aac", 424000), (7, "aac", 424000)],
+    )
+    assert [call.args[2] for call in run.call_args_list] == [1, 2, 7]
+    stored = _streams(db)
+    assert "ln:loudness" in stored[11] and stored[12] is None
+    assert "ln:loudness" in stored[13]
+    assert outcome.outcome_key == job.FAILED
+    assert "stream 2 (aac): one track is corrupt" in outcome.message
+
+
+@pytest.mark.parametrize("error", [job.analyze.LoudnessCancelled, job.analyze.LoudnessTimeout])
+def test_worker_does_not_retry_cancelled_or_timed_out_batches(ctx, db, media, error):  # noqa: F811
+    _add_audio_stream(db, 13, 7)
+    with (
+        patch.object(job.analyze, "run_many", side_effect=error("batch stopped")) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert run_many.call_args.args == (
+        ctx.ffmpeg,
+        media,
+        [(1, "aac", 424000), (2, "aac", 424000), (7, "aac", 424000)],
+    )
+    run.assert_not_called()
+    assert outcome.outcome_key == job.FAILED
+    assert not any(json.loads(value or "{}").get("ln:loudness") for value in _streams(db).values())
+
+
+def test_worker_does_not_retry_an_ordinary_batch_error_if_cancelled_during_failure(ctx, db, media):  # noqa: F811
+    cancelled = False
+
+    def fail_batch(*_args, **_kwargs):
+        nonlocal cancelled
+        cancelled = True
+        raise job.analyze.LoudnessError("batch failed")
+
+    _add_audio_stream(db, 13, 7)
+    with (
+        patch.object(job.analyze, "run_many", side_effect=fail_batch) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx, cancel_check=lambda: cancelled)
+
+    assert run_many.call_args.args == (
+        ctx.ffmpeg,
+        media,
+        [(1, "aac", 424000), (2, "aac", 424000), (7, "aac", 424000)],
+    )
+    run.assert_not_called()
+    assert outcome.outcome_key == job.FAILED
+    assert "cancelled" in outcome.message
+
+
+def test_worker_uses_the_real_batch_parser_and_writes_each_named_report_to_its_stream(ctx, db, media, tmp_path):  # noqa: F811
+    args_file = tmp_path / "args.txt"
+    ffmpeg = tmp_path / "ffmpeg"
+    report_1 = {**json.loads(json.dumps(FIELDS)), "ln:loudness": "-21.11", "ln:gainOffset": "0.11"}
+    report_2 = {**FIELDS, "ln:loudness": "-32.22", "ln:gainOffset": "0.22"}
+    loudnorm_1 = {
+        "input_i": report_1["ln:loudness"],
+        "input_tp": report_1["ln:peak"],
+        "input_lra": report_1["ln:lra"],
+        "input_thresh": report_1["ln:threshold"],
+        "target_offset": report_1["ln:gainOffset"],
+    }
+    loudnorm_2 = {
+        "input_i": report_2["ln:loudness"],
+        "input_tp": report_2["ln:peak"],
+        "input_lra": report_2["ln:lra"],
+        "input_thresh": report_2["ln:threshold"],
+        "target_offset": report_2["ln:gainOffset"],
+    }
+    ffmpeg.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > '{args_file}'\n"
+        "printf '%s\\n' "
+        f"'[loudnorm@track2 @ 0x1234] {json.dumps(loudnorm_2)}' "
+        f"'[loudnorm@track1 @ 0x1234] {json.dumps(loudnorm_1)}' >&2\n"
+    )
+    ffmpeg.chmod(0o755)
+    ctx.ffmpeg = str(ffmpeg)
+
+    outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert outcome.outcome_key == job.WRITTEN
+    stored = _streams(db)
+    assert json.loads(stored[11])["ln:loudness"] == "-21.11"
+    assert json.loads(stored[12])["ln:loudness"] == "-32.22"
+    command = args_file.read_text().splitlines()
+    assert command[command.index("-filter_threads") + 1] == "1"
+    assert [command[i + 1] for i, arg in enumerate(command) if arg == "-map"] == ["0:1", "0:2"]
+
+
+def test_worker_does_not_fallback_after_batch_failure_changes_the_source(ctx, db, media):  # noqa: F811
+    _add_audio_stream(db, 13, 7)
+
+    def fail_after_change(*_args, **_kwargs):
+        Path(media).write_bytes(b"changed before retry")
+        raise job.analyze.LoudnessError("batch failed")
+
+    with (
+        patch.object(job.analyze, "run_many", side_effect=fail_after_change) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert run_many.call_args.args == (
+        ctx.ffmpeg,
+        media,
+        [(1, "aac", 424000), (2, "aac", 424000), (7, "aac", 424000)],
+    )
+    run.assert_not_called()
+    assert outcome.outcome_key == job.WAITING
+    assert not any(json.loads(value or "{}").get("ln:loudness") for value in _streams(db).values())
+
+
+def test_worker_checks_source_fingerprint_before_publishing_a_complete_batch(ctx, db, media):  # noqa: F811
+    def replace_source(*_args, **_kwargs):
+        Path(media).write_bytes(b"changed while batch ran")
+        return {1: FIELDS, 2: FIELDS}
+
+    with (
+        patch.object(job.analyze, "run_many", side_effect=replace_source) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    run.assert_not_called()
+    assert run_many.call_args.args == (ctx.ffmpeg, media, [(1, "aac", 424000), (2, "aac", 424000)])
+    assert outcome.outcome_key == job.WAITING
+    assert not any(json.loads(value or "{}").get("ln:loudness") for value in _streams(db).values())
+
+
+def test_worker_stops_publishing_a_batch_when_cancelled_between_stream_writes(ctx, db, media):  # noqa: F811
+    cancelled = False
+    write = job.write_stream
+
+    def write_first_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        result = write(*args, **kwargs)
+        if args[1] == 11:
+            cancelled = True
+        return result
+
+    with (
+        patch.object(job.analyze, "run_many", return_value={1: FIELDS, 2: FIELDS}),
+        patch.object(job, "write_stream", side_effect=write_first_then_cancel),
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx, cancel_check=lambda: cancelled)
+
+    stored = _streams(db)
+    assert "ln:loudness" in stored[11] and stored[12] is None
+    assert not job.read_streams(db, [FILE], deadline=1e12)[0][0].item_marked
+    assert outcome.outcome_key == job.FAILED and "cancelled" in outcome.message
+
+
+def test_worker_reports_a_bad_batch_stream_without_rereading_the_file_for_it(ctx, db, media):  # noqa: F811
+    results = {1: FIELDS, 2: job.analyze.LoudnessError("ffmpeg omitted the loudnorm report for stream 2")}
+
+    with (
+        patch.object(job.analyze, "run_many", return_value=results) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    run_many.assert_called_once()
+    run.assert_not_called()
+    stored = _streams(db)
+    assert "ln:loudness" in stored[11] and stored[12] is None
+    assert not job.read_streams(db, [FILE], deadline=1e12)[0][0].item_marked
+    assert outcome.outcome_key == job.FAILED and "stream 2" in outcome.message
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        job.DatabaseBusyError("Plex database busy"),
+        job.SourceChangedError("Plex's indexed source differs from the file"),
+        job.PublishError("Plex database is no longer open", state=job.Capability.UNREACHABLE),
+    ],
+)
+def test_worker_stops_after_a_retryable_write_error_without_analysing_the_next_group(ctx, db, media, error):  # noqa: F811
+    for stream_id, index in ((13, 3), (14, 5)):
+        _add_audio_stream(db, stream_id, index)
+
+    with (
+        patch.object(job.analyze, "run_many", return_value={1: FIELDS, 2: FIELDS, 3: FIELDS}) as run_many,
+        patch.object(job.analyze, "run", return_value=FIELDS) as run,
+        patch.object(job, "write_stream", side_effect=error),
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    run_many.assert_called_once()
+    run.assert_not_called()
+    assert outcome.outcome_key == job.WAITING
+    assert str(error) in outcome.message
+    assert not job.read_streams(db, [FILE], deadline=1e12)[0][0].item_marked
