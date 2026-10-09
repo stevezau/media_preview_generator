@@ -2425,13 +2425,13 @@ function _markersPauseButton(job) {
 
 let _jobQueueUpdatePending = false;
 
-// Rows ticked for bulk actions: queued ones can be cancelled, finished ones deleted. Survives re-renders;
-// pruned when a job disappears or starts running.
+// Rows ticked for bulk actions: queued and running ones can be cancelled, finished ones deleted. Survives
+// re-renders; pruned when a job disappears.
 const selectedJobIds = new Set();
 const _FINISHED_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 function _isSelectableJob(job) {
-    return job.status === 'pending' || _FINISHED_STATUSES.has(job.status) || (job.status === 'running' && (job.paused || processingPaused));
+    return job.status === 'pending' || job.status === 'running' || _FINISHED_STATUSES.has(job.status);
 }
 
 function _visibleSelectableJobIds() {
@@ -2442,7 +2442,7 @@ function _selectedByKind() {
     const status = new Map(jobs.map((job) => [String(job.id), job.status]));
     const ids = Array.from(selectedJobIds);
     return {
-        queued: ids.filter((id) => !_FINISHED_STATUSES.has(status.get(id))),
+        active: ids.filter((id) => !_FINISHED_STATUSES.has(status.get(id))),
         finished: ids.filter((id) => _FINISHED_STATUSES.has(status.get(id))),
     };
 }
@@ -2458,14 +2458,14 @@ function _pruneJobSelection() {
 function _syncJobSelectionControls() {
     const selectable = _visibleSelectableJobIds();
     const count = selectedJobIds.size;
-    const { queued, finished } = _selectedByKind();
+    const { active, finished } = _selectedByKind();
     const bar = document.getElementById('selectionBar');
     if (bar) {
         bar.classList.toggle('d-none', count === 0);
         document.getElementById('selectionCount').textContent = `${count.toLocaleString()} selected`;
-        document.getElementById('cancelSelectedButtonText').textContent = `Cancel queued (${queued.length.toLocaleString()})`;
+        document.getElementById('cancelSelectedButtonText').textContent = `Cancel (${active.length.toLocaleString()})`;
         document.getElementById('deleteSelectedButtonText').textContent = `Delete finished (${finished.length.toLocaleString()})`;
-        document.getElementById('cancelSelectedButton').disabled = queued.length === 0;
+        document.getElementById('cancelSelectedButton').disabled = active.length === 0;
         document.getElementById('deleteSelectedButton').disabled = finished.length === 0;
     }
     const clearDropdown = document.getElementById('clearJobsDropdown');
@@ -2502,11 +2502,11 @@ function clearJobSelection() {
     toggleAllJobsSelected(false);
 }
 
-async function cancelSelectedQueuedJobs() {
-    const ids = _selectedByKind().queued;
+async function cancelSelectedJobs() {
+    const ids = _selectedByKind().active;
     if (ids.length === 0) return;
-    const noun = ids.length === 1 ? 'queued job' : 'queued jobs';
-    if (!await appConfirm(`Cancel ${ids.length} ${noun}? A job waiting to retry is cancelled with its retry. Jobs already running are skipped.`, { title: 'Cancel queued jobs', confirmText: `Cancel ${noun}`, cancelText: 'Keep queued' })) return;
+    const noun = ids.length === 1 ? 'job' : 'jobs';
+    if (!await appConfirm(`Cancel ${ids.length} ${noun}? Running jobs stop now, and a job waiting to retry is cancelled with its retry.`, { title: 'Cancel jobs', confirmText: `Cancel ${noun}`, cancelText: `Keep ${noun}` })) return;
 
     try {
         const result = await apiPost('/api/jobs/cancel-bulk', { job_ids: ids });
@@ -2514,7 +2514,7 @@ async function cancelSelectedQueuedJobs() {
         await loadJobs({ force: true });
         loadJobStats();
         const skipped = (result.skipped || []).length;
-        showToast('Jobs Cancelled', `Cancelled ${result.cancelled.length} queued ${result.cancelled.length === 1 ? 'job' : 'jobs'}${skipped ? `; ${skipped} could not be cancelled (already started, finished or removed)` : ''}`, skipped ? 'warning' : 'info');
+        showToast('Jobs Cancelled', `Cancelled ${result.cancelled.length} ${result.cancelled.length === 1 ? 'job' : 'jobs'}${skipped ? `; ${skipped} could not be cancelled (already finished or removed)` : ''}`, skipped ? 'warning' : 'info');
     } catch (error) {
         showToast('Error', 'Failed to cancel jobs: ' + error.message, 'danger');
     }
