@@ -1516,6 +1516,9 @@ class TestDecodeRows:
             "name": "Movie.mkv",
             "scale": 1,
             "chunk_frames": frames.CHUNK_FRAMES,
+            "progress_callback": None,
+            "window_start_s": 5680.5,
+            "window_length_s": 21.0,
         }
 
     @pytest.mark.parametrize(("gpu", "device"), [("NVIDIA", "cuda:0"), (None, None)], ids=["gpu", "cpu"])
@@ -1539,6 +1542,26 @@ class TestDecodeRows:
         # A quarter of the frames per text detection request: the same pixels, so the helper's per-request timeout
         # (sized for 64 frames at 320x180) holds at 640x360 too, and the queue holds the same bytes.
         assert seen["chunk_frames"] == frames.CHUNK_FRAMES // 4 == 16
+
+    @pytest.mark.parametrize(
+        ("length_s", "duration_s", "expected"),
+        [
+            (21.0, None, 21.0),
+            (None, 5400.0, 5400.0 - 100.0),
+            (None, None, None),
+            (None, 100.0, None),
+            (None, 50.0, None),
+        ],
+        ids=["explicit-length", "to-the-end", "unknown", "duration-equals-start", "duration-before-start"],
+    )
+    def test_the_window_length_reaches_the_decode(self, monkeypatch, length_s, duration_s, expected):
+        seen: dict = {}
+        monkeypatch.setattr(frames, "run_decode", lambda command, **kwargs: seen.update(kwargs) or [])
+        monkeypatch.setattr(frames, "probe_media", lambda path, **kwargs: MediaProbe(1000, ()))
+        frames.decode_rows(MOVIE, ffmpeg=FF, start_s=100.0, length_s=length_s, keyframes_only=True, fps=None, gpu=None,
+                           gpu_device_path=None, detect_boxes=lambda p: [()] * len(p), start_time_s=0.0,
+                           duration_s=duration_s)  # fmt: skip
+        assert (seen["window_length_s"], seen["window_start_s"]) == (expected, 100.0)
 
     @pytest.mark.parametrize(
         ("start_time_ms", "expected"),
@@ -1733,6 +1756,9 @@ class TestReadTextAt:
             "name": "Movie.mkv",
             "scale": 4,
             "chunk_frames": 1,
+            "progress_callback": None,
+            "window_start_s": 5692.0,
+            "window_length_s": 1.0,
         }
 
     def test_no_frame_there_reads_nothing(self, monkeypatch):
@@ -1966,3 +1992,39 @@ class TestReadableVideo:
         with pytest.raises(DecodeCancelledError, match="cancelled before decoding Movie.mkv"):
             readable_video_s(MOVIE, FF, from_s=2190.0, cancel_check=lambda: True)
         assert (list(reads), reads.starts) == ([], [])
+
+
+class TestRunDecodeProgress:
+    def test_stderr_timestamps_become_progress_against_the_window(self):
+        calls: list[tuple] = []
+        pts = ["5101.0", "5105.0", "5111.0"]
+        frames.run_decode(
+            fake_ffmpeg([10, 20, 30], pts, sleep_s=0.3),
+            hw_active=False,
+            pts_offset_s=1.0,
+            detect_boxes=_detector([]),
+            chunk_frames=1,
+            progress_callback=lambda *args: calls.append(args),
+            window_start_s=5100.0,
+            window_length_s=20.0,
+        )
+        assert calls  # polled while ffmpeg ran, not only at the end
+        # The last look is unthrottled: the row ends at the last frame (5111 - 1 - 5100 = 10 s), however the polls fell.
+        assert calls[-1][1] == 10.0
+        percents = [args[0] for args in calls]
+        assert percents == sorted(percents)
+        # showinfo times are from the container's start: 5101 - 1 - 5100 = 0 s into the window, and so on.
+        assert {round(args[1], 3) for args in calls} <= {0.0, 4.0, 10.0}
+        assert all(args[2] == 20.0 for args in calls)
+
+    def test_no_window_length_reports_nothing(self):
+        calls: list[tuple] = []
+        frames.run_decode(
+            fake_ffmpeg([10, 20], ["1.0", "2.0"], sleep_s=0.3),
+            hw_active=False,
+            pts_offset_s=0.0,
+            detect_boxes=_detector([]),
+            chunk_frames=1,
+            progress_callback=lambda *args: calls.append(args),
+        )
+        assert calls == []

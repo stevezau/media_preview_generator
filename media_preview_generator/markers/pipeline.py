@@ -286,12 +286,15 @@ class LocalDetectorSpec:
         source: The source whose place in the user's order the detector runs at.
         types: Marker types it can decide.
         detect: ``detect(file, *, ctx, gpu, gpu_device_path, phase_callback, cancel_check, pause_check, ffmpeg_threads,
-            fallback_callback, gpu_worker)``: a list of candidates, or a ``DetectorAnswer`` whose signature is stored as
+            fallback_callback, gpu_worker, progress_callback)``: a list of candidates, or a ``DetectorAnswer`` whose signature is stored as
             the answer's basis (``detector_runs``); raises ``DetectorUnavailableError`` when it can't answer this time.
             On a worker, ``pause_check`` is ``PipelineContext.freeze_check``, ``ffmpeg_threads`` the GPU worker's own
             (None on a CPU worker), ``fallback_callback`` shows a CPU fallback inside the detector on the worker's row,
             and ``gpu_worker`` says whether a GPU worker runs it (its CPU rerun after a failed GPU decode included,
             where ``gpu`` is None); on the checking thread the first three are None and ``gpu_worker`` False.
+            ``progress_callback`` is the worker's row progress ``(percent, done_s, total_s, speed, remaining_s)``, which
+            each FFmpeg run of the detector reports its own step through (:class:`.progress.StepProgress`); None on the
+            checking thread.
         stores: Sources its candidates are stored under, each candidate under its own ``source``; empty = ``source``.
         version: Stored with its answer; an answer from another version is asked again, even for decided types.
         version_of: ``version_of(file, ctx)``: the version for this file when it depends on the file or the settings
@@ -1600,6 +1603,7 @@ def _run_detector(
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
     gpu_worker: bool = False,
+    progress_callback: Callable[..., None] | None = None,
 ) -> DetectorUnavailableError | None:
     """Run one detector and store its answer under each of its sources with its version, and its basis when it gave one,
     in one transaction.
@@ -1622,6 +1626,7 @@ def _run_detector(
             ffmpeg_threads=ffmpeg_threads,
             fallback_callback=fallback_callback,
             gpu_worker=gpu_worker,
+            progress_callback=progress_callback,
         )
         found = list(answer.candidates if isinstance(answer, DetectorAnswer) else answer)
     except DetectorUnavailableError as exc:
@@ -2923,6 +2928,7 @@ def _attempt(
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
     gpu_worker: bool = False,
+    progress_callback: Callable[..., None] | None = None,
 ) -> ItemOutcome | None:
     """One run of a file; ``skipped`` (updated in place) holds the sources it was checked without for the whole job's
     reason, carried over from the file's earlier stages (``_run`` counts them once the file has its outcome), and
@@ -3201,6 +3207,7 @@ def _attempt(
                         ffmpeg_threads=ffmpeg_threads,
                         fallback_callback=_noting(fell_back, fallback_callback),
                         gpu_worker=gpu_worker,
+                        progress_callback=progress_callback,
                     )
                 except Exception as exc:
                     # The worker reruns the file on the CPU and names the reason; what ffmpeg itself said on the GPU
@@ -3678,6 +3685,7 @@ def _run(
     gpu: str | None = None,
     gpu_device_path: str | None = None,
     phase_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[..., None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
     job_paused: Callable[[], bool] | None = None,
@@ -3762,6 +3770,7 @@ def _run(
                             ffmpeg_threads=ffmpeg_threads,
                             fallback_callback=fallback_callback,
                             gpu_worker=gpu_worker,
+                            progress_callback=progress_callback,
                         )
                     except BaseException:
                         # A rerun goes on from here: the retry below after the file changed, or the worker's CPU rerun
@@ -3847,7 +3856,8 @@ def process_item(
         ctx: The job's context.
         gpu: The worker's GPU type, None on a CPU worker.
         gpu_device_path: The worker's device.
-        progress_callback: Unused until detectors report progress.
+        progress_callback: The worker row's progress ``(percent, done_s, total_s, speed, remaining_s)``; handed to the
+            detectors, each FFmpeg run of which reports its own step through it.
         phase_callback: Shows the current step on the worker row.
         cancel_check: True once the job is cancelled.
         pause_check: The dispatcher's pause for the job (its own pause included). Only a wait for another job's run of
@@ -3871,6 +3881,7 @@ def process_item(
             gpu=gpu,
             gpu_device_path=gpu_device_path,
             phase_callback=phase_callback,
+            progress_callback=progress_callback,
             cancel_check=cancel_check,
             pause_check=ctx.freeze_check,
             job_paused=pause_check,

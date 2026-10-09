@@ -3475,13 +3475,18 @@ function _patchWorkerCard(col, worker) {
         speed.parentElement.style.display = 'none';
         if (etaWrap) etaWrap.style.display = 'none';
     } else {
-        if (percent.title) percent.title = '';
-        percent.classList.remove('text-truncate', 'text-success', 'fw-semibold');
-        percent.style.flex = '';
-        percent.style.minWidth = '';
+        // An Intro & Credits step names itself beside its own percent: the bar restarts with each step.
+        const stepLabel = isProcessing && worker.job_kind === 'intro_credits' ? (worker.current_phase || '').trim() : '';
+        const stepped = !!stepLabel;
+        const percentText = stepped ? `${stepLabel} · ${progressPercent.toFixed(0)}%` : `${progressPercent.toFixed(1)}%`;
+        const percentTitle = stepped ? percentText : '';
+        if (percent.title !== percentTitle) percent.title = percentTitle;
+        percent.classList.remove('text-success', 'fw-semibold');
+        percent.classList.toggle('text-truncate', stepped);
+        percent.style.flex = stepped ? '1 1 auto' : '';
+        percent.style.minWidth = stepped ? '0' : '';
         speed.parentElement.style.display = '';
         if (etaWrap) etaWrap.style.display = '';
-        const percentText = `${progressPercent.toFixed(1)}%`;
         if (percent.textContent !== percentText) percent.textContent = percentText;
         const speedText = paused ? '—' : isProcessing ? (worker.speed || '0.0x') : '—';
         if (speed.textContent !== speedText) speed.textContent = speedText;

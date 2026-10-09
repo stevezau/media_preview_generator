@@ -30,6 +30,7 @@ from loguru import logger
 from ..credits import frames
 from ..freeze import Freeze
 from ..probe import ProbeError, ProbeStalledError, StreamStarts, ffprobe_path_for, stream_starts
+from ..progress import WorkerProgress
 from .matcher import Hit
 
 # Stored with every cached share: a change to how pictures are compared makes them compared again. Season audio's
@@ -214,6 +215,7 @@ def decode_frames(
     pause_check: Callable[[], bool] | Freeze | None = None,
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
+    progress_callback: WorkerProgress | None = None,
 ) -> Frames:
     """Decode a stretch at 2 fps, on the GPU when the worker has one and on the CPU when that fails.
 
@@ -236,6 +238,7 @@ def decode_frames(
         ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` for the GPU decode (``frames.decode_command``); the
             CPU fallback runs with ffmpeg's own thread count, as previews' does.
         fallback_callback: Told why, when the GPU decode fell back to the CPU.
+        progress_callback: The worker row's progress callback (``frames.run_decode``); a CPU fallback starts it over.
 
     Returns:
         (seconds from the start of the file, 64×36 grey frame) per decoded frame.
@@ -250,7 +253,7 @@ def decode_frames(
     name = os.path.basename(path)
     try:
         return _decode(path, start_s, length_s, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check,
-                       download_format, pause_check, ffmpeg_threads)  # fmt: skip
+                       download_format, pause_check, ffmpeg_threads, progress_callback)  # fmt: skip
     except frames.GpuDecodeError as exc:
         if gpu is None:
             raise
@@ -261,7 +264,7 @@ def decode_frames(
             raise
         raise GpuAttemptFailedError(str(exc)) from exc
     return _decode(path, start_s, length_s, ffmpeg, None, None, container_start_s, cancel_check, download_format,
-                   pause_check, None)  # fmt: skip
+                   pause_check, None, progress_callback)  # fmt: skip
 
 
 def _note_cpu_fallback(
@@ -301,6 +304,7 @@ def _decode(
     download_format: str | None,
     pause_check: Callable[[], bool] | Freeze | None,
     ffmpeg_threads: int | None,
+    progress_callback: WorkerProgress | None = None,
 ) -> Frames:
     command, hw_active = frames.decode_command(
         ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=False, fps=FPS, gpu=gpu,
@@ -314,7 +318,9 @@ def _decode(
 
     rows = frames.run_decode(command, hw_active=hw_active, detect_boxes=keep, pts_offset_s=container_start_s,
                              cancel_check=cancel_check, pause_check=pause_check, timeout_s=DECODE_TIMEOUT_S,
-                             name=os.path.basename(path))  # fmt: skip
+                             name=os.path.basename(path),
+                             progress_callback=progress_callback, window_start_s=start_s,
+                             window_length_s=length_s)  # fmt: skip
     decoded = np.concatenate(planes) if planes else np.zeros((0, FRAME_H, FRAME_W), dtype=np.float32)
     if len(rows) != len(decoded):
         raise frames.FrameDecodeError(f"ffmpeg gave {len(decoded) - len(rows)} frames of {path} no timestamp")
@@ -346,6 +352,7 @@ class Reader:
         pause_check: Callable[[], bool] | Freeze | None = None,
         ffmpeg_threads: int | None = None,
         fallback_callback: Callable[[str], None] | None = None,
+        progress_callback: WorkerProgress | None = None,
     ) -> None:
         """Set up the reader.
 
@@ -357,11 +364,12 @@ class Reader:
             pause_check: True while everything is paused (:func:`decode_frames`).
             ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (:func:`decode_frames`).
             fallback_callback: Told why when a GPU decode fell back to the CPU (:func:`decode_frames`).
+            progress_callback: The worker row's progress callback for each decoded stretch (:func:`decode_frames`).
         """
         self._ffmpeg, self._gpu, self._gpu_device_path = ffmpeg, gpu, gpu_device_path
         self._cancel_check = cancel_check
         self._worker: dict[str, Any] = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
-                        "fallback_callback": fallback_callback}  # fmt: skip
+                        "fallback_callback": fallback_callback, "progress_callback": progress_callback}  # fmt: skip
         self._starts: dict[str, StreamStarts] = {}
         self._frames: dict[tuple[str, float, float], Frames] = {}
         self._failed: dict[str, ReadFailedError] = {}
