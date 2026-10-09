@@ -76,7 +76,7 @@ docker run -d --name plex-marker-agent --restart unless-stopped \
   -v /path/to/plex/config:/plex \
   -p 9494:9494 \
   --security-opt no-new-privileges:true --cap-drop ALL \
-  ghcr.io/stevezau/plex-marker-agent:1.1.0
+  ghcr.io/stevezau/plex-marker-agent:1.1.1
 ```
 
 | Setting | What it is |
