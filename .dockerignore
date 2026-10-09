@@ -60,10 +60,10 @@ docs/
 # Unraid templates (not needed in image)
 unraid-templates/
 
-# Sources the image never COPYs (the Dockerfile uses only scripts/fetch_textdet_model.py from here)
+# Sources the app image never COPYs (it uses only scripts/fetch_textdet_model.py from here).
+# plex-marker-agent/ stays in: its image builds from the repo root context.
 emby-plugin/
 jellyfin-plugin/
-plex-marker-agent/
 tools/
 scripts/*
 !scripts/fetch_textdet_model.py

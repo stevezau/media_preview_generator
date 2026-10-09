@@ -228,7 +228,9 @@ class TestCheckedFilm:
         assert authed_page.evaluate("window.__barClicks") == [False]
         expect(authed_page.locator("#inspFrameDialog")).not_to_be_visible()
 
-        # A plain click afterwards still jumps.
+        # A plain click afterwards still jumps. The drag swallows only the click that ends it, cleared by a
+        # setTimeout(0); Chrome can run input before timers, so let one timer task pass before clicking.
+        authed_page.evaluate("() => new Promise((resolve) => setTimeout(resolve, 0))")
         authed_page.mouse.click(box["x"] + box["width"] * 0.25, y)
         _wait_now_near(authed_page, fx.FILM_MS * 0.25 / 1000)
         assert authed_page.evaluate("window.__barClicks") == [False, True]
