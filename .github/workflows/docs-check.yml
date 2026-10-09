@@ -58,6 +58,9 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[test]"
 
+      - name: Install actionlint (tests/test_docs_workflow.py lints the Pages workflows)
+        uses: ./.github/actions/install-actionlint
+
       - name: Docs tests
         env:
           MPG_REQUIRE_DOCS_BUILD: "1"
