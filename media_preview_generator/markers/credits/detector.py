@@ -27,6 +27,7 @@ from ..decide import chapter_hint, credits_chapter_start_ms, credits_limits_ms, 
 from ..freeze import Freeze
 from ..job_log import clock
 from ..models import Candidate, FileIdentity, MarkerType, Source
+from ..progress import WorkerProgress
 from . import cards, frames, rule_j
 from .textdet_helper import TextDetCancelledError, TextDetShuttingDownError, TextDetUnavailableError, get_textdet_pool
 
@@ -166,6 +167,7 @@ def find_credits(
     pause_check: Callable[[], bool] | None = None,
     ffmpeg_threads: int | None = None,
     read_text: Callable[[np.ndarray], list[list[str]]] | None = None,
+    progress_callback: WorkerProgress | None = None,
 ) -> CreditsTextResult:
     """Decode the tail, find the roll, refine its start and, when a scene follows it, its end.
 
@@ -244,6 +246,8 @@ def find_credits(
         ffmpeg_threads: The GPU worker's own ``ffmpeg_threads`` (``frames.decode_command``); None on a CPU worker.
         read_text: The words on luma planes (``TextDetectorPool.read_text``): the card the start lands on is read, and
             a start on prose cards moves past them (:func:`_past_prose`). None reads no card.
+        progress_callback: The worker row's progress callback; each decode reports its own percent, speed and ETA
+            through it (``frames.run_decode``), starting over with the next decode.
 
     Returns:
         The start, the end, and the rows they came from, with the scale they were read at.
@@ -269,7 +273,8 @@ def find_credits(
     decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "detect_boxes": detect_boxes,
               "cancel_check": cancel_check, "start_time_s": start_time_s,
               "download_format": thinning.download_format, "pause_check": Freeze.of(pause_check),
-              "ffmpeg_threads": ffmpeg_threads}  # fmt: skip
+              "ffmpeg_threads": ffmpeg_threads, "progress_callback": progress_callback,
+              "duration_s": duration_ms / 1000.0}  # fmt: skip
     tail_start = frames.tail_start_s(
         duration_ms, tail_s=frames.tail_length_s(is_episode=is_episode) if tail_s is None else tail_s
     )
@@ -535,7 +540,7 @@ def _past_prose(
         return found
     name = os.path.basename(path)
     reading = {key: decode[key] for key in ("ffmpeg", "gpu", "gpu_device_path", "cancel_check", "start_time_s",
-                                            "download_format", "pause_check", "ffmpeg_threads")}  # fmt: skip
+                                            "download_format", "pause_check", "ffmpeg_threads", "progress_callback")}  # fmt: skip
 
     def one_fps(start_s: float, end_s: float, scale: int = 1) -> list[rule_j.Row]:
         return frames.decode_rows(path, **decode, start_s=start_s, length_s=end_s - start_s, keyframes_only=False,
@@ -832,6 +837,7 @@ def detect_credits_text(
     ffmpeg_threads: int | None = None,
     fallback_callback: Callable[[str], None] | None = None,
     gpu_worker: bool = False,
+    progress_callback: WorkerProgress | None = None,
 ) -> DetectorAnswer:
     """The local detector: a credits candidate from the file's on-screen credit roll.
 
@@ -862,6 +868,7 @@ def detect_credits_text(
             that on its row itself.
         gpu_worker: Whether a GPU worker runs the file. On its CPU rerun (``gpu`` None) text detection gets a CPU
             helper of its own instead of one of the CPU workers' (``TextDetectorPool.detect_boxes``).
+        progress_callback: The worker row's progress callback (:func:`find_credits`).
 
     Returns:
         One candidate (its end None when the roll runs to the end of the file), or none when the tail holds no
@@ -918,6 +925,7 @@ def detect_credits_text(
             earliest_start_s=_earliest_start_s(rec, ctx),
             pause_check=pause_check,
             ffmpeg_threads=threads,
+            progress_callback=progress_callback,
         )
 
     try:

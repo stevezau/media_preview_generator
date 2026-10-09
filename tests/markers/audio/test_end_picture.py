@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -174,13 +174,16 @@ class _Decoder:
         self.seed_of = seed_of
         self.calls: list[tuple] = []
         self.download_formats: dict[str, str | None] = {}
+        self.progress_callbacks: list = []
 
     def __call__(self, path, start_s, length_s, *, ffmpeg, gpu, gpu_device_path, container_start_s, cancel_check,
-                 download_format, pause_check=None, ffmpeg_threads=None, fallback_callback=None):  # fmt: skip
+                 download_format, pause_check=None, ffmpeg_threads=None, fallback_callback=None,
+                 progress_callback=None):  # fmt: skip
         self.calls.append((path, round(start_s, 3), round(length_s, 3), gpu, gpu_device_path, container_start_s))
         self.download_formats[path] = download_format
+        self.progress_callbacks.append(progress_callback)
         self.worker = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
-                       "fallback_callback": fallback_callback}  # fmt: skip
+                       "fallback_callback": fallback_callback, "progress_callback": progress_callback}  # fmt: skip
         times = np.arange(np.ceil(start_s * 2) / 2, start_s + length_s, 0.5)
         return [(float(t), _textured(self.seed_of(path, float(t)))) for t in times]
 
@@ -247,7 +250,16 @@ class TestReader:
                                        ffmpeg_threads=3, fallback_callback=flag)  # fmt: skip
         with patched:
             reader.share("a", "b", 0.0, 30.0, 0.0)
-        assert decoder.worker == {"pause_check": paused, "ffmpeg_threads": 3, "fallback_callback": flag}
+        assert decoder.worker == {
+            "pause_check": paused, "ffmpeg_threads": 3, "fallback_callback": flag, "progress_callback": None,
+        }  # fmt: skip
+
+    def test_the_workers_progress_callback_reaches_every_decode(self):
+        decoder, sentinel = _Decoder(), MagicMock()
+        reader, patched = self._reader(lambda path, **_kw: StreamStarts(0.0, None), decoder, progress_callback=sentinel)
+        with patched:
+            reader.share("a", "b", 0.0, 30.0, 0.0)
+        assert decoder.progress_callbacks == [sentinel, sentinel]
 
     def test_each_file_is_probed_once_and_each_window_decoded_once(self):
         decoder = _Decoder()
@@ -381,7 +393,8 @@ class TestDecodeFrames:
         calls = []
 
         def run_decode(command, *, hw_active, detect_boxes, pts_offset_s, cancel_check, timeout_s, name,
-                       pause_check=None):  # fmt: skip
+                       pause_check=None, progress_callback=None, window_start_s=0.0,
+                       window_length_s=None):  # fmt: skip
             calls.append({"command": command, "hw_active": hw_active, "pts_offset_s": pts_offset_s,
                           "timeout_s": timeout_s, "cancel_check": cancel_check, "pause_check": pause_check})  # fmt: skip
             if fail_on_gpu and hw_active:

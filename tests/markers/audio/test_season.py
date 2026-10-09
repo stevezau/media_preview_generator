@@ -456,7 +456,7 @@ class TestEndPictureCheck:
             )  # fmt: skip
         assert reader.call_args.kwargs == {
             "ffmpeg": ctx.config.ffmpeg_path, "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "cancel_check": cancel,
-            "pause_check": paused, "ffmpeg_threads": 3, "fallback_callback": flag,
+            "pause_check": paused, "ffmpeg_threads": 3, "fallback_callback": flag, "progress_callback": None,
         }  # fmt: skip
         assert reader.return_value.share.call_count == 2
         # Every fingerprint the step made ran with the global pause, at FFmpeg's own thread count: chromaprint is CPU
@@ -464,6 +464,19 @@ class TestEndPictureCheck:
         # work is never capped by a GPU's value.
         assert len(audio.worker) == 3
         assert audio.worker == [{"pause_check": paused, "ffmpeg_threads": None}] * 3
+
+    def test_the_workers_progress_callback_reaches_every_fingerprint_and_the_end_picture_reader(self, store, show):
+        e1, _e2, _e3 = show(1, 3)
+        sentinel = MagicMock()
+        with Audio(points=early_points) as audio, patch.object(season.end_picture, "Reader") as reader:
+            reader.return_value.share.return_value = 1.0
+            rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e1), progress_callback=sentinel)
+        assert reader.call_args.kwargs["progress_callback"] is sentinel
+        assert len(audio.progress) == 3
+        for make in audio.progress:
+            make(60.0, time.monotonic).update(30.0)  # the factory's step reports through the worker's callback
+        assert [call.args[:3] for call in sentinel.call_args_list] == [(50.0, 30.0, 60.0)] * 3
 
     def test_a_cpu_workers_fingerprints_have_no_thread_cap(self, store, show):
         e1, _e2, _e3 = show(1, 3)

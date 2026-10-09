@@ -70,14 +70,16 @@ class Audio:
         self.share = share
         self.compared: list[tuple] = []
         self.worker: list[dict] = []  # each ffmpeg run's pause check and threads
+        self.progress: list = []  # each ffmpeg run's progress factory
 
     def _share(self, reader, target, partner, start_s, end_s, offset_s):
         self.compared.append((target, partner, start_s, end_s, offset_s))
         return self.share(target, partner, start_s, end_s, offset_s)
 
     def compute(self, path, duration_ms, *, ffmpeg, cancel_check=None, retime=None, pause_check=None,
-                ffmpeg_threads=None):  # fmt: skip
+                ffmpeg_threads=None, progress=None):  # fmt: skip
         self.worker.append({"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads})
+        self.progress.append(progress)
         if retime is not None:
             self.retimes.append((path, retime))
             if path in self.fail_retimed:

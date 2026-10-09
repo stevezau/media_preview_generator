@@ -199,6 +199,7 @@ class Worker:
         self.library_name = ""
         self.title_max_width = 20
         self.ffmpeg_started = False  # Track if FFmpeg has started outputting progress
+        self.start_logged = False  # "Started processing" once per file, though a step-by-step kind restarts progress
         self.task_start_time: float = 0  # Track when task started
         # Free-form sub-phase string emitted by the multi-server
         # processor (e.g. "Resolving item id on EmbyTest…"). Surfaced
@@ -395,6 +396,7 @@ class Worker:
         self.total_duration = 0.0
         self.remaining_time = 0.0
         self.ffmpeg_started = False
+        self.start_logged = False
         self.task_start_time = time.time()
         self.fallback_active = False
         self.fallback_reason = None
@@ -781,7 +783,16 @@ class Worker:
             self._log_pickup(item, display_name)
 
             def _phase_cb(text: str) -> None:
+                # A new phase is a new step with its own FFmpeg run (or none), so the row starts it over: the progress
+                # callback shows its percent, speed and ETA again once that run reports. Plain writes, not the pool's
+                # ``_progress_lock`` (a worker has no handle on it): each is one attribute store. A reporter of the
+                # previous step is normally done by now (its reader is joined, bounded); one that outlives that join
+                # could write once over the reset, and the next report from the new step corrects it.
                 self.current_phase = text or ""
+                self.ffmpeg_started = False
+                self.progress_percent = 0
+                self.speed = "0.0x"
+                self.remaining_time = 0.0
 
             def _fallback_cb(reason: str) -> None:
                 # A step that fell back to the CPU inside the kind's own run (the end-picture decode) shows on the row
@@ -1640,7 +1651,8 @@ class WorkerPool:
             worker.bitrate = bitrate
 
             # Log when FFmpeg actually starts processing (only once)
-            if not worker.ffmpeg_started:
+            if not worker.start_logged:
+                worker.start_logged = True
                 display_path = worker.media_file if worker.media_file else worker.media_title
                 if worker.worker_type == "GPU":
                     logger.info("[GPU {}]: Started processing {}", worker.gpu_index, display_path)

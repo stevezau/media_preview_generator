@@ -4726,6 +4726,7 @@ class TestStages:
         pause = MagicMock(return_value=False)
         ctx.freeze_check = MagicMock(return_value=False)
         phase = MagicMock()
+        progress = MagicMock()
         with (
             patch.object(pipeline, "probe_media", return_value=_probe()),
             patch.object(pipeline, "publisher_for", return_value=plex),
@@ -4738,11 +4739,13 @@ class TestStages:
                 cancel_check=cancel,
                 pause_check=pause,
                 phase_callback=phase,
+                progress_callback=progress,
             )
         (rec,), kwargs = detector.call_args
         assert rec.canonical_path == media and rec.duration_ms == DUR
         assert kwargs["ctx"] is ctx and kwargs["gpu"] == "NVIDIA" and kwargs["gpu_device_path"] == "cuda:0"
         assert kwargs["cancel_check"] is cancel
+        assert kwargs["progress_callback"] is progress
         # The phase reaches the worker row; the pipeline also keeps it for the detector's job log line.
         kwargs["phase_callback"]("Reading the credits…")
         phase.assert_called_with("Reading the credits…")

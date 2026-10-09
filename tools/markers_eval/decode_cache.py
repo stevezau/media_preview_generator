@@ -25,6 +25,7 @@ from loguru import logger
 
 from media_preview_generator.markers.credits import frames
 from media_preview_generator.markers.freeze import Freeze
+from media_preview_generator.markers.progress import WorkerProgress
 
 
 def rows_to_json(rows: Sequence[frames.Row]) -> list[list]:
@@ -181,6 +182,8 @@ class DecodeCache:
         download_format: str | None = None,
         pause_check: Callable[[], bool] | Freeze | None = None,
         ffmpeg_threads: int | None = None,
+        progress_callback: WorkerProgress | None = None,
+        duration_s: float | None = None,
     ) -> list[frames.Row]:
         """:func:`frames.decode_rows`, once per file identity, exact command, start time and text detection backend.
 
@@ -228,6 +231,7 @@ class DecodeCache:
                 gpu=gpu, gpu_device_path=gpu_device_path, detect_boxes=detect_boxes, cancel_check=cancel_check,
                 timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every, drop_non_key=drop_non_key,
                 scale=scale, download_format=download_format, pause_check=pause_check, ffmpeg_threads=ffmpeg_threads,
+                progress_callback=progress_callback, duration_s=duration_s,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
             self._keep(path, ffmpeg, what, before, {"gpu_error": str(exc)})
@@ -251,6 +255,7 @@ class DecodeCache:
         download_format: str | None = None,
         pause_check: Callable[[], bool] | Freeze | None = None,
         ffmpeg_threads: int | None = None,
+        progress_callback: WorkerProgress | None = None,
     ) -> list[str]:
         """:func:`frames.read_text_at`, once per file identity, exact command, start time and text detection backend
         (the words are kept as rows are, under the backend that read them).
@@ -282,6 +287,7 @@ class DecodeCache:
                 path, ffmpeg=ffmpeg, at_s=at_s, scale=scale, gpu=gpu, gpu_device_path=gpu_device_path,
                 read_text=read_text, cancel_check=cancel_check, timeout_s=timeout_s, start_time_s=start_time_s,
                 download_format=download_format, pause_check=pause_check, ffmpeg_threads=ffmpeg_threads,
+                progress_callback=progress_callback,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
             self._keep(path, ffmpeg, what, before, {"gpu_error": str(exc)})

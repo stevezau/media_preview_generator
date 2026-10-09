@@ -15,6 +15,7 @@ from loguru import logger
 
 from ..markers.freeze import Freeze
 from ..markers.probe import _count_stuck, kill_and_collect
+from ..markers.progress import read_progress
 
 # The filter Plex Media Server 1.43 runs for each audio stream (``Plex Transcoder -i FILE -map 0:N -af ... -f null -``).
 LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1:LRA=9:print_format=json"
@@ -235,51 +236,6 @@ def valid_measurements(fields: dict[str, str]) -> bool:
         and math.isfinite(values["ln:lra"])
         and math.isfinite(values["ln:threshold"])
     )
-
-
-def _parse_progress_seconds(value: str) -> float | None:
-    """ffmpeg's ``out_time_us``/``out_time_ms`` (both microseconds) as seconds; None for ``N/A`` or junk."""
-    try:
-        seconds = int(value) / 1_000_000
-    except ValueError:
-        return None
-    return seconds if seconds >= 0 else None
-
-
-def _parse_progress_speed(value: str) -> float | None:
-    """ffmpeg's ``speed=1.4x`` as 1.4; None for ``N/A`` or junk."""
-    try:
-        speed = float(value.strip().removesuffix("x"))
-    except ValueError:
-        return None
-    return speed if math.isfinite(speed) and speed > 0 else None
-
-
-def read_progress(stream, on_progress: Callable[[float, float | None], None] | None) -> None:
-    """Drain ffmpeg's ``-progress`` output to its end, reporting each block (``progress=`` line) once.
-
-    Reading to the end matters even with no callback: an undrained pipe would block ffmpeg.
-
-    Args:
-        stream: ffmpeg's stdout (binary).
-        on_progress: Called with (seconds of audio processed, speed as a multiple of real time or None).
-    """
-    seconds: float | None = None
-    speed: float | None = None
-    warned = False
-    for raw in stream:
-        key, _, value = raw.decode("utf-8", errors="replace").strip().partition("=")
-        if key in ("out_time_us", "out_time_ms"):
-            seconds = _parse_progress_seconds(value)
-        elif key == "speed":
-            speed = _parse_progress_speed(value)
-        elif key == "progress" and on_progress is not None and seconds is not None:
-            try:
-                on_progress(seconds, speed)
-            except Exception as exc:
-                if not warned:
-                    warned = True
-                    logger.warning("Loudness progress callback failed (further failures this run not logged): {}", exc)
 
 
 def _read_all(stream, sink: list[bytes]) -> None:

@@ -510,6 +510,7 @@ def test_ensure_computes_once_then_reads_the_cache(store, tmp_path):
         cancel_check=None,
         pause_check=None,
         retime=None,
+        progress=None,
     )
     stored = store.get_fingerprint(rec.id, "intro")
     assert (stored.start_s, stored.length_s, stored.algorithm) == (0.0, 105.0, 1)
@@ -528,6 +529,7 @@ def test_a_retimed_fingerprint_is_computed_and_cached_beside_the_files_own(store
         cancel_check=None,
         pause_check=None,
         retime=retime,
+        progress=None,
     )
     stored = store.get_fingerprint(rec.id, "intro@0.959041")
     assert (stored.start_s, stored.length_s, stored.algorithm, stored.points) == (
@@ -566,6 +568,7 @@ def test_skip_is_asked_after_the_lock_and_a_cache_miss(store, tmp_path):
         cancel_check=None,
         pause_check=None,
         retime=None,
+        progress=None,
     )
 
 
@@ -788,6 +791,7 @@ def test_a_fingerprint_made_another_way_is_computed_again(store, tmp_path, made)
         cancel_check=None,
         pause_check=None,
         retime=None,
+        progress=None,
     )
     stored = store.get_fingerprint(rec.id, "intro")
     assert (stored.algorithm, stored.length_s) == (fpmod.ALGORITHM, fpmod.window_s(rec.duration_ms))
@@ -1006,3 +1010,106 @@ class TestBackgroundSweep:
             assert fpmod._SWEEP_LOCK.acquire(timeout=5)
             fpmod._SWEEP_LOCK.release()
         assert "Couldn't clear old audio fingerprints" in loguru_caplog.text
+
+
+class TestProgress:
+    """Fingerprint ffmpeg reports how far through its window it is, on a pipe of its own."""
+
+    def test_without_progress_the_command_is_unchanged(self):
+        assert fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", 105.0) == fpmod.fingerprint_command(
+            "ffmpeg", "/m/a.mkv", 105.0, progress_fd=None
+        )
+        assert "-progress" not in fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", 105.0)
+
+    def test_with_a_descriptor_the_command_carries_progress_pipe_n(self):
+        command = fpmod.fingerprint_command("ffmpeg", "/m/a.mkv", 105.0, progress_fd=7)
+        assert command[command.index("-progress") + 1] == "pipe:7"
+        assert command[-1] == "-"  # the fingerprint still goes to stdout
+
+    @pytest.mark.parametrize(("retime", "scale"), [(None, 1.0), (0.9, 0.9)])
+    def test_progress_lines_on_the_pipe_reach_the_callback_against_the_window(self, tmp_path, retime, scale):
+        script = tmp_path / "ffmpeg"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent("""
+            import os, sys
+            fd = int(sys.argv[sys.argv.index("-progress") + 1].split(":")[1])
+            os.write(fd, b"out_time_us=20000000\\nspeed=2.0x\\nprogress=continue\\n")
+            os.write(fd, b"out_time_us=40000000\\nspeed=2.0x\\nprogress=end\\n")
+            sys.stdout.buffer.write(bytes([1, 0, 0, 0]))
+        """)
+        )
+        script.chmod(0o755)
+        callback = MagicMock()
+        points = fpmod.compute_fingerprint(
+            "/m/a.mkv",
+            400_000,
+            ffmpeg=str(script),
+            retime=retime,
+            progress=lambda total_s, clock: fpmod.StepProgress(callback, total_s=total_s, clock=clock),
+        )
+        assert points.tolist() == [1]
+        window = fpmod.window_s(400_000)
+        _wait_for(lambda: callback.call_count >= 2, within_s=5)
+        first, second = (call.args for call in callback.call_args_list[:2])
+        assert first[1] == pytest.approx(20.0 * scale) and first[2] == pytest.approx(window)
+        assert second[1] == pytest.approx(40.0 * scale)
+
+    @staticmethod
+    def _open_fds() -> int:
+        return len(os.listdir("/proc/self/fd"))
+
+    @staticmethod
+    def _progress_script(tmp_path, *, then: str) -> pathlib.Path:
+        script = tmp_path / "ffmpeg"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(f"""
+            import os, sys, time
+            fd = int(sys.argv[sys.argv.index("-progress") + 1].split(":")[1])
+            try:
+                os.write(fd, b"out_time_us=20000000\\nspeed=2.0x\\nprogress=continue\\n")
+            except BrokenPipeError:
+                pass  # like ffmpeg, which ignores SIGPIPE and a progress pipe nobody reads
+            {then}
+        """)
+        )
+        script.chmod(0o755)
+        return script
+
+    def test_a_progress_thread_that_cannot_start_leaves_the_fingerprint_and_no_descriptor_behind(
+        self, tmp_path, monkeypatch
+    ):
+        script = self._progress_script(tmp_path, then="sys.stdout.buffer.write(bytes([1, 0, 0, 0]))")
+        real_start = threading.Thread.start
+
+        def start(thread):
+            if thread.name == "fingerprint-progress":
+                raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        before = self._open_fds()
+        points = fpmod.compute_fingerprint(
+            "/m/a.mkv",
+            400_000,
+            ffmpeg=str(script),
+            progress=lambda total_s, clock: fpmod.StepProgress(MagicMock(), total_s=total_s, clock=clock),
+        )
+        assert points.tolist() == [1]
+        assert self._open_fds() == before
+
+    def test_a_cancel_after_progress_started_leaves_no_descriptor_and_ends_the_reader(self, tmp_path):
+        script = self._progress_script(tmp_path, then="time.sleep(60)")
+        callback = MagicMock()
+        before = self._open_fds()
+        with pytest.raises(fpmod.FingerprintError, match="cancelled"):
+            fpmod.compute_fingerprint(
+                "/m/a.mkv",
+                400_000,
+                ffmpeg=str(script),
+                cancel_check=lambda: callback.call_count > 0,
+                progress=lambda total_s, clock: fpmod.StepProgress(callback, total_s=total_s, clock=clock),
+            )
+        _wait_for(lambda: not [t for t in threading.enumerate() if t.name == "fingerprint-progress"], within_s=5)
+        assert self._open_fds() == before

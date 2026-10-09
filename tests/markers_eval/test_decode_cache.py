@@ -274,7 +274,7 @@ def test_a_card_is_read_once_per_file_command_and_backend(tmp_path, monkeypatch,
 
 def test_the_real_read_gets_every_argument_it_was_asked_for(tmp_path, monkeypatch, media):
     decoder = _Decoder(monkeypatch)
-    read_text, cancel, paused = object(), object(), object()
+    read_text, cancel, paused, progress = object(), object(), object(), object()
     DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0").read_text_at(
         str(media),
         **_read(
@@ -285,11 +285,13 @@ def test_the_real_read_gets_every_argument_it_was_asked_for(tmp_path, monkeypatc
             download_format="p010le",
             pause_check=paused,
             ffmpeg_threads=3,
+            progress_callback=progress,
         ),  # fmt: skip
     )
     assert decoder.reads == [{"ffmpeg": "/ff", "at_s": 5692.0, "scale": 4, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
                               "read_text": read_text, "cancel_check": cancel, "timeout_s": 90.0, "start_time_s": 12.5,
-                              "download_format": "p010le", "pause_check": paused, "ffmpeg_threads": 3}]  # fmt: skip
+                              "download_format": "p010le", "pause_check": paused, "ffmpeg_threads": 3,
+                              "progress_callback": progress}]  # fmt: skip
 
 
 def test_a_gpu_read_failure_is_kept_and_raised_again_without_decoding(tmp_path, monkeypatch, media):
@@ -333,6 +335,7 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
     decoder = _Decoder(monkeypatch)
     detect_boxes = object()
     paused = object()
+    progress = object()
     DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0").decode_rows(
         str(media),
         **_kwargs(
@@ -349,13 +352,16 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
             download_format="p010le",
             pause_check=paused,
             ffmpeg_threads=3,
+            progress_callback=progress,
+            duration_s=5701.0,
         ),  # fmt: skip
     )
     (kwargs,) = decoder.decodes
     assert kwargs == {"ffmpeg": "/ff", "start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1,
                       "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "detect_boxes": detect_boxes, "cancel_check": None,
                       "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48, "drop_non_key": True,
-                      "scale": 2, "download_format": "p010le", "pause_check": paused, "ffmpeg_threads": 3}  # fmt: skip
+                      "scale": 2, "download_format": "p010le", "pause_check": paused, "ffmpeg_threads": 3,
+                      "progress_callback": progress, "duration_s": 5701.0}  # fmt: skip
 
 
 def test_the_cache_takes_exactly_the_arguments_the_real_decode_takes():
