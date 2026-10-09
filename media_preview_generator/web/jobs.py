@@ -1613,7 +1613,7 @@ class JobManager:
         return revived
 
     def _followed_job_end(self, job: Job) -> datetime | None:
-        """When the preview job a follow-up waits for (``follows_job_id``) finished, or None when it hasn't or is gone."""
+        """When the preview job a follow-up belongs to (``follows_job_id``) finished, or None when it hasn't or is gone."""
         followed_id = (job.config or {}).get("follows_job_id")
         followed = self._jobs.get(followed_id) if isinstance(followed_id, str) else None
         return _parse_utc(followed.completed_at) if followed is not None else None
@@ -1665,9 +1665,9 @@ class JobManager:
 
     def requeue_interrupted_followers(self, kept_job_ids: set[str]) -> list[Job]:
         """Revive the interrupted jobs left behind by :meth:`requeue_interrupted_jobs` that follow a job the restart
-        kept (``follows_job_id``: an Intro & Credits follow-up waiting for its preview job), whatever their age.
+        kept (``follows_job_id``: an Intro & Credits or loudness follow-up of that preview job), whatever their age.
 
-        A follow-up only waits for its preview job, so it is as old as that job: queued when the preview job was first
+        A follow-up is as old as its preview job (Intro & Credits waits for it; loudness doesn't): queued when it was first
         started, it can be older than the preview job's ``started_at`` (a long wait for a slot) or than a pause that
         holds the preview job across the restart. Failed as too old, its files would get previews and no markers.
 
