@@ -88,7 +88,7 @@ The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **T
 > up to the configured concurrent-job cap (**Settings → Processing options → Max concurrent jobs**); extra jobs sit in **Pending** and the
 > gate releases them in priority order as slots free up. Manual, webhook, and
 > scheduled jobs all share the same gate. To hard-stop everything, use
-> **Pause** (in the Workers header) — the global pause is persisted and survives restarts.
+> **Pause** (in the Workers header, always available) — the global pause is persisted and survives restarts.
 >
 > Priority also decides who gets the next free worker **file by file**, so a
 > High job overtakes a running full scan without cancelling or pausing it — the
