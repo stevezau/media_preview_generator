@@ -532,6 +532,8 @@ jobs:
         with:
           # This job doesn't log in to Docker Hub, so base images come through Google's Docker Hub mirror: anonymous
           # pulls from shared runners hit Docker Hub's rate limit (429). BuildKit falls back to Docker Hub on a miss.
+          # BuildKit's own image too: setup-buildx pulls it from Docker Hub before the mirror above applies.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
@@ -635,6 +637,8 @@ jobs:
         with:
           # This job doesn't log in to Docker Hub, so base images come through Google's Docker Hub mirror: anonymous
           # pulls from shared runners hit Docker Hub's rate limit (429). BuildKit falls back to Docker Hub on a miss.
+          # BuildKit's own image too: setup-buildx pulls it from Docker Hub before the mirror above applies.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
