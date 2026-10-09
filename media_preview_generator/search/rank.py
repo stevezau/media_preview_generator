@@ -23,7 +23,11 @@ Penalty:
 
 from __future__ import annotations
 
+from typing import TypeVar
+
 from .query import SearchQuery
+
+_T = TypeVar("_T")
 
 _RANK_FLOOR = 0.3
 
@@ -77,11 +81,11 @@ def rank_score(query: SearchQuery, candidate_name: str, candidate_type: str = ""
 
 def filter_and_rank(
     query: SearchQuery,
-    candidates: list[tuple[str, str, object]],
+    candidates: list[tuple[str, str, _T]],
     *,
     floor: float = _RANK_FLOOR,
     limit: int = 50,
-) -> list[object]:
+) -> list[_T]:
     """Rank ``candidates`` and return the carriers above ``floor``.
 
     Args:
@@ -98,7 +102,7 @@ def filter_and_rank(
     Returns:
         Carriers in descending score order.
     """
-    scored: list[tuple[float, object]] = []
+    scored: list[tuple[float, _T]] = []
     for name, ctype, carrier in candidates:
         score = rank_score(query, name, ctype)
         if score >= floor:

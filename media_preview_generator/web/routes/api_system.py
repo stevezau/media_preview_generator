@@ -6,6 +6,7 @@ import pathlib
 import re as _re
 import threading
 import time
+from typing import Any
 
 from flask import current_app, jsonify, request
 from loguru import logger
@@ -427,7 +428,7 @@ def _probe_media_server_entry(entry: dict) -> dict:
 
 @api.route("/system/media-servers")
 @setup_or_auth_required
-def get_media_servers_status():
+def get_media_servers_status() -> Any:
     """Per-server reachability summary for the dashboard.
 
     Returns one row per configured ``media_servers`` entry, each tagged
@@ -712,7 +713,7 @@ def _read_tail_lines(path: str, max_lines: int) -> list[str]:
 
 @api.route("/logs/history")
 @setup_or_auth_required
-def get_log_history():
+def get_log_history() -> Any:
     """Return recent log entries from the persistent app.log file.
 
     Query params:
@@ -934,7 +935,7 @@ def get_whats_new():
 
 @api.route("/system/whats-new/dismiss", methods=["POST"])
 @setup_or_auth_required
-def dismiss_whats_new():
+def dismiss_whats_new() -> Any:
     """Mark the current version's changelog as seen.
 
     Two flows:

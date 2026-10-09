@@ -98,7 +98,7 @@ test = [
 dev = [
     "media-preview-generator[test]",
     "ruff>=0.6.0",
-    "mypy>=1.13",
+    "mypy==2.4.0",
     "pre-commit>=3.6.0",
 ]
 

@@ -5,7 +5,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from flask import Response, current_app, jsonify, request, session
 from loguru import logger
@@ -350,7 +350,7 @@ def _filter_jobs_by_query(
     for job in jobs:
         cfg = job.config or {}
         labels = [job.id, job.library_name, job.server_name, job.server_type, job.kind]
-        labels.extend((kind_labels.get(job.kind, ""), source_labels.get(cfg.get("source"), "")))
+        labels.extend((kind_labels.get(job.kind, ""), source_labels.get(cast(str, cfg.get("source")), "")))
         labels.extend(job_library_names(job, configs))
         if job.id not in scopes:
             scopes[job.id] = job_library_scope(job, configs, path_cache)
@@ -371,7 +371,7 @@ def _filter_jobs_by_query(
 
 @api.route("/jobs")
 @api_token_required
-def get_jobs():
+def get_jobs() -> Any:
     """Get jobs with optional pagination.
 
     Query params:
@@ -554,7 +554,7 @@ def get_job(job_id):
 
 @api.route("/jobs/<chain_id>/attempts")
 @api_token_required
-def get_chain_attempts(chain_id):
+def get_chain_attempts(chain_id: str) -> Any:
     """Return the full lifecycle of a retry chain for the modal Attempts dropdown.
 
     The chain row IS the originating dispatch Job (same UUID). Each
@@ -835,7 +835,7 @@ def _check_servers_answer(queued: "ReconcileQueued") -> tuple[Response, int]:
 
 @api.route("/jobs", methods=["POST"])
 @api_token_required
-def create_job():
+def create_job() -> Any:
     """Create a new job.
 
     Accepts any of (in priority order):
@@ -959,7 +959,7 @@ def _create_scan_job(
 
 @api.route("/jobs/manual", methods=["POST"])
 @api_token_required
-def create_manual_job():
+def create_manual_job() -> Any:
     """Create a job that processes specific file paths.
 
     Accepts a JSON body with ``file_paths`` (list of absolute media paths)
@@ -1034,7 +1034,7 @@ _MEDIA_SEARCH_LIMIT = 25
 @api.route("/media/search")
 @api_token_required
 @limiter.limit("20 per minute")
-def media_search():
+def media_search() -> Any:
     """Search enabled media servers for shows, movies and episodes.
 
     Powers the Manual Generation typeahead. Each hit carries its **local**
@@ -1238,7 +1238,7 @@ def _cancel_job_by_user(job_manager, job_id: str):
 
 @api.route("/jobs/cancel-bulk", methods=["POST"])
 @api_token_required
-def cancel_jobs_bulk():
+def cancel_jobs_bulk() -> Any:
     """Cancel several queued or running jobs at once, as the row Cancel button would.
 
     Body: ``{"job_ids": ["<id>", ...]}`` with 1 to ``_BULK_CANCEL_MAX`` ids.
@@ -1779,7 +1779,7 @@ def get_job_logs(job_id):
 
 @api.route("/jobs/<job_id>/files", methods=["GET"])
 @api_token_required
-def get_job_file_results(job_id):
+def get_job_file_results(job_id: str) -> Any:
     """Get per-file processing results for a job with server-side pagination.
 
     Query params:

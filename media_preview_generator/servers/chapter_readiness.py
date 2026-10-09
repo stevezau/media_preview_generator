@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -94,7 +94,7 @@ def chapter_readiness_section(
         ),
         "ok": native_off,
         "severity": "recommended",
-        "current": NATIVE_MODES[mode] if known else "Unable to verify",
+        "current": NATIVE_MODES[cast(str, mode)] if known else "Unable to verify",
         "recommended": "Never",
         "reason": native_reason,
         "actions": {},

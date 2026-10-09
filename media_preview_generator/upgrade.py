@@ -1111,10 +1111,10 @@ def _migrate_to_v9(sm) -> list:
                 if not isinstance(row, dict):
                     deduped_ep.append(row)
                     continue
-                key = ((row.get("value") or "").strip(), (row.get("type") or "path").strip())
-                if key in seen_ep:
+                ep_key = ((row.get("value") or "").strip(), (row.get("type") or "path").strip())
+                if ep_key in seen_ep:
                     continue
-                seen_ep.add(key)
+                seen_ep.add(ep_key)
                 deduped_ep.append(row)
             if len(deduped_ep) != len(original_ep):
                 target["exclude_paths"] = deduped_ep
@@ -1718,7 +1718,7 @@ def _migrate_to_v21(sm) -> list[str]:
     if not isinstance(reasons, list):
         reasons = ["manual"] if ambiguous_pause else []
     reasons = sorted(set(reasons) & {"manual", "quiet_hours"})
-    updates = {
+    updates: dict[str, Any] = {
         "worker_groups": groups,
         "worker_groups_revision": int(stored.get("worker_groups_revision", 0)),
         "processing_pause_reasons": reasons,

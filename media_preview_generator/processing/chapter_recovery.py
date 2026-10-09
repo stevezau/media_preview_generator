@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, cast
 
 from PIL import Image
 
@@ -127,11 +127,11 @@ def _inspect_index(path: str, expected: SourceFingerprint, starts: list[int]) ->
             for eid, entry in _elements(payload(cues_at, 0x1C53BB6B, _MAX_INDEX_BYTES)):
                 if eid != 0xBB:
                     continue
-                fields = list(_elements(entry))
+                cue_fields = list(_elements(entry))
                 timestamp = next(
-                    int.from_bytes(value, "big") * scale / 1_000_000 for key, value in fields if key == 0xB3
+                    int.from_bytes(value, "big") * scale / 1_000_000 for key, value in cue_fields if key == 0xB3
                 )
-                for key, value in fields:
+                for key, value in cue_fields:
                     if key == 0xB7:
                         position = dict(_elements(value))
                         if int.from_bytes(position.get(0xF7, b""), "big") == video_track:
@@ -199,7 +199,7 @@ def inspect_seek_index(
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.02)
-        result = json.loads(proc.stdout.read(4096)) if proc.returncode == 0 else None
+        result = json.loads(cast(IO[bytes], proc.stdout).read(4096)) if proc.returncode == 0 else None
         if get_source_fingerprint(path) != expected_fingerprint:
             raise SourceFileChangedError("Source changed during seek-index inspection")
         return result if isinstance(result, str) else None

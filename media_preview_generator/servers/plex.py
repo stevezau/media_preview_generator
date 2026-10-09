@@ -14,7 +14,7 @@ import json
 import threading
 from collections.abc import Collection, Iterator
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import requests
 import urllib3
@@ -162,7 +162,7 @@ class PlexServer(MediaServer):
     ) -> None:
         if isinstance(config, ServerConfig):
             self._server_config: ServerConfig | None = config
-            self._config = _synthesize_legacy_config(config)
+            self._config: Config = cast("Config", _synthesize_legacy_config(config))
             super().__init__(
                 server_id=server_id or config.id,
                 name=name or config.name,
@@ -1670,7 +1670,7 @@ class PlexServer(MediaServer):
 
         # Project hub items into (name, type, carrier) tuples so the
         # shared rank pass can compare them against the parsed query.
-        candidates: list[tuple[str, str, object]] = []
+        candidates: list[tuple[str, str, Any]] = []
         for m in hubs or []:
             try:
                 metadata_type = getattr(m, "METADATA_TYPE", "") or getattr(m, "type", "")
@@ -1808,7 +1808,7 @@ class PlexServer(MediaServer):
             )
             return []
 
-        candidates: list[tuple[str, str, object]] = []
+        candidates: list[tuple[str, str, Any]] = []
         for m in hubs or []:
             try:
                 obj_type = str(getattr(m, "type", "") or getattr(m, "METADATA_TYPE", "")).lower()
@@ -2211,9 +2211,12 @@ class PlexServer(MediaServer):
         if kind_norm == "unknown":
             return out
 
+        allowed_schemes: tuple[str, ...]
         if kind_norm == "episode":
-            out["season"] = int(node.get("parentIndex")) if (node.get("parentIndex") or "").isdigit() else None
-            out["episode"] = int(node.get("index")) if (node.get("index") or "").isdigit() else None
+            out["season"] = (
+                int(cast(str, node.get("parentIndex"))) if (node.get("parentIndex") or "").isdigit() else None
+            )
+            out["episode"] = int(cast(str, node.get("index"))) if (node.get("index") or "").isdigit() else None
             grandparent_key = node.get("grandparentRatingKey")
             if not grandparent_key:
                 return out

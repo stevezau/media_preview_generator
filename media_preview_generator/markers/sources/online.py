@@ -7,7 +7,7 @@ import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import requests
 from loguru import logger
@@ -68,7 +68,7 @@ def is_budget_exhausted(detail: str) -> bool:
 
 def valid_imdb(value: str | None) -> bool:
     """Whether ``value`` is a usable IMDb title id (``tt`` + 7 or more digits)."""
-    return bool(value) and _IMDB_RE.fullmatch(value) is not None
+    return value is not None and _IMDB_RE.fullmatch(value) is not None
 
 
 def _finite(value: object) -> float | None:
@@ -92,7 +92,7 @@ def ms_value(value: object) -> int | None:
     number = _finite(value)
     if number is None or number < 0:
         return None
-    return int(round(value))
+    return int(round(cast(int | float, value)))
 
 
 def confidence_value(value: object) -> float:

@@ -17,6 +17,7 @@ and :mod:`media_preview_generator.web.webhook_router` — this module only
 manages the registration metadata that tells Plex where to send them.
 """
 
+from typing import Any
 from urllib.parse import urlparse
 
 from flask import jsonify, request
@@ -147,7 +148,7 @@ def _plex_webhook_auth_token() -> str:
 
 @api.route("/settings/plex_webhook/status")
 @setup_or_auth_required
-def plex_webhook_status():
+def plex_webhook_status() -> Any:
     """Return the live registration state of the Plex direct webhook.
 
     Probes plex.tv on every call so the UI reflects reality (e.g. the

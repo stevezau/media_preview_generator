@@ -75,12 +75,16 @@ def prepare_admissions(manager, jobs) -> None:
     for job in jobs:
         if job.status not in (JobStatus.PENDING, JobStatus.RUNNING) or (job.config or {}).get("is_retry_chain"):
             continue
+
+        def policy(completed: bool, job_id: str = job.id) -> tuple[int, bool] | None:
+            return _policy(manager, job_id, completed)
+
         gate.register_request(
             job.id,
             created_at=job.created_at or "",
             priority=job.priority,
             kind=job.kind,
-            policy=lambda completed, job_id=job.id: _policy(manager, job_id, completed),
+            policy=policy,
         )
 
 

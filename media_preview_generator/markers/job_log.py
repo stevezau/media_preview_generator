@@ -34,6 +34,7 @@ import os
 import re
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import cast
 
 from loguru import logger
 
@@ -538,7 +539,7 @@ def chapter_names(rows: Iterable[EvidenceRow]) -> dict[MarkerType, dict[int, str
 def _chapter_of(names: Mapping[MarkerType, Mapping[int, str]], mtype: MarkerType, start_ms: int | None) -> str:
     of_type = names.get(mtype) or {}
     if start_ms in of_type:
-        return of_type[start_ms]
+        return of_type[cast(int, start_ms)]
     return next(iter(of_type.values()), "") if len(of_type) == 1 else ""
 
 
@@ -609,7 +610,7 @@ def _shown(decisions: Mapping[MarkerType, TypeDecision], types: Collection[Marke
         decisions[mtype]
         for mtype in MarkerType
         if mtype in decisions
-        and (mtype in types or (decisions[mtype].marker is not None and decisions[mtype].marker.locked))
+        and (mtype in types or ((marker := decisions[mtype].marker) is not None and marker.locked))
     ]
 
 
@@ -802,11 +803,13 @@ def _chapter_check(label: str, chapters: Mapping[MarkerType, Mapping[int, str]])
 
 def _row_phrase(row: EvidenceRow, chapters: Mapping[MarkerType, Mapping[int, str]]) -> tuple[str, str]:
     """A typed evidence row's answer, and a note about it ("" when none)."""
+    row_type = cast(MarkerType, row.type)
+    start_ms = cast(int, row.start_ms)
     if row.source is Source.CHAPTERS:
-        where = _span(row.start_ms, row.end_ms)
+        where = _span(start_ms, row.end_ms)
         where = where if row.end_ms is None else f"at {where}"
-        return (f'"{row.label}" chapter {where}' if row.label else f"{row.type.value} chapter {where}"), ""
-    phrase = _typed_span(row.type, row.start_ms, row.end_ms)
+        return (f'"{row.label}" chapter {where}' if row.label else f"{row_type.value} chapter {where}"), ""
+    phrase = _typed_span(row_type, start_ms, row.end_ms)
     if row.source in (Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS):
         return phrase, _season_detail(row.source, row.label)
     if row.source is Source.CREDITS_TEXT:
@@ -829,7 +832,12 @@ def _answer(
             unique.setdefault((r.type, r.start_ms, r.end_ms, r.label, r.detail == STALE_SERVER_MARKERS_DETAIL), r)
     typed = sorted(
         unique.values(),
-        key=lambda r: (order.index(r.type), r.start_ms, r.end_ms if r.end_ms is not None else -1, r.label),
+        key=lambda r: (
+            order.index(cast(MarkerType, r.type)),
+            r.start_ms,
+            r.end_ms if r.end_ms is not None else -1,
+            r.label,
+        ),
     )
     phrases = [_row_phrase(r, chapters or {}) for r in typed]
     if len(phrases) == 1 and phrases[0][1]:
@@ -857,7 +865,9 @@ def _already_decided(
         and decisions[t].status is DecisionStatus.DECIDED
         and decisions[t].marker is not None
     ]
-    names = [_chapter_of(chapters, d.type, d.marker.start_ms) for d in decided if d.reason == _CHAPTER_RULE]
+    names = [
+        _chapter_of(chapters, d.type, cast(Marker, d.marker).start_ms) for d in decided if d.reason == _CHAPTER_RULE
+    ]
     if decided and len(names) == len(decided) and all(names):
         if len(names) == 1:
             return f"{verb} (a chapter named {names[0]} is used as-is)"

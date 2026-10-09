@@ -172,15 +172,15 @@ def job_library_scope(
         return list(pairs.values())
     if selected_names:
         for name in selected_names:
-            matches = [
+            name_matches = [
                 (server, lib)
                 for server in configs
                 if not selection_server or server.id == selection_server
                 for lib in server.libraries
                 if lib.name == name
             ]
-            if selection_server or len(matches) == 1:
-                for server, library in matches:
+            if selection_server or len(name_matches) == 1:
+                for server, library in name_matches:
                     add(server.id, str(library.id))
         return list(pairs.values())
 

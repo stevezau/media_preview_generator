@@ -10,6 +10,7 @@ entry point; it fans out to per-OS detectors.
 import os
 import platform
 import subprocess
+from typing import Any, cast
 
 from loguru import logger
 
@@ -34,7 +35,7 @@ from .vaapi_probe import _format_driver_label
 
 # GPU vendor to acceleration method mapping
 # This defines which acceleration methods to use for each GPU vendor
-GPU_ACCELERATION_MAP = {
+GPU_ACCELERATION_MAP: dict[str, dict[str, Any]] = {
     "NVIDIA": {
         "primary": "CUDA",
         "fallback": None,  # VAAPI doesn't work properly with NVIDIA
@@ -590,6 +591,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
                 if vendor == "UNKNOWN":
                     logger.debug("  lspci could not identify GPU vendor")
 
+                device_path: str | None
                 for device_path in render_devices:
                     logger.info("    Testing VAAPI on {}...", device_path)
                     if _test_hwaccel_functionality("vaapi", device_path):
@@ -707,8 +709,8 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
         logger.info("  Checking {} ({})...", card_name, vendor)
 
         accel_config = GPU_ACCELERATION_MAP[vendor]
-        primary_method = accel_config["primary"]
-        fallback_method = accel_config["fallback"]
+        primary_method: str = accel_config["primary"]
+        fallback_method: str | None = accel_config["fallback"]
 
         # Determine device path for testing
         if primary_method == "CUDA":
@@ -722,7 +724,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
         logger.debug("  Testing primary method: {}", primary_method)
         logger.info("    Testing {} acceleration...", primary_method)
         if _test_acceleration_method(vendor, primary_method, device_path):
-            gpu_name = get_gpu_name(vendor, device_path)
+            gpu_name = get_gpu_name(vendor, cast(str, device_path))
             gpu_info = {
                 "name": gpu_name,
                 "acceleration": primary_method,
@@ -732,7 +734,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
                 "driver": driver,
                 "status": "ok",
             }
-            detected_gpus.append((vendor, device_path, gpu_info))
+            detected_gpus.append((vendor, cast(str, device_path), gpu_info))
             detected_vendors.add(vendor)
             logger.info("  ✅ {}: {} {} working", card_name, vendor, primary_method)
             continue  # Primary worked, skip fallback
@@ -767,7 +769,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
             fallback_device_path = render_device if fallback_method == "VAAPI" else device_path
 
             if _test_acceleration_method(vendor, fallback_method, fallback_device_path):
-                gpu_name = get_gpu_name(vendor, fallback_device_path)
+                gpu_name = get_gpu_name(vendor, cast(str, fallback_device_path))
                 gpu_info = {
                     "name": gpu_name,
                     "acceleration": fallback_method,
@@ -777,7 +779,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
                     "driver": driver,
                     "status": "ok",
                 }
-                detected_gpus.append((vendor, fallback_device_path, gpu_info))
+                detected_gpus.append((vendor, cast(str, fallback_device_path), gpu_info))
                 detected_vendors.add(vendor)
                 logger.info("  ✅ {}: {} {} working (fallback)", card_name, vendor, fallback_method)
             else:

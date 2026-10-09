@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from loguru import logger
@@ -715,7 +715,7 @@ class SeasonClock:
 
     def side(self, path: str) -> int:
         """The speed a file is matched at as the pair version names it: 0 as it plays, else the speed retimed to."""
-        return _RETIMED_TO[self.speed] if path in self.factors else 0
+        return _RETIMED_TO[cast(float, self.speed)] if path in self.factors else 0
 
 
 def _pair_version(first_side: int, second_side: int) -> int:
@@ -926,7 +926,9 @@ def _member_record_if_readable(ctx: PipelineContext, path: str) -> FileRecord | 
 
 
 def _intro_chapter_ms(ctx: PipelineContext, rec: FileRecord | None) -> int | None:
-    return intro_chapter_length_ms(ctx.store.get_evidence(rec.id), rec.duration_ms) if rec is not None else None
+    return (
+        intro_chapter_length_ms(ctx.store.get_evidence(rec.id), cast(int, rec.duration_ms)) if rec is not None else None
+    )
 
 
 def season_intro_chapter_limit(ctx: PipelineContext, canonical_path: str) -> int | None:
@@ -971,7 +973,12 @@ def _signature_item(ctx: PipelineContext, path: str) -> list:
     rec = ctx.store.get_file(path) if identity is not None else None
     current = rec is not None and (rec.size, rec.mtime_ns) == identity
     size, mtime_ns = identity or (None, None)
-    return [path, size, mtime_ns, *(_fingerprints_item(ctx, rec) if current else [False, None, None])]
+    return [
+        path,
+        size,
+        mtime_ns,
+        *(_fingerprints_item(ctx, cast("FileRecord", rec)) if current else [False, None, None]),
+    ]
 
 
 def _fingerprints_item(ctx: PipelineContext, rec: FileRecord, rates: Mapping[str, float | None] | None = None) -> list:
@@ -1288,7 +1295,7 @@ def _cached_runs(
         rec_a.id,
         rec_b.id,
         version,
-        [tuple(run) for run in runs],
+        cast(list[tuple[float, float, float, float]], [tuple(run) for run in runs]),
         identity_a=(rec_a.size, rec_a.mtime_ns),
         identity_b=(rec_b.size, rec_b.mtime_ns),
     )
@@ -1361,7 +1368,7 @@ def _matching(
         return (bool(previous) and path != target, path)
 
     def heard(path: str, retimed_side: bool, reference: str) -> bool:
-        side = _RETIMED_TO[by_rate.speed] if retimed_side else 0
+        side = _RETIMED_TO[cast(float, by_rate.speed)] if retimed_side else 0
         own = stretched[path] if retimed_side else audible[path]
         first = order(path) < order(reference)
         pair = (path, reference) if first else (reference, path)
@@ -1601,13 +1608,13 @@ def _with_stored_times(ctx: PipelineContext, rec: FileRecord, found: Candidate) 
     ]
     if len(stored) != 1 or stored[0].end_ms is None or found.end_ms is None:
         return found
-    row = stored[0]
+    stored_start_ms, stored_end_ms = cast(int, stored[0].start_ms), stored[0].end_ms
     if (
-        abs(found.start_ms - row.start_ms) >= KEEP_STORED_TIMES_MS
-        or abs(found.end_ms - row.end_ms) >= KEEP_STORED_TIMES_MS
+        abs(found.start_ms - stored_start_ms) >= KEEP_STORED_TIMES_MS
+        or abs(found.end_ms - stored_end_ms) >= KEEP_STORED_TIMES_MS
     ):
         return found
-    return replace(found, start_ms=row.start_ms, end_ms=row.end_ms)
+    return replace(found, start_ms=stored_start_ms, end_ms=stored_end_ms)
 
 
 def detect_season_audio(
@@ -1723,7 +1730,7 @@ def detect_season_audio(
     own = fingerprint_of(rec)
     frame_rate_of(ctx, rec)
     records: dict[str, FileRecord] = {rec.canonical_path: rec}
-    points: dict[str, np.ndarray] = {rec.canonical_path: own}
+    points: dict[str, np.ndarray] = {rec.canonical_path: cast(np.ndarray, own)}
     others = [p for p in group.episodes if p != rec.canonical_path]
     freeze = Freeze(pause_check)
     for n, path in enumerate(others, 1):
@@ -1769,7 +1776,10 @@ def detect_season_audio(
     except end_picture.CheckUnavailableError as exc:
         raise DetectorUnavailableError(str(exc)) from exc
     if segment is not None:
-        candidates.append(_with_stored_times(ctx, rec, _candidate(segment, len(matching.files) - 1, matching.source)))
+        segment_match = cast(_Matching, matching)
+        candidates.append(
+            _with_stored_times(ctx, rec, _candidate(segment, len(segment_match.files) - 1, segment_match.source))
+        )
 
     # Every file read for the match (the previous season's included, which _matching adds to records) but one left out
     # for want of its retimed fingerprint: that one enters the signature as it is, so its fingerprint made later makes

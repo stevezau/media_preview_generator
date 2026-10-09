@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 from datetime import datetime
+from typing import Any, cast
 
 from loguru import logger
 
@@ -319,7 +320,7 @@ def _chapter_result_bucket(row: dict) -> str | None:
                 return "updated" if updated else "already_existed"
             if row.get("status") == "skipped_output_exists":
                 return "already_existed"
-            bif = artifacts.get("bif")
+            bif = cast(dict, artifacts).get("bif")
             if (
                 row.get("status") == "published"
                 and isinstance(bif, dict)
@@ -331,7 +332,8 @@ def _chapter_result_bucket(row: dict) -> str | None:
             return status
         if status == "pending":
             return "incomplete"
-    return {"published_chapters_failed": "failed", "published_pending_chapters": "incomplete"}.get(row.get("status"))
+    status_key: Any = row.get("status")
+    return {"published_chapters_failed": "failed", "published_pending_chapters": "incomplete"}.get(status_key)
 
 
 def merge_chain_publishers_best_per_path(file_results: list[dict]) -> list[dict]:
@@ -1954,7 +1956,7 @@ def run_processing(
         _pinned_entry, pinned_type = _resolve_pinned_server(sid_filter)
 
         if _classify_processing_mode(config) == "recently_added":
-            scan_warnings: list[str] = []
+            scan_warnings = []
             outcome_counts = _run_recently_added_multi_server(
                 config,
                 selected_gpus=selected_gpus,
@@ -1974,7 +1976,7 @@ def run_processing(
                 priority=priority,
                 **({"tracker_wait": tracker_wait} if tracker_wait else {}),
             )
-            result: dict = {"outcome": outcome_counts}
+            result = {"outcome": outcome_counts}
             if scan_warnings:
                 result["warning"] = " | ".join(scan_warnings)
             return result
@@ -2008,7 +2010,7 @@ def run_processing(
                 "enabled server matching the pin; honours server_id_filter end-to-end.",
                 sid_filter,
             )
-            scan_warnings: list[str] = []
+            scan_warnings = []
             outcome_counts = _run_full_scan_multi_server(
                 config,
                 selected_gpus=selected_gpus,
@@ -2026,7 +2028,7 @@ def run_processing(
                 priority=priority,
                 **({"tracker_wait": tracker_wait} if tracker_wait else {}),
             )
-            result: dict = {"outcome": outcome_counts}
+            result = {"outcome": outcome_counts}
             if scan_warnings:
                 # Joined warning string the job_runner pipes into
                 # ``complete_job(warning=...)`` — flips the dashboard

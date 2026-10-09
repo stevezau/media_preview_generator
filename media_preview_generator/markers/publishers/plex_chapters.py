@@ -296,7 +296,17 @@ class LocalChapters:
             (row[0],),
         ).fetchall()
         try:
-            target = ChapterTarget(*row, tuple(Chapter(*c) for c in chapters), machine_identifier)
+            target = ChapterTarget(
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                row[5],
+                row[6],
+                tuple(Chapter(*c) for c in chapters),
+                machine_identifier,
+            )
             return target_from_json(target_to_json(target))
         except ValueError as exc:
             raise ChapterError(
@@ -442,6 +452,7 @@ def _context(server: Any, server_config: Any = None) -> tuple[Any, str, str, Any
         ) from exc
     config = server_config if server_config is not None else server._server_config
     settings = load_server(getattr(config, "markers", None), "plex")
+    backend: AgentClient | LocalChapters
     if settings.agent_enabled:
         if not settings.agent_url or not settings.agent_token:
             raise ChapterError("Configure the Plex-side helper address and key", state=Capability.AGENT_UNAVAILABLE)

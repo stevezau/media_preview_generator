@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 from loguru import logger
@@ -175,8 +176,9 @@ def share_alike(times: Sequence[float], target: Frames, target_shift_s: float, p
             alike.append(None)
             card.append(False)
         else:
-            alike.append(frames_alike(x, y))
-            card.append(alike[-1] and _card_picture(x))
+            same = frames_alike(x, y)
+            alike.append(same)
+            card.append(same and _card_picture(x))
     known = [verdict for verdict in alike if verdict is not None]
     if not known:
         return None
@@ -358,7 +360,7 @@ class Reader:
         """
         self._ffmpeg, self._gpu, self._gpu_device_path = ffmpeg, gpu, gpu_device_path
         self._cancel_check = cancel_check
-        self._worker = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
+        self._worker: dict[str, Any] = {"pause_check": pause_check, "ffmpeg_threads": ffmpeg_threads,
                         "fallback_callback": fallback_callback}  # fmt: skip
         self._starts: dict[str, StreamStarts] = {}
         self._frames: dict[tuple[str, float, float], Frames] = {}

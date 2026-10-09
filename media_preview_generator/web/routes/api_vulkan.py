@@ -241,7 +241,7 @@ def _get_vulkan_info() -> dict:
         )
         gpus = []
 
-    vendors = {g.get("type") for g in gpus if g.get("type")}
+    vendors = {g["type"] for g in gpus if g.get("type")}
     has_nvidia = "NVIDIA" in vendors
     has_intel = "INTEL" in vendors
     has_amd = "AMD" in vendors

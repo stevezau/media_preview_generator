@@ -122,7 +122,8 @@ def _clamped_ends(chapters: tuple[Chapter, ...]) -> list[int | None]:
         later_starts = (chapters[order[j]].start_ms for j in range(pos + 1, len(order)))
         next_start = next((s for s in later_starts if s > own_start), None)
         if next_start is not None:
-            ends[i] = next_start if ends[i] is None else min(ends[i], next_start)
+            current_end = ends[i]
+            ends[i] = next_start if current_end is None else min(current_end, next_start)
     return ends
 
 

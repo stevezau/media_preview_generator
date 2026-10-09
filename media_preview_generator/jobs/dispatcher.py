@@ -11,7 +11,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, cast, overload
 
 from loguru import logger
 
@@ -494,7 +494,11 @@ class JobTracker:
                     logger.debug("Could not set publisher aggregate for job {}: {}", self.job_id, exc)
             try:
                 _notify_file_result(
-                    item.canonical_path, outcome_value(valid.outcome_key), valid.message, label, servers=rows
+                    item.canonical_path,
+                    cast(ProcessingResult, outcome_value(valid.outcome_key)),
+                    valid.message,
+                    label,
+                    servers=rows,
                 )
             except Exception as exc:
                 logger.debug("Could not notify file result for {}: {}", item.canonical_path, exc)
@@ -1088,7 +1092,9 @@ class JobDispatcher:
             tracker.outcome_counts[failed] = tracker.outcome_counts.get(failed, 0) + 1
         try:
             with failure_scope(tracker.job_id):
-                _notify_file_result(item.canonical_path, outcome_value(failed), reason, worker.display_name)
+                _notify_file_result(
+                    item.canonical_path, cast(ProcessingResult, outcome_value(failed)), reason, worker.display_name
+                )
         except Exception as notify_exc:
             logger.warning("Could not record the failed start of {}: {}", item.canonical_path, notify_exc)
         finally:
@@ -1307,7 +1313,7 @@ class JobDispatcher:
         register_job_thread(tracker.job_id)
         with failure_scope(tracker.job_id):
             try:
-                outcome = tracker.handlers.check_fn(item, cancel_check=tracker.is_cancelled)
+                outcome = cast(KindHandlers, tracker.handlers).check_fn(item, cancel_check=tracker.is_cancelled)
             except Exception as exc:
                 logger.debug(
                     "Dispatcher: {} check raised for {!r} ({}: {}); routing to a worker.",
@@ -1532,6 +1538,14 @@ class JobDispatcher:
 
 _dispatcher: JobDispatcher | None = None
 _dispatcher_lock = threading.Lock()
+
+
+@overload
+def get_dispatcher(worker_pool: WorkerPool) -> JobDispatcher: ...
+
+
+@overload
+def get_dispatcher(worker_pool: None = None) -> JobDispatcher | None: ...
 
 
 def get_dispatcher(worker_pool: WorkerPool | None = None) -> JobDispatcher | None:

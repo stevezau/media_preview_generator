@@ -34,7 +34,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import requests
 from loguru import logger
@@ -71,6 +71,7 @@ from .plex_refresh import enqueue_plex_refresh, wait_for_plex_refresh
 
 if TYPE_CHECKING:
     from ..config import Config
+    from ..servers.plex import PlexServer
     from ..servers.registry import ServerRegistry
 
 
@@ -1250,7 +1251,7 @@ def _refresh_after_publish(
         token = marker(output_paths, canonical_path, server.id, source_fingerprint=source_fingerprint)
         if new_output or token is not None:
             enqueue_plex_refresh(
-                server,
+                cast("PlexServer", server),
                 canonical_path,
                 item_id,
                 output_paths=tuple(output_paths),
@@ -1809,7 +1810,7 @@ def _process_canonical_path_previews(
                 "All publishers' outputs already fresh for {} — skipping FFmpeg",
                 canonical_path,
             )
-            results = []
+            results: list[PublisherResult] = []
             for server, adapter, item_id, paths in fresh_checks:
                 # Mirror ``_publish_one``'s skip-if-exists branch
                 # exactly: if the server activates trickplay via per-item
@@ -2211,7 +2212,7 @@ def _process_canonical_path_previews(
         # at all.
         upstream_frame_source = "cache_hit" if cache_hit else "extracted"
 
-        results: list[PublisherResult] = []
+        results = []
         for server, adapter, item_id_hint in publishers:
             if _source_changed():
                 return _source_changed_result()

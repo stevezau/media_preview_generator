@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -143,7 +143,7 @@ from .publishers.base import (
 )
 from .publishers.factory import publisher_for, supported_types_for
 from .publishers.plex_db import STALE_READ_WAIT_S, WAIT_CANCELLED, WAIT_SLICE_S, WORKER_BUSY_TIMEOUT_S
-from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
+from .settings import GlobalMarkersSettings, ServerMarkersSettings, SourceSetting, get_global_settings, load_server
 from .source_counts import DecidedByTally, decided_groups
 from .sources import introdb, skipdb, theintrodb
 from .sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
@@ -789,7 +789,7 @@ class _ItemServers:
         """
         return self._title if self._asked_ids else None
 
-    def title_asks(self, owners: Iterable[_Owning] | None = None) -> list[Callable[[], object]]:
+    def title_asks(self, owners: Iterable[_Owning] | None = None) -> list[Callable[..., object]]:
         """Per publishing owner (``owners``; every owning server when not given) whose item id for the file this run
         already knows (a hint, or looked up for another step), a call for its external ids answer; a server whose
         id isn't known yet isn't asked for it.
@@ -800,7 +800,7 @@ class _ItemServers:
         item id and turned it FAILED/WAITING for reasons that had nothing to do with its markers. Naming the file
         is not worth that: without an id already at hand, it's simply named by its file name.
         """
-        asks = []
+        asks: list[Callable[..., object]] = []
         for owner in owners if owners is not None else self.owning:
             item_id = self._item_ids.get(owner.config.id) or self._hints.get(owner.config.id)
             if item_id:
@@ -869,7 +869,7 @@ def build_clients(settings: GlobalMarkersSettings) -> dict[str, Any]:
     """
     clients: dict[str, Any] = {}
     if settings.source_enabled("theintrodb"):
-        clients["theintrodb"] = TheIntroDbClient(settings.source("theintrodb").api_key)
+        clients["theintrodb"] = TheIntroDbClient(cast(SourceSetting, settings.source("theintrodb")).api_key)
     if settings.source_enabled("introdb"):
         clients["introdb"] = IntroDbClient()
     if settings.source_enabled("skipdb"):
@@ -1517,9 +1517,9 @@ def _rests_on_detector(
     answers = {source.value for source in spec.stored_sources}
     return any(
         decisions[t].status is DecisionStatus.DECIDED
-        and decisions[t].marker is not None
-        and not decisions[t].marker.locked
-        and not answers.isdisjoint(decisions[t].marker.decided_by)
+        and (marker := decisions[t].marker) is not None
+        and not marker.locked
+        and not answers.isdisjoint(marker.decided_by)
         for t in wanted
     )
 
@@ -2019,7 +2019,7 @@ def _staleness_known_now(ctx: PipelineContext, rec: FileRecord, servers: _ItemSe
     if not any(r.detail == STALENESS_UNKNOWN_DETAIL for r in _server_rows(ctx, rec, owner.config.id)):
         return False
     item_id = servers.item_id(owner)
-    return bool(item_id) and _plex_types_not_made_for_file(ctx, servers, owner, item_id) is not None
+    return bool(item_id) and _plex_types_not_made_for_file(ctx, servers, owner, cast(str, item_id)) is not None
 
 
 def _server_rows(ctx: PipelineContext, rec: FileRecord, server_id: str) -> list[EvidenceRow]:
@@ -2273,7 +2273,7 @@ def _cached_capability(
     """
     cached = ctx._capabilities.get(cfg.id)
     if _still_fresh(ctx, cached):
-        return cached[1]
+        return cast(tuple[float, CapabilityReport], cached)[1]
     with ctx._capability_guard:
         lock = ctx._capability_locks.setdefault(cfg.id, threading.Lock())
     if wait_s is None:
@@ -2283,7 +2283,7 @@ def _cached_capability(
     try:
         cached = ctx._capabilities.get(cfg.id)
         if _still_fresh(ctx, cached):
-            return cached[1]
+            return cast(tuple[float, CapabilityReport], cached)[1]
         report = publisher.capability()
         if report.details.get("db_busy"):
             # A database busy just now says nothing about the job's next file, which asks again.
@@ -2515,17 +2515,17 @@ def _publish_to(
         # can itself carry an empty tuple -- markers we deliberately cleared, still a known answer). A merge or
         # split can move the file to a different item since that row was stored, whose markers we've never sent.
         known = last is not None and last.item_id == item_id and (last.status == "written" or last.markers)
-        notes.sent_before[cfg.id] = tuple(last.markers) if known else None
+        notes.sent_before[cfg.id] = tuple(last.markers) if last is not None and known else None
 
     wanted = publisher.project(markers.values())
     decided_hash = MarkerStore.markers_hash(wanted)
     basis = store.get_publish_basis(rec.id, cfg.id)
     # After a merge or split the file's part still carries what it published on its old item.
     moved = last is not None and last.item_id is not None and last.item_id != item_id and bool(last.markers)
-    own_previous = list(last.markers) if moved else None
+    own_previous = list(last.markers) if last is not None and moved else None
     # Until the write lands, the old item is where this file's markers are: a failed attempt keeps pointing there
     # so the next run offers them again.
-    attempted_item = last.item_id if moved else item_id
+    attempted_item = last.item_id if last is not None and moved else item_id
 
     def _unchanged(item_version: int) -> bool:
         # Neither this file's decided set nor the item changed since this file last published there: another
@@ -2873,7 +2873,7 @@ def _built_line(build: Callable[[], str]) -> str | None:
         return None
 
 
-def _log_live(build: Callable[[], str], level: str = "INFO") -> None:
+def _log_live(build: Callable[..., str], level: str = "INFO") -> None:
     """Log one line as the file's work happens, live. Never raises: a bug building it (an unexpected shape in a
     step's own data) mustn't fail the file or hold up another owner's write -- the same guard ``_log_file`` gives
     the file's last lines, for every line logged before them.
@@ -2887,7 +2887,7 @@ def _log_live(build: Callable[[], str], level: str = "INFO") -> None:
         write_line(line, level)
 
 
-def _log_source(notes: RunNotes, key: tuple[Source, str], build: Callable[[], str]) -> None:
+def _log_source(notes: RunNotes, key: tuple[Source, str], build: Callable[..., str]) -> None:
     """A source's (or a server's own markers') line, guarded like ``_log_live`` -- but logged at most once per run
     for the same ``key`` (a source, or a server's id for its own markers): a worker picking up where the checking
     thread left off, with nothing new to say about it, doesn't repeat the line. A fresh answer to that key clears
@@ -2953,14 +2953,15 @@ def _attempt(
     if existing is not None and existing.missing_since is not None:
         ctx.store.clear_missing(existing.id)  # on disk again, even if this run stops before storing it
     unchanged = existing is not None and (existing.size, existing.mtime_ns) == (st.st_size, st.st_mtime_ns)
+    unchanged_rec = cast(FileRecord, existing)  # only read while ``unchanged``, which implies a stored row
     if path not in ctx._answers_before:
         ctx._answers_before[path] = (
-            frozenset(_answer_key(r) for r in ctx.store.evidence_rows(existing.id)) if unchanged else frozenset()
+            frozenset(_answer_key(r) for r in ctx.store.evidence_rows(unchanged_rec.id)) if unchanged else frozenset()
         )
         ctx._replaced_at_start[path] = existing is not None and not unchanged
     probe = None
-    stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
-    if refresh_probe or not unchanged or not existing.duration_ms or stale_rules:
+    stale_rules = unchanged and ctx.store.evidence_version(unchanged_rec.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
+    if refresh_probe or not unchanged or not unchanged_rec.duration_ms or stale_rules:
         phase("Reading chapters…")
         try:
             probe = probe_media(path, ffprobe=ctx.ffprobe)
@@ -2970,7 +2971,7 @@ def _attempt(
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
 
     servers = _ItemServers(item, owning, cancel_check)
-    known_kind = ctx.store.get_server_kind(existing.id) if unchanged else None
+    known_kind = ctx.store.get_server_kind(unchanged_rec.id) if unchanged else None
     path_ids = ids_from_path(path)
     ids, lookups_allowed, confirmed_kind = _resolve_kind(path_ids, servers, known_kind)
     types = _enabled_types(ctx.settings, ids)
@@ -3194,7 +3195,7 @@ def _attempt(
                         spec,
                         gpu=gpu,
                         gpu_device_path=gpu_device_path,
-                        phase=_noting(phases, phase),
+                        phase=cast(Callable[[str], None], _noting(phases, phase)),
                         cancel_check=cancel_check,
                         pause_check=pause_check,
                         ffmpeg_threads=ffmpeg_threads,
@@ -3861,20 +3862,23 @@ def process_item(
     Returns:
         The item's outcome.
     """
-    return _run(
-        item,
-        ctx,
-        local=True,
-        gpu=gpu,
-        gpu_device_path=gpu_device_path,
-        phase_callback=phase_callback,
-        cancel_check=cancel_check,
-        pause_check=ctx.freeze_check,
-        job_paused=pause_check,
-        ffmpeg_threads=ffmpeg_threads,
-        fallback_callback=fallback_callback,
-        gpu_worker=gpu_worker,
-        worker_name=worker_name,
+    return cast(
+        ItemOutcome,
+        _run(
+            item,
+            ctx,
+            local=True,
+            gpu=gpu,
+            gpu_device_path=gpu_device_path,
+            phase_callback=phase_callback,
+            cancel_check=cancel_check,
+            pause_check=ctx.freeze_check,
+            job_paused=pause_check,
+            ffmpeg_threads=ffmpeg_threads,
+            fallback_callback=fallback_callback,
+            gpu_worker=gpu_worker,
+            worker_name=worker_name,
+        ),
     )
 
 

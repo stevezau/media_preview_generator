@@ -81,8 +81,7 @@ jobs:
           args: -color
 
   typecheck:
-    # Report-only: never blocks merges and is not in the `test` job's needs. The step (not the job) may fail, so the
-    # check stays green and the errors stay readable in its log.
+    # The package is mypy-clean: a new error turns this check red.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +99,6 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: mypy
-        continue-on-error: true
         run: mypy
 
   unit:

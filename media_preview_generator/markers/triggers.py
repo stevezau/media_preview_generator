@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable, Iterable
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any
 
 from loguru import logger
 
@@ -152,7 +153,7 @@ def create_intro_credits_job(
     Returns:
         The created job.
     """
-    config = {
+    config: dict[str, Any] = {
         "kind": JOB_KIND_INTRO_CREDITS,
         "source": source,
         "libraries": list(libraries or []),

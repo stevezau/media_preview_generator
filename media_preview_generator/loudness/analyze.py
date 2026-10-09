@@ -391,6 +391,7 @@ def _run_command(
     if not _join_readers(readers):
         # Only a process the kill never reached (ffmpeg's own children) can hold the pipe after ffmpeg exited.
         raise LoudnessError(f"Loudness analysis of {name} could not read ffmpeg's report: its output stayed open")
+    assert proc.stdout is not None and proc.stderr is not None  # both are PIPE
     for stream in (proc.stdout, proc.stderr):
         stream.close()
     if cancel_check and cancel_check():

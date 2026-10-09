@@ -80,7 +80,7 @@ def crop(image: np.ndarray, quad: np.ndarray) -> np.ndarray:
     points = quad.astype(np.float32)
     width = int(max(np.linalg.norm(points[0] - points[1]), np.linalg.norm(points[2] - points[3])))
     height = int(max(np.linalg.norm(points[0] - points[3]), np.linalg.norm(points[1] - points[2])))
-    target = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+    target = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
     out = cv2.warpPerspective(
         image,
         cv2.getPerspectiveTransform(points, target),

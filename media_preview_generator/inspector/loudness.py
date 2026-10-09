@@ -7,7 +7,7 @@ import os
 import time
 import unicodedata
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -45,7 +45,7 @@ def _path(path: str) -> str:
     return unicodedata.normalize("NFC", os.path.normpath(path.replace("\\", "/")))
 
 
-def _number(raw: str | None, *, allow_infinity: bool) -> float | str | None:
+def _number(raw: Any, *, allow_infinity: bool) -> float | str | None:
     try:
         number = float(raw)
     except (ValueError, TypeError):
@@ -57,7 +57,7 @@ def _number(raw: str | None, *, allow_infinity: bool) -> float | str | None:
     return None
 
 
-def _integer(raw: str | None) -> int | None:
+def _integer(raw: Any) -> int | None:
     try:
         value = int(raw)
         return value if value >= 0 else None
@@ -72,6 +72,8 @@ def _stream(audio: Any, part: Any, item_id: str) -> dict:
     flag = audio.get("canNormalizeLoudness")
     normalization = {"1": True, "0": False}.get(flag)
     present = any(value is not None for value in fields.values()) or version is not None or flag not in (None, "0")
+    state: str
+    note: str | None
     state, note = "not_analysed", "Plex has no loudness measurements for this audio stream."
     if version and version != ANALYSIS_VERSION:
         state, note = "unsupported", "Plex reports an unsupported loudness analysis version."
@@ -183,7 +185,7 @@ def file_loudness(
         Infinity uses JSON strings only for Plex's recognized silent/short audio representation.
     """
     by_server = {row["server_id"]: row for row in preview_rows}
-    pending = []
+    pending: list[tuple[ServerConfig, Any, dict | None]] = []
     for cfg, server, matches in owners:
         preview = by_server.get(cfg.id, {})
         if cfg.type is not ServerType.PLEX:
@@ -196,10 +198,10 @@ def file_loudness(
             )
             pending.append((cfg, future, None))
     deadline = time.monotonic() + timeout_s
-    rows = []
+    rows: list[dict] = []
     for cfg, future, ready in pending:
         if future is None:
-            rows.append(ready)
+            rows.append(cast(dict, ready))
             continue
         try:
             rows.append(future.result(timeout=max(0.0, deadline - time.monotonic())))

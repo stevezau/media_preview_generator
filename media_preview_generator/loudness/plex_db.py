@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from ..markers.publishers.base import Capability, PublishError
 from ..markers.publishers.plex_db import (
@@ -153,7 +153,7 @@ class AudioStream(NamedTuple):
     """One audio stream of a live Plex part."""
 
     id: int
-    index: int
+    index: int  # type: ignore[assignment]  # field name shadows tuple.index; renaming would change the API
     codec: str
     extra_data: str | None
     duration_ms: int | None
@@ -449,7 +449,7 @@ def _log_write(
             "format": 2,
             "kind": "commit",
             "transaction_id": uuid.uuid4().hex,
-            "database": database_identity(db._path()),
+            "database": database_identity(cast(str, db._path())),
         }
         _append_record(
             {

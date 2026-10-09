@@ -11,7 +11,7 @@ from flask import Blueprint
 
 # Create blueprints (must be defined before sub-modules import them)
 main = Blueprint("main", __name__)
-api = Blueprint("api", __name__, url_prefix="/api")
+api: Blueprint = Blueprint("api", __name__, url_prefix="/api")
 
 # Import sub-modules to register their route decorators with the blueprints.
 # Order doesn't matter; each module imports `main` or `api` from this package.

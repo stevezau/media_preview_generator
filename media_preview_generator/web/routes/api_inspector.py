@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import Any
+from typing import Any, cast
 
 from flask import jsonify, request
 from loguru import logger
@@ -89,7 +89,7 @@ def _status_of(path: str, registry: Any, store: Any, plex_config_folder: str) ->
 @api.route("/inspector/status", methods=["POST"])
 @api_token_required
 @limiter.limit("120 per minute")
-def inspector_status():
+def inspector_status() -> Any:
     """Statuses for the Inspector's search rows.
 
     Body: ``{"paths": [local file paths]}`` (at most ``MAX_STATUS_PATHS``).
@@ -110,7 +110,9 @@ def inspector_status():
     registry = _registry(timeout_s=_SERVER_TIMEOUT_S)
     store = get_marker_store()
     plex_config_folder = _get_plex_config_folder()
-    futures = {p: _STATUS_POOL.submit(_status_of, p, registry, store, plex_config_folder) for p in paths}
+    futures = {
+        p: _STATUS_POOL.submit(_status_of, p, registry, store, plex_config_folder) for p in cast(list[str], paths)
+    }
     items: dict[str, dict] = {}
     deadline = time.monotonic() + _STATUS_WAIT_S
     for path, future in futures.items():
@@ -236,7 +238,7 @@ def _versions(path: str, previews: list[dict]) -> list[dict]:
 
 @api.route("/inspector/file", methods=["GET"])
 @api_token_required
-def inspector_file():
+def inspector_file() -> Any:
     """One file's facts for the Inspector: where each server keeps its preview and what that preview holds.
 
     Query: ``path`` (the file's local path, as the search rows and deep links give it).

@@ -40,8 +40,8 @@ def capacity_for_groups(groups: list[dict], selected_gpus: list, kind: str, *, n
     compatible = [g for g in member_policies(groups) if g["enabled"] and supports_job(g, kind)]
     detected = [g for g in compatible if g["resource"] == "cpu" or g.get("device") in devices]
     opened = [g for g in detected if group_is_available(g, now=now)]
-    future = [next_group_opening(g, now=now) for g in detected]
-    future = [value for value in future if value is not None]
+    openings = [next_group_opening(g, now=now) for g in detected]
+    future = [value for value in openings if value is not None]
     reason = "ready" if opened else "off_hours" if detected else "hardware" if compatible else "configuration"
     return {
         "configured": sum(g["count"] for g in compatible),

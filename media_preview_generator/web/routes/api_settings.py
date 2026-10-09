@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from typing import Any
 from urllib.parse import urlparse
 
 from flask import jsonify, request
@@ -886,14 +887,14 @@ def _translate_legacy_worker_updates(settings, updates: dict) -> dict:
                 return
             if resource == "gpu" and not device:
                 raise ValueError("Choose a GPU device in a worker group before setting its count")
-            member = {
+            member: dict[str, Any] = {
                 "id": "m1",
                 "resource": resource,
                 "device": device,
                 "count": max(1, count or 1),
                 "job_types": [kind for kind in JOB_KINDS if resource == "cpu" or kind != "loudness"],
             }
-            group = {
+            group: dict[str, Any] = {
                 "id": str(uuid.uuid4()),
                 "name": "CPU workers" if resource == "cpu" else "GPU workers",
                 "enabled": True,

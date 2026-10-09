@@ -467,9 +467,9 @@ def _build_selected_gpus(settings, detected: list[dict] | None = None) -> list:
             device = g.get("device", "")
             if device not in grouped_devices or g.get("status") == "failed":
                 continue
-            entry = config_by_device.get(device, {})
+            group_entry = config_by_device.get(device, {})
             info = dict(g)
-            info["ffmpeg_threads"] = entry.get("ffmpeg_threads", 2)
+            info["ffmpeg_threads"] = group_entry.get("ffmpeg_threads", 2)
             info["workers"] = configured_group_totals([p for p in policies if p.get("device") == device])[0]
             selected.append((g["type"], device, info))
         return selected

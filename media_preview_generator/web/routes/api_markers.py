@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from flask import jsonify, request
 from loguru import logger
@@ -41,7 +41,7 @@ def _parse_job_priority(raw: object) -> int | None:
 def job_title(label: str, library_name: str | None, libraries: list, resolved_paths: list) -> str:
     """A started job's title: the one sent, else ``<label>: N files``, ``<label>: N libraries`` or all libraries."""
     if (library_name or "").strip():
-        return library_name.strip()
+        return cast(str, library_name).strip()
     if resolved_paths:
         count = len(resolved_paths)
         return f"{label}: {count} file{'' if count == 1 else 's'}"
@@ -187,7 +187,7 @@ def _registry(*, timeout_s: int | None = None) -> Any:
 def _capped_timeout(stored: object, cap: int) -> int:
     """``stored`` seconds, never above ``cap``; the cap alone when settings.json holds something that isn't a number."""
     try:
-        return min(int(stored or 30), cap)
+        return min(int(cast(Any, stored) or 30), cap)
     except (TypeError, ValueError):
         return cap
 

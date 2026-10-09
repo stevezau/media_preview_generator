@@ -10,6 +10,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -350,7 +351,7 @@ def _start_scheduled_intro_credits_job(
             libraries = [{"server_id": server_id, "library_id": str(lid)} for lid in library_ids] if server_id else []
             # A schedule for one server's libraries publishes to that server only, as its scheduled preview job does
             # (``config["server_id"]`` in execute_scheduled_job): another server holding the same files isn't touched.
-            pin = {"server_id": server_id} if server_id else {}
+            pin: dict[str, Any] = {"server_id": server_id} if server_id else {}
             create_intro_credits_job(
                 library_name=f"Intro & Credits: {library_name or 'all libraries'}",
                 priority=parse_priority(priority) if priority is not None else PRIORITY_LOW,
@@ -608,7 +609,7 @@ def execute_scheduled_job(
             if len(library_ids) > 1:
                 cfg = dict(cfg)
                 cfg["selected_library_ids"] = sorted(set(library_ids))
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "library_id": primary_library_id,
                 "library_name": library_name,
                 "config": cfg,
@@ -1026,7 +1027,7 @@ class ScheduleManager:
                 continue
             try:
                 trigger_type = sched.get("trigger_type")
-                trigger_value = sched.get("trigger_value")
+                trigger_value: Any = sched.get("trigger_value")
                 if trigger_type == "cron":
                     trigger = CronTrigger.from_crontab(str(trigger_value or ""))
                 elif trigger_type == "interval":

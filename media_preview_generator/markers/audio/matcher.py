@@ -10,7 +10,7 @@ compare the two run for run.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import numpy as np
 
@@ -256,7 +256,9 @@ def meets_opening_quorum(
     theirs = [order_of(f) for f in second]
     if None in ours or None in theirs:
         return False
-    if not (max(ours) < min(theirs) or min(ours) > max(theirs)):
+    known_ours = cast(list[tuple[int, int]], ours)
+    known_theirs = cast(list[tuple[int, int]], theirs)
+    if not (max(known_ours) < min(known_theirs) or min(known_ours) > max(known_theirs)):
         return False
     return meets_quorum(candidate.segment.support, len(files) - 1 - len(second))
 

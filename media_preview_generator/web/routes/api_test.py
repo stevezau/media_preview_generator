@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import time
+from typing import Any
 
 from flask import jsonify, request
 from loguru import logger
@@ -52,7 +53,7 @@ def __test_version_cache():
 
 
 @api.route("/__test/reset", methods=["POST"])
-def __test_reset():
+def __test_reset() -> Any:
     """Nuke all in-memory + on-disk state. Test-only."""
     # Hard gate: refuse to do anything unless the env var that's
     # required to even REGISTER this endpoint is still set. Double
