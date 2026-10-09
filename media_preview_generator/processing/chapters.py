@@ -111,6 +111,7 @@ class ChapterPlan:
     server: object
     canonical_path: str
     source_fingerprint: SourceFingerprint
+    # Unset (``Path()``) until a Plex target resolves; every reader returns early without a target.
     folder: Path
     profile: dict
     target: ChapterTarget | None = None
@@ -150,22 +151,32 @@ def _failure(exc: Exception, completed: int = 0, total: int = 0) -> ChapterOutco
 
 
 def prepare_chapters(
-    server, server_config, canonical_path: str, config, *, item_id_hint=None, cancel_check=None
+    server,
+    server_config,
+    canonical_path: str,
+    config,
+    *,
+    item_id_hint=None,
+    cancel_check=None,
+    trust_server_hash: bool = False,
 ) -> ChapterPlan:
     """Resolve only an enabled Plex server's exact source and chapter map.
 
     API or indexing failures remain separate from the existing BIF work.
+
+    Args:
+        trust_server_hash: Bulk scans only. Use Plex's hash for the part at this exact path
+            when its byte size matches, instead of reading the file (the same rule as BIF paths).
     """
     from ..servers.plex_chapters import ChapterError, resolve_chapter_target
 
     fingerprint = get_source_fingerprint(canonical_path)
-    bundle_hash = calculate_plex_hash(canonical_path)
-    bif_path = PlexBundleAdapter.bundle_bif_path(server_config.output["plex_config_folder"], bundle_hash)
+    bundle_hash = None if trust_server_hash else calculate_plex_hash(canonical_path)
     plan = ChapterPlan(
         server,
         canonical_path,
         fingerprint,
-        bif_path.parent.parent / "Chapters",
+        Path(),
         {"version": 1, "width": _WIDTH, "quality": _QUALITY, "tonemap": config.tonemap_algorithm},
     )
     try:
@@ -180,8 +191,12 @@ def prepare_chapters(
                 last_error = exc
         if plan.target is None:
             raise last_error or ChapterError("Waiting for Plex to index this source", code="pending_index")
-        if plan.target.bundle_hash != bundle_hash or plan.target.source_size != fingerprint[2]:
+        if plan.target.source_size != fingerprint[2] or bundle_hash not in (None, plan.target.bundle_hash):
             raise ChapterError("Waiting for Plex to analyze the current source", code="pending_index")
+        bif_path = PlexBundleAdapter.bundle_bif_path(
+            server_config.output["plex_config_folder"], plan.target.bundle_hash
+        )
+        plan.folder = bif_path.parent.parent / "Chapters"
         _check_source(plan)
         if not plan.target.chapters:
             if cancel_check and cancel_check():

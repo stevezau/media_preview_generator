@@ -251,6 +251,14 @@ def _tmp_path_for(canonical_path: str, working_tmp_folder: str) -> str:
     return os.path.join(working_tmp_folder, f"frames-{digest}")
 
 
+def _is_bulk_scan(source: str | None, config) -> bool:
+    """True when Plex's per-part hash may stand in for reading the file (after a name + size match).
+
+    Webhook and path-only dispatches hash the file, since Plex may not have rescanned it yet.
+    """
+    return not (source or getattr(config, "webhook_source", None) or getattr(config, "webhook_paths", None))
+
+
 def _writes_beside_media(adapter: OutputAdapter) -> bool:
     """True when the adapter overrides either sidecar cleanup hook."""
     cls = type(adapter)
@@ -1749,11 +1757,7 @@ def _process_canonical_path_previews(
     # the probe path. Build one helper so the three call-sites below stay in
     # sync (a divergence here previously hid behind copy-pasted dataclass kwargs).
     probe_frame_interval = int(getattr(config, "thumbnail_interval", 10) or 10)
-    # Only bulk scans may take Plex's per-part hash (after a name + size match);
-    # webhook and path-only dispatches hash the file, since Plex may not have rescanned it yet.
-    trust_server_hash = not (
-        source or getattr(config, "webhook_source", None) or getattr(config, "webhook_paths", None)
-    )
+    trust_server_hash = _is_bulk_scan(source, config)
 
     def _probe_bundle(server_id: str = "") -> BifBundle:
         return BifBundle(
@@ -2447,7 +2451,13 @@ def process_canonical_path(
             try:
                 bare_hint = int(str(hint).rsplit("/", 1)[-1]) if hint else None
                 plans[server.id] = prepare_chapters(
-                    server, enabled[server.id], path, config, item_id_hint=bare_hint, cancel_check=cancel_check
+                    server,
+                    enabled[server.id],
+                    path,
+                    config,
+                    item_id_hint=bare_hint,
+                    cancel_check=cancel_check,
+                    trust_server_hash=_is_bulk_scan(source, config),
                 )
             except CancellationError:
                 raise
@@ -2539,6 +2549,7 @@ def process_canonical_path(
                         config,
                         item_id_hint=plan.target.rating_key if plan.target else None,
                         cancel_check=cancel_check,
+                        trust_server_hash=_is_bulk_scan(source, config),
                     )
                     had_work = chapter_work_needed(plan, regenerate=force)
                     outcome = publish_chapters(

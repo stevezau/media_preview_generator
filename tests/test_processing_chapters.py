@@ -242,6 +242,35 @@ def test_stale_plex_hash_waits_for_plex_without_image_work(plan, config, monkeyp
     assert not plan.folder.exists()
 
 
+@pytest.mark.parametrize("size_delta, expected", [(0, "queued"), (1, "waiting")])
+def test_bulk_scan_takes_plex_hash_on_size_match_without_reading_the_file(
+    plan, config, monkeypatch, size_delta, expected
+):
+    plan.server.path_mappings = []
+    server_hash = "f" + "0" * 39
+    monkeypatch.setattr(
+        "media_preview_generator.servers.plex_chapters.resolve_chapter_target",
+        lambda *_a, **_k: replace(
+            plan.target, bundle_hash=server_hash, source_size=plan.target.source_size + size_delta
+        ),
+    )
+    monkeypatch.setattr(chapters, "calculate_plex_hash", MagicMock(side_effect=AssertionError("file was read")))
+    plex_config = plan.folder.parent / "plex"
+    prepared = chapters.prepare_chapters(
+        plan.server,
+        SimpleNamespace(output={"plex_config_folder": str(plex_config)}),
+        plan.canonical_path,
+        config,
+        trust_server_hash=True,
+    )
+    assert prepared.outcome.status == expected
+    if expected == "queued":
+        bif = PlexBundleAdapter.bundle_bif_path(str(plex_config), server_hash)
+        assert prepared.folder == bif.parent.parent / "Chapters"
+    else:
+        assert prepared.target is None
+
+
 @pytest.mark.parametrize("kind", ["sdr", "pq", "hlg"])
 def test_timestamp_runner_uses_correct_color_path_and_bounded_threads(tmp_path, config, monkeypatch, kind):
     track = SimpleNamespace(
@@ -434,6 +463,27 @@ def test_disabled_chapters_never_resolve_metadata(plan, mock_config, monkeypatch
     monkeypatch.setattr(chapters, "prepare_chapters", prepare)
     process_canonical_path(plan.canonical_path, registry, mock_config, check_only=True)
     prepare.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "source, webhook_source, webhook_paths, trusted",
+    [
+        (None, None, None, True),
+        ("sonarr", None, None, False),
+        (None, "radarr", None, False),
+        (None, None, ["/data/x.mkv"], False),
+    ],
+)
+def test_only_bulk_scans_let_chapter_planning_trust_plex_hash(
+    plan, mock_config, monkeypatch, source, webhook_source, webhook_paths, trusted
+):
+    registry = _registry(plan)
+    mock_config.webhook_source = webhook_source
+    mock_config.webhook_paths = webhook_paths
+    prepare = MagicMock(return_value=plan)
+    monkeypatch.setattr(chapters, "prepare_chapters", prepare)
+    process_canonical_path(plan.canonical_path, registry, mock_config, check_only=True, source=source)
+    assert prepare.call_args.kwargs["trust_server_hash"] is trusted
 
 
 @pytest.mark.parametrize("already_registered", [False, True])
