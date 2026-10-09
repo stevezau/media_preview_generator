@@ -1,4 +1,4 @@
-"""Tests for the per-vendor processor implementations (Phase B).
+"""Tests for the per-vendor processor implementations.
 
 Locks down the contract that ``EmbyProcessor``, ``JellyfinProcessor``,
 and ``PlexProcessor`` all satisfy the :class:`VendorProcessor`
@@ -67,11 +67,6 @@ class _ProcessorContractTests:
 
     def test_registry_has_this_vendor(self):
         assert isinstance(get_processor_for(self.server_type), self.vendor)
-
-    def test_list_libraries_passes_through(self, processor, mock_client):
-        mock_client.list_libraries.return_value = [_LIB, _LIB_DISABLED]
-        cfg = _config("srv-x", self.server_type)
-        assert processor.list_libraries(cfg) == [_LIB, _LIB_DISABLED]
 
     def test_list_libraries_empty_on_failure(self, processor, mock_client):
         mock_client.list_libraries.side_effect = RuntimeError("boom")

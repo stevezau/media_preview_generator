@@ -11,7 +11,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import struct
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -24,45 +23,12 @@ from media_preview_generator.processing.multi_server import (
 )
 from media_preview_generator.servers import LibraryNotYetIndexedError, ServerRegistry
 
-_BIF_MAGIC = bytes([0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A])
-
-
-def _decode_bif_count(path: Path) -> int:
-    raw = path.read_bytes()
-    assert raw[:8] == _BIF_MAGIC
-    return struct.unpack("<I", raw[12:16])[0]
-
 
 @pytest.fixture
-def base_config(tmp_path):
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = str(tmp_path / "plex_config")
-    Path(config.plex_config_folder).mkdir(parents=True, exist_ok=True)
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
+def base_config(live_config, tmp_path):
+    live_config.plex_config_folder = str(tmp_path / "plex_config")
+    Path(live_config.plex_config_folder).mkdir(parents=True, exist_ok=True)
+    return live_config
 
 
 @pytest.mark.integration
@@ -373,11 +339,6 @@ class TestServerIdentityDisambiguation:
             ],
         )
         settings.complete_setup()
-
-        monkeypatch.setattr(
-            "media_preview_generator.web.webhook_router._load_config_or_minimal",
-            lambda: base_config,
-        )
 
         # Look up a real item id from the live Emby.
         import requests

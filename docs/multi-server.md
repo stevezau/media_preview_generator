@@ -374,7 +374,7 @@ per-publisher skip-if-exists all apply on retry. Retries are cheap
 when the publish has already succeeded through some other path
 (e.g. Plex's own webhook firing after its scan completes).
 
-![A Jobs queue row for Sintel (2010), a Previews job. Its status reads Running with a Retry 0/5 badge, its priority is Normal, and its progress column reads Retry starting in 2 min.](images/tour-retry.webp)
+![The Jobs queue with four rows: Tears of Steel running at 62%, Sintel pending with Retry 2/5 and Retry starting in 4 min, Big Buck Bunny completed, and Elephants Dream pending](images/tour-retry.webp)
 
 ---
 

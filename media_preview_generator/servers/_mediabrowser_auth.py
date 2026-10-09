@@ -32,9 +32,9 @@ _AUTH_DEVICE_ID = uuid.uuid3(uuid.NAMESPACE_DNS, "PlexGeneratePreviews").hex
 class MediaBrowserAuthResult:
     """Outcome of a username+password authentication for either vendor.
 
-    Same shape for Emby and Jellyfin; the auth_helper module aliases
+    Same shape for Emby and Jellyfin; emby_auth / jellyfin_auth alias
     this under the per-vendor name (``EmbyAuthResult`` /
-    ``JellyfinAuthResult``) for backwards compatibility.
+    ``JellyfinAuthResult``).
 
     Attributes:
         ok: True when the server returned a usable token.

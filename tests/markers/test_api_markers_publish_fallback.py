@@ -15,12 +15,8 @@ from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS
 from media_preview_generator.markers import triggers
 from media_preview_generator.markers.outcomes import ServerStatus
 from media_preview_generator.web.jobs import PRIORITY_HIGH, get_job_manager
-from tests.markers import test_api_markers_edit
-from tests.markers.test_api_markers_edit import _row, _save
-
-# Fixtures shared with the editor's write API tests.
-media, episode, servers = test_api_markers_edit.media, test_api_markers_edit.episode, test_api_markers_edit.servers
-known, published = test_api_markers_edit.known, test_api_markers_edit.published
+from tests.markers.fakes import publish_row as _row
+from tests.markers.fakes import save_markers as _save
 
 INTRO = [{"type": "intro", "start_ms": 60_000, "end_ms": 90_000}]
 

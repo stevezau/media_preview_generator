@@ -330,17 +330,36 @@ class LocalChapters:
         if time.monotonic() >= deadline:
             raise ChapterError("Timed out validating chapter registration; no references changed", code="registration")
 
-    def _images(self, target: ChapterTarget, revisions: dict[int, str], *, deadline: float) -> None:
+    def _image_path(self, target: ChapterTarget, index: int) -> Path:
+        bundle = target.bundle_hash
+        return (
+            self.folder
+            / "Media"
+            / "localhost"
+            / bundle[0]
+            / f"{bundle[1:]}.bundle"
+            / "Contents"
+            / "Chapters"
+            / f"chapter{index}.jpg"
+        )
+
+    def _images(
+        self, target: ChapterTarget, revisions: dict[int, str], *, deadline: float
+    ) -> dict[int, tuple[int, int]]:
+        """Read, hash and decode every chapter image, outside Plex's write lock (decoding up to 1000 JPEGs is slow).
+
+        Returns:
+            Each image's (size, mtime_ns) as it was read, for :meth:`_images_unchanged` inside the transaction.
+        """
         if set(revisions) != {chapter.index for chapter in target.chapters}:
             raise ChapterError("Registration requires every chapter image", code="registration")
-        bundle = target.bundle_hash
         root = self._media_root()
-        folder = self.folder / "Media" / "localhost" / bundle[0] / f"{bundle[1:]}.bundle" / "Contents" / "Chapters"
+        seen: dict[int, tuple[int, int]] = {}
         for index, revision in revisions.items():
             self._within_deadline(deadline)
             if type(index) is not int or not isinstance(revision, str) or not _SHA256.fullmatch(revision):
                 raise ChapterError("Invalid chapter image revision", code="registration")
-            path = folder / f"chapter{index}.jpg"
+            path = self._image_path(target, index)
             try:
                 if not path.resolve().is_relative_to(root) or path.is_symlink():
                     raise ValueError("Image escapes the Plex Media folder")
@@ -357,15 +376,31 @@ class LocalChapters:
                     ):
                         raise ValueError("Not a supported JPEG")
                     image.load()
+                stat = path.stat()
+                seen[index] = (stat.st_size, stat.st_mtime_ns)
             except (OSError, ValueError, Image.DecompressionBombError) as exc:
                 raise ChapterError(
                     f"Chapter {index} image is missing, invalid, or changed", code="registration"
                 ) from exc
+        return seen
+
+    def _images_unchanged(self, target: ChapterTarget, seen: dict[int, tuple[int, int]]) -> None:
+        """Inside the write transaction: every image is still the file :meth:`_images` validated."""
+        for index, signature in seen.items():
+            try:
+                stat = self._image_path(target, index).stat()
+            except OSError as exc:
+                raise ChapterError(
+                    f"Chapter {index} image is missing, invalid, or changed", code="registration"
+                ) from exc
+            if (stat.st_size, stat.st_mtime_ns) != signature:
+                raise ChapterError(f"Chapter {index} image is missing, invalid, or changed", code="registration")
 
     def register(self, target: ChapterTarget, revisions: dict[int, str], version: str, *, deadline: float) -> None:
         """Compare the whole snapshot and update only thumb_url, all or nothing."""
         target = target_from_json(target_to_json(target))
         self._guard(target.machine_identifier, version, deadline)
+        seen = self._images(target, revisions, deadline=deadline)
         try:
             with self.database._database(read_only=False, deadline=deadline) as conn:
                 self.database._begin_write(conn, deadline)
@@ -379,7 +414,7 @@ class LocalChapters:
                             f"(changed fields: {', '.join(_target_changes(target, current))})",
                             code="source_changed",
                         )
-                    self._images(target, revisions, deadline=deadline)
+                    self._images_unchanged(target, seen)
                     for chapter in target.chapters:
                         self._within_deadline(deadline)
                         desired = chapter_url(target.media_id, chapter.index, revisions[chapter.index])

@@ -358,7 +358,9 @@ class TestClearMeta:
     def test_silent_on_missing_metas(self, tmp_path):
         out = tmp_path / "ghost.bif"
         # Never created.
-        clear_meta([out])  # no exception
+        clear_meta([out])
+        assert not _meta_path_for(out).exists()
+        assert not out.exists()
 
 
 def _copy_of(original, path, *, mtime: int):
@@ -370,9 +372,9 @@ def _copy_of(original, path, *, mtime: int):
 
 class TestOutputSharedByCopies:
     """Plex names a bundle after a hash of the file's content, so copies of one
-    video share an ``index-sd.bif``. Live case: Boxing S2026E94 and its "pt2"
-    copy (same 12,170,979,064 bytes, same Plex part hash) rebuilt the shared
-    BIF every night because each found the other's fingerprint on it."""
+    video share an ``index-sd.bif``. Without a per-copy check, two copies of one
+    file rebuilt the shared BIF every night because each found the other's
+    fingerprint on it."""
 
     def test_copies_sharing_an_output_both_stay_fresh_when_each_has_published(self, tmp_path):
         original = tmp_path / "Event - S2026E94.mkv"

@@ -430,7 +430,7 @@ class TestPlexTab:
         authed_page.locator("#markersPlexConfirmCancel").click()
         expect(modal).to_be_hidden(timeout=5000)
         expect(authed_page.locator("#markersEnabled")).not_to_be_checked()
-        authed_page.wait_for_timeout(300)
+        authed_page.evaluate("fetch('/login').then((r) => r.status)")  # let any stray request reach the route
         assert captured["puts"] == []
 
     def test_escape_closes_only_the_confirmation(self, authed_page: Page, app_url: str) -> None:
@@ -499,7 +499,7 @@ class TestPlexTab:
         _plex_confirmation_open(authed_page)
         authed_page.locator("#markersPlexConfirmCancel").click()
         expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden(timeout=5000)
-        authed_page.wait_for_timeout(300)
+        authed_page.evaluate("fetch('/login').then((r) => r.status)")  # let any stray request reach the route
         assert captured["puts"] == []
         expect(authed_page.locator("#editServerModal")).to_be_visible()
         expect(authed_page.locator("#editServerSave")).to_be_enabled()
@@ -545,9 +545,8 @@ class TestPlexTab:
         expect(authed_page.locator("#markersStatusBlock")).to_contain_text("✓ Active", timeout=5000)
 
         _flip_switch_on(authed_page)
-        authed_page.wait_for_timeout(500)
-        expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden()
         expect(authed_page.locator("#markersEnabled")).to_be_checked()
+        expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden()
 
         body = _save_and_get_put(authed_page, captured)
         assert body["markers"] == {
@@ -837,7 +836,7 @@ class TestPlexTab:
         touch_edit_form(authed_page)
         held[0].fulfill(status=200, content_type="application/json", body=json.dumps(server))
         authed_page.wait_for_function("() => !document.querySelector('#editServerSave').disabled")
-        authed_page.wait_for_timeout(800)
+        authed_page.evaluate("fetch('/login').then((r) => r.status)")  # let any stray request reach the route
 
         expect(modal).to_be_visible()
 
@@ -1452,7 +1451,6 @@ class TestSetupHealthMarkerRows:
         expect(must_fix).to_contain_text("Skip buttons need Plex Pass")
         expect(must_fix).to_contain_text("Nothing is written until the server has Plex Pass.")
         expect(must_fix).to_contain_text("not active")
-        expect(must_fix).to_contain_text("active")
         # Nothing this app can toggle → the shipped badge, and no "Manual" chip.
         expect(must_fix).to_contain_text("Change in Plex UI")
         expect(must_fix).not_to_contain_text("Manual")

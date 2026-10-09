@@ -42,7 +42,6 @@ def _post_manual_job(app_url: str, file_path: str) -> str:
 def _wait_for_status(app_url: str, job_id: str, statuses: set[str], timeout_s: float = 30) -> str | None:
     """Poll the real /api/jobs/<id> endpoint until status hits one of `statuses`."""
     deadline = time.monotonic() + timeout_s
-    last = None
     while time.monotonic() < deadline:
         r = requests.get(
             f"{app_url}/api/jobs/{job_id}",
@@ -50,11 +49,11 @@ def _wait_for_status(app_url: str, job_id: str, statuses: set[str], timeout_s: f
             timeout=_API_TIMEOUT,
         )
         if r.ok:
-            last = r.json().get("status")
-            if last in statuses:
-                return last
+            status = r.json().get("status")
+            if status in statuses:
+                return status
         time.sleep(0.1)
-    return last
+    return None
 
 
 @pytest.mark.e2e
@@ -105,9 +104,9 @@ class TestCancelKillRunningJob:
             statuses={"cancelled", "completed", "failed"},
             timeout_s=15,
         )
-        assert terminal is not None, f"Job {job_id} never reached a terminal state"
         # Any terminal state is fine — what we're catching is the bug
         # where cancel leaves the job stuck in a non-terminal limbo.
+        assert terminal is not None, f"Job {job_id} never reached a terminal state"
 
     def test_cancel_logs_include_user_cancellation_marker(
         self,
@@ -135,12 +134,9 @@ class TestCancelKillRunningJob:
         assert cancel_resp.status_code in (200, 201)
 
         # Wait for terminal so the log is fully flushed.
-        _wait_for_status(
-            app_url,
-            job_id,
-            statuses={"cancelled", "completed", "failed"},
-            timeout_s=15,
-        )
+        assert (
+            _wait_for_status(app_url, job_id, statuses={"cancelled", "completed", "failed"}, timeout_s=15) is not None
+        ), f"Job {job_id} never reached a terminal state"
 
         logs_resp = requests.get(
             f"{app_url}/api/jobs/{job_id}/logs",

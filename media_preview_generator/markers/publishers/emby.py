@@ -1,13 +1,13 @@
-"""Emby publisher via the Media Preview Bridge for Emby plugin (spec §3.3, §6.3).
+"""Emby publisher via the Media Preview Bridge for Emby plugin.
 
 Emby has no marker write API. The plugin stores what we POST and writes it into the item's chapter rows as IntroStart /
 IntroEnd / CreditsStart, next to the file's own chapters and any marker rows it didn't write, and writes it back after a
 refresh deletes it. Emby keeps no credits end: a Skip Credits button always skips to the end of the file, past any scene
-after the credits. Those credits are sent anyway (owner decision 2026-09-14) and the server row says so. Every POST is
+after the credits. Those credits are sent anyway and the server row says so. Every POST is
 confirmed by reading the item's chapters back.
 
 Emby keeps each version of a video as its own item with its own chapters, and its player shows the chapters of the
-version playing (lab, 2026-09-15). Each version is published on its own, like a Jellyfin item, once the item the job
+version playing. Each version is published on its own, like a Jellyfin item, once the item the job
 found is confirmed to be this file's version.
 """
 
@@ -118,7 +118,7 @@ def _kept_types(
     """The wanted types Emby shows its own rows of instead of ours, as the plugin leaves them without ``ReplaceOwn``.
 
     Rows that are what this app left before (``prior``) are ours, never Emby's. A type the user locked is never kept:
-    a marker the user adjusted or locked wins over "Keep Emby's" (spec §5.5 rule 1), so a locked type that still shows
+    a marker the user adjusted or locked wins over "Keep Emby's", so a locked type that still shows
     neither ours nor what we left is a write that didn't land.
 
     Returns:
@@ -140,7 +140,7 @@ def _embys_own_types(rows: list[dict[str, Any]], wanted: list[Marker], prior: li
     """The wanted types whose rows on the item are Emby's own, which "Keep Emby's" would leave there.
 
     Rows that are what a write would show, or what this app left before (``prior``), are ours and take nothing off
-    Emby. Intersected with the locked types this is what a lock overrides (spec §5.5 rule 1); the rest is what stays
+    Emby. Intersected with the locked types this is what a lock overrides; the rest is what stays
     Emby's, and a ``ReplaceOwn`` POST must leave exactly those out.
     """
     return frozenset(
@@ -349,8 +349,7 @@ class EmbyMarkerPublisher(MarkerPublisher):
         The POST carries this file's size, which the plugin compares with the item's file. "Use ours" sends
         ``ReplaceOwn``, so ours replace Emby's own rows of a type. "Keep Emby's" doesn't: the plugin leaves a type that
         has Emby's rows alone (it still stores ours and shows them once Emby's rows are gone), and that type is reported
-        in ``last_kept_types``. A type the user **locked** is sent with ``ReplaceOwn`` even under "Keep Emby's" (spec
-        §5.5 rule 1) and reported in ``last_replaced_own_types``. An empty set deletes the plugin's markers when
+        in ``last_kept_types``. A type the user **locked** is sent with ``ReplaceOwn`` even under "Keep Emby's" and reported in ``last_replaced_own_types``. An empty set deletes the plugin's markers when
         something of ours may be there
         (``previous`` None or not empty, or a kept type). Nothing is sent when ``previous`` already is this set, the
         plugin holds exactly it for this very file, and Emby's chapters already show what a POST would leave there.
@@ -371,7 +370,7 @@ class EmbyMarkerPublisher(MarkerPublisher):
         self.last_replaced_own_types = frozenset()
         keep = self._keeps_emby()
         wanted = self.project(markers)
-        # A marker the user adjusted or locked wins over "Keep Emby's" (spec §5.5 rule 1, §14 2026-09-20), so a locked
+        # A marker the user adjusted or locked wins over "Keep Emby's", so a locked
         # type is never kept — not even one kept by an earlier run.
         locked = frozenset(m.type for m in wanted if m.locked)
         kept_before = (frozenset(kept_types) - locked) if keep else frozenset()

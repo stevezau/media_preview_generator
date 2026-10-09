@@ -62,6 +62,15 @@ class TestBuildItems:
                 ("jf-1", [("1", True)])
             ]
 
+    @pytest.mark.parametrize("key", ["decide_again", "online_recheck", "version_rerun"])
+    def test_job_of_a_retired_type_builds_nothing_and_lists_no_library(self, key):
+        reg = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN)})
+        with patch("media_preview_generator.jobs.orchestrator._enumerate_items_for_servers") as enumerate_items:
+            items, warnings, sent = job_runner.build_items({key: True}, registry=reg)
+        assert items == [] and sent == {}
+        assert warnings == ["This job type was retired; nothing to do"]
+        enumerate_items.assert_not_called()
+
     def test_two_sender_paths_of_one_file_give_one_item_with_both_senders_item_ids(self):
         # A Sonarr and a Plex webhook for the same episode joined one follow-up: each sender's path maps to one file.
         reg = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN)})
@@ -312,7 +321,6 @@ def env(monkeypatch):
     gpus = [("nvidia", "/dev/nvidia0", {"workers": 1})]
     monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda settings, **kw: gpus)
     ctx = MagicMock()
-    ctx.take_budget_rechecks.return_value = ([], None)
     ctx.take_missing.return_value = 0
     monkeypatch.setattr(job_runner, "build_context", MagicMock(return_value=ctx))
     # The real checks start ffmpeg and the text detection helper.
@@ -563,14 +571,6 @@ class TestRun:
         self._run()
         assert "missing from disk" not in loguru_caplog.text
 
-    def test_the_decide_again_job_lists_its_files_with_the_servers_configs(self, env):
-        env.job.config = {"libraries": [], "source": "decide_again", "decide_again": True}
-        server_configs = [MagicMock(name="plex-config")]
-        env.registry.configs.return_value = server_configs
-        with patch.object(job_runner, "_items_to_decide_again", return_value=[_item()]) as listed:
-            self._run()
-        listed.assert_called_once_with(env.ctx.store, server_configs)
-
     def test_no_warnings_completes_cleanly(self, env):
         self._run()
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
@@ -581,11 +581,10 @@ class TestRun:
             ({}, None, True),
             ({"reconcile": True}, None, True),
             ({}, [], True),
-            ({"source": "season", "file_paths": ["/m/a.mkv"]}, None, False),
             ({"retry_attempt": 1, "file_paths": ["/m/a.mkv"]}, None, False),
             ({"verify": True, "file_paths": ["/m/a.mkv"]}, None, False),
         ],
-        ids=["library", "check-servers", "no-files", "season", "retry", "verify"],
+        ids=["library", "check-servers", "no-files", "retry", "verify"],
     )
     def test_a_job_sweeps_the_fingerprint_cache_when_it_ends_unless_it_follows_another(self, env, config, items, swept):
         env.job.config = {"libraries": [], **config}
@@ -1826,7 +1825,12 @@ class TestRestart:
         monkeypatch.setattr(triggers, "get_job_manager", lambda: after)
         sm = MagicMock(processing_paused=False)
         sm.get.side_effect = lambda key, default=None: default
+        # webhooks is first imported lazily inside this run; importing it now stops its module-level
+        # ``get_settings_manager`` binding the stub for the rest of the session (later webhook tests got 401s).
+        from media_preview_generator.web import webhooks
+
         monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda *a: sm)
+        monkeypatch.setattr(webhooks, "get_settings_manager", lambda *a: sm)
         runs = []
         with (
             patch.object(job_runner, "run_intro_credits_job", side_effect=runs.append),
@@ -1858,7 +1862,7 @@ NOT_IN_LIBRARY_ROW = _row("markers_waiting", "Not in this server's library yet",
 PLEX_PASS_UNKNOWN_ROW = _row(
     "markers_waiting", "Can't reach Plex to confirm Plex Pass", sid="plex-1", reason_code="plex_pass_unknown"
 )
-# Written before 2026-10-02, when a Plex item waited for its other versions; nothing writes the code now.
+# A row stored back when a Plex item waited for its other versions; nothing writes that code now.
 LEGACY_VERSIONS_UNCHECKED_ROW = _row(
     "markers_waiting",
     "Waiting for this item's other versions to agree on: intro, credits",
@@ -1909,7 +1913,7 @@ def test_retry_reason_matrix(row, reason):
 
 
 class TestLibraryRetry:
-    """Files a server hasn't indexed yet get a delayed retry job (Option B ruling)."""
+    """Files a server hasn't indexed yet get a delayed retry job."""
 
     @pytest.fixture
     def retry_env(self, env, monkeypatch):
@@ -2644,7 +2648,7 @@ class TestRetryChain:
 
 class TestCheckServersUsesChecksAsFilesRun:
     """Check servers uses a server recheck, or a failed item's retry, when a file listed for it has its result, not
-    when it lists the file: over a real markers store and the real listing (spec §6.2 step 6)."""
+    when it lists the file: over a real markers store and the real listing."""
 
     NOW = datetime(2026, 9, 15, 12, tzinfo=UTC)
 
@@ -3055,7 +3059,7 @@ class TestReadBackFailures:
 
 
 class TestBudgetExhaustedCompletionWarning:
-    """The job's completion warning includes ``pipeline.budget_exhausted_warnings(ctx)`` (spec finding 4)."""
+    """The job's completion warning includes ``pipeline.budget_exhausted_warnings(ctx)``."""
 
     _TIDB_WARNING = (
         "TheIntroDB's daily lookup limit was reached: 39 files were checked without it. "
@@ -3090,12 +3094,9 @@ class TestBudgetExhaustedCompletionWarning:
 
 
 class TestClosingLogLines:
-    """The job's log ends with the pipeline's closing lines (a Season job's per-season lines, then the totals)."""
+    """The job's log ends with the pipeline's closing line (the totals)."""
 
-    LINES = [
-        "Season re-check, Show (2020) S01 (3 episodes): no change",
-        "Done: 3 files · 0 sent to Plex · 0 need review · 3 nothing found",
-    ]
+    LINES = ["Done: 3 files · 0 sent to Plex · 3 nothing found"]
 
     def test_they_are_logged_from_the_jobs_counts_before_the_job_completes(self, env):
         order = []
@@ -3105,116 +3106,13 @@ class TestClosingLogLines:
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.ctx.summary_lines.assert_called_once_with({"markers_published": 1})
-        assert order[-3:] == [("j1", f"INFO - {line}") for line in self.LINES] + [("j1", "completed")]
-
-    def test_a_legacy_season_job_logs_its_summary_without_passing_requests_on(self, env):
-        order = []
-        env.job.config = {"file_paths": ["/m/a.mkv"], "source": "season", "late_requests": {"/m/b.mkv": 7}}
-        env.ctx.summary_lines.return_value = self.LINES
-        env.ctx.ran_since.return_value = False  # its own run of b came before the request, or there was none
-        env.jm.add_log.side_effect = lambda job_id, line: order.append((job_id, line))
-        env.jm.complete_job.side_effect = lambda job_id, **kwargs: order.append((job_id, "completed"))
-        with (
-            patch.object(job_runner, "build_items", return_value=([_item()], [], {})),
-            patch("media_preview_generator.markers.triggers.create_intro_credits_job") as create,
-        ):
-            job_runner.run_intro_credits_job("j1")
-        done = order.index(("j1", "completed"))
-        assert order[done - 2 : done + 1] == [("j1", f"INFO - {line}") for line in self.LINES] + [("j1", "completed")]
-        create.assert_not_called()
-        env.ctx.ran_since.assert_not_called()
+        assert order[-2:] == [("j1", f"INFO - {line}") for line in self.LINES] + [("j1", "completed")]
 
     def test_lines_that_cant_be_made_leave_the_job_completed(self, env):
         env.ctx.summary_lines.side_effect = RuntimeError("boom")
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
-
-    @pytest.mark.parametrize(
-        ("source", "season_recheck", "label"),
-        [
-            ("season", True, "Season re-check"),
-            ("theintrodb_recheck", True, "TheIntroDB recheck"),
-            ("sonarr", False, "Season re-check"),
-            ("manual", False, "Season re-check"),
-            (None, False, "Season re-check"),
-        ],
-    )
-    def test_only_a_season_job_or_a_theintrodb_recheck_logs_one_line_per_season(
-        self, env, source, season_recheck, label
-    ):
-        env.job.config = {"libraries": [], "source": source}
-        env.ctx.store.get_decisions.return_value = {}  # a recheck job's file is still undecided
-        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
-            job_runner.run_intro_credits_job("j1")
-        assert env.build_context.call_args.kwargs["season_recheck"] is season_recheck
-        assert env.build_context.call_args.kwargs["recheck_label"] == label
-
-
-class TestTheIntroDbBudgetRecheck:
-    """Budget exhaustion leaves files to the next user-created job; legacy jobs can still finish."""
-
-    @pytest.mark.parametrize("cancelled", [False, True])
-    def test_budget_exhaustion_does_not_queue_a_job(self, env, cancelled):
-        env.ctx.take_budget_rechecks.return_value = (["/m/a.mkv"], datetime(2026, 9, 24, tzinfo=UTC))
-        env.ctx.settings.source_enabled.return_value = True
-        env.jm.get_pending_jobs.return_value = []
-        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": cancelled}
-        with (
-            patch.object(job_runner, "build_items", return_value=([_item()], [], {})),
-            patch("media_preview_generator.markers.triggers.create_intro_credits_job") as create,
-        ):
-            job_runner.run_intro_credits_job("j1")
-        create.assert_not_called()
-        env.jm.create_job.assert_not_called()
-        if cancelled:
-            env.jm.cancel_job.assert_called_once_with("j1")
-        else:
-            env.jm.complete_job.assert_called_once_with("j1", warning=None)
-
-    def _decisions(self, env, by_path):
-        env.ctx.store.get_file.side_effect = lambda path: SimpleNamespace(id=path) if path in by_path else None
-        env.ctx.store.get_decisions.side_effect = lambda file_id: {
-            n: SimpleNamespace(status=DecisionStatus(status)) for n, status in enumerate(by_path[file_id])
-        }
-
-    def test_the_recheck_job_runs_only_files_still_undecided(self, env):
-        env.job.config = {
-            "source": job_runner.BUDGET_RECHECK_SOURCE,
-            "file_paths": ["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"],
-        }
-        env.ctx.settings.source_enabled.side_effect = lambda source_id: source_id == "theintrodb"
-        self._decisions(env, {"/m/a.mkv": ["decided", "no_evidence"], "/m/b.mkv": ["decided", "disabled"]})
-        items = [_item("/m/a.mkv"), _item("/m/b.mkv"), _item("/m/c.mkv")]
-        with patch.object(job_runner, "build_items", return_value=(items, [], {})):
-            job_runner.run_intro_credits_job("j1")
-
-        submitted = [i.canonical_path for i in env.dispatcher.submit_items.call_args.kwargs["items"]]
-        assert submitted == ["/m/a.mkv", "/m/c.mkv"]  # c: no decisions stored yet
-        env.jm.add_log.assert_any_call("j1", "INFO - 1 file(s) were decided since; they aren't checked again")
-
-    def test_the_recheck_job_runs_nothing_once_theintrodb_is_off(self, env):
-        env.job.config = {"source": job_runner.BUDGET_RECHECK_SOURCE, "file_paths": ["/m/a.mkv"]}
-        env.ctx.settings.source_enabled.return_value = False
-        with patch.object(job_runner, "build_items", return_value=([_item("/m/a.mkv")], [], {})):
-            job_runner.run_intro_credits_job("j1")
-
-        env.dispatcher.submit_items.assert_not_called()
-        env.jm.add_log.assert_any_call("j1", "INFO - TheIntroDB is turned off now, so these files aren't checked again")
-        env.jm.complete_job.assert_called_once_with("j1", warning="No files to check.")
-
-    def test_the_recheck_job_seals_its_files_when_it_reads_them(self, env):
-        env.job.config = {"source": job_runner.BUDGET_RECHECK_SOURCE, "file_paths": ["/m/a.mkv"]}
-        with patch.object(job_runner, "build_items", return_value=([], [], {})):
-            job_runner.run_intro_credits_job("j1")
-        env.jm.merge_job_config.assert_any_call("j1", {job_runner.FILES_SEALED: True})
-
-    def test_other_jobs_are_not_filtered(self, env):
-        env.job.config = {"source": "sonarr", "file_paths": ["/m/a.mkv"]}
-        self._decisions(env, {"/m/a.mkv": ["decided"]})
-        with patch.object(job_runner, "build_items", return_value=([_item("/m/a.mkv")], [], {})):
-            job_runner.run_intro_credits_job("j1")
-        assert [i.canonical_path for i in env.dispatcher.submit_items.call_args.kwargs["items"]] == ["/m/a.mkv"]
 
 
 class TestRetryCarriesTheSenderPath:
@@ -3355,16 +3253,10 @@ class TestRetryWait:
                 {"verify": True},
                 "Check starting in 120s — servers often rescan a replaced file after its markers are sent",
             ),
-            (
-                {"source": job_runner.BUDGET_RECHECK_SOURCE},
-                "Check starting in 120s — after TheIntroDB's daily limit resets at 00:00 UTC",
-            ),
         ],
-        ids=["retry", "verify", "theintrodb-recheck"],
+        ids=["retry", "verify"],
     )
     def test_waits_until_the_retry_is_due_without_a_slot(self, env, monkeypatch, kind, waiting_for):
-        from datetime import datetime, timedelta
-
         start = datetime(2026, 9, 14, 10, 0, tzinfo=UTC)
         now = self._clock(monkeypatch, start)
         due = start + timedelta(seconds=120)
@@ -3395,8 +3287,6 @@ class TestRetryWait:
 
     @pytest.mark.parametrize("not_before", ["2026-09-14T09:00:00+00:00", "not a time", None])
     def test_due_or_unreadable_retry_time_starts_straight_away(self, env, monkeypatch, not_before):
-        from datetime import datetime
-
         self._clock(monkeypatch, datetime(2026, 9, 14, 10, 0, tzinfo=UTC))
         env.job.config = {"file_paths": ["/m/a.mkv"], "retry_attempt": 1, "retry_not_before": not_before}
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
@@ -3406,7 +3296,6 @@ class TestRetryWait:
 
     def test_retry_now_on_the_chain_head_skips_the_rest_of_the_wait(self, env, monkeypatch):
         # POST /api/jobs/<head>/retry-now flags the chain's pending retry, as it does a preview retry.
-        from datetime import datetime, timedelta
 
         start = datetime(2026, 9, 14, 10, 0, tzinfo=UTC)
         self._clock(monkeypatch, start)
@@ -3455,8 +3344,6 @@ class TestRetryWait:
         env.jm.update_progress.assert_any_call("j1", retry_eta=moved)  # the countdown shows the moved time
 
     def test_cancelled_while_waiting_never_takes_a_slot(self, env, monkeypatch):
-        from datetime import datetime, timedelta
-
         start = datetime(2026, 9, 14, 10, 0, tzinfo=UTC)
         self._clock(monkeypatch, start)
         env.job.config = {
@@ -3490,8 +3377,6 @@ class TestLeftoverJobsAfterRestart:
     ]
 
     def _boot(self, tmp_path, monkeypatch, *, auto_requeue, age_hours):
-        from datetime import datetime, timedelta
-
         from media_preview_generator.web import app as app_mod
         from media_preview_generator.web.jobs import JobManager
 
@@ -3774,402 +3659,3 @@ def test_start_job_async_uses_last_known_status_when_locked_reread_fails(known_s
                 assert job_id not in preview_runner._inflight_jobs
         finally:
             preview_runner._inflight_jobs.discard(job_id)
-
-
-class TestDecideAgainJob:
-    """A legacy job saved after settings v16 and v20: an ordinary Intro & Credits job over
-    the files still stored under the removed Needs review status, and those waiting for their item's other versions,
-    when it runs."""
-
-    CONFIG = {
-        "kind": JOB_KIND_INTRO_CREDITS,
-        "source": job_runner.DECIDE_AGAIN_SOURCE,
-        "libraries": [],
-        "file_paths": [],
-        job_runner.DECIDE_AGAIN: True,
-    }
-
-    @staticmethod
-    def _ends(env, status):
-        from media_preview_generator.web.jobs import JobStatus
-
-        env.jm.complete_job.side_effect = lambda *args, **kwargs: setattr(env.job, "status", JobStatus[status])
-
-    def test_it_lists_the_legacy_review_files_and_waiting_and_runs_them_as_any_job(self, env):
-        env.job.config = dict(self.CONFIG)
-        env.ctx.store.files_with_legacy_review_decisions.return_value = [
-            "/tv/B/S01/e2.mkv",
-            "/movies/A/a.mkv",
-            "/tv/B/S01/e1.mkv",
-        ]
-        env.ctx.store.files_waiting_for_other_versions.return_value = ["/tv/B/S01/e1.mkv", "/movies/C/c - 4K.mkv"]
-        with patch.object(job_runner, "build_items") as build:
-            job_runner.run_intro_credits_job("j1")
-        build.assert_not_called()
-        ctx_kwargs = env.build_context.call_args.kwargs
-        # Only its log is grouped; it asks and reads what is due, as any job does.
-        assert (ctx_kwargs["decide_again"], ctx_kwargs["force"]) == (True, False)
-        items = env.dispatcher.submit_items.call_args.kwargs["items"]
-        # Season folder, then path, as build_items orders a job's files; no item id hints (each is looked up again).
-        assert [(i.canonical_path, i.item_id_by_server) for i in items] == [
-            ("/movies/A/a.mkv", {}),
-            ("/movies/C/c - 4K.mkv", {}),
-            ("/tv/B/S01/e1.mkv", {}),
-            ("/tv/B/S01/e2.mkv", {}),
-        ]
-        env.jm.complete_job.assert_called_once_with("j1", warning=None)
-
-    @pytest.mark.parametrize(("status", "cleared"), [("COMPLETED", True), ("FAILED", False)])
-    def test_the_upgrades_request_is_cleared_only_once_the_job_completes(self, env, status, cleared):
-        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
-
-        env.job.config = dict(self.CONFIG)
-        env.ctx.store.files_with_legacy_review_decisions.return_value = ["/m/a.mkv"]
-        self._ends(env, status)
-        job_runner.run_intro_credits_job("j1")
-        assert env.sm.delete.call_args_list == ([call(DECIDE_AGAIN_KEY)] if cleared else [])
-
-    def test_with_nothing_left_to_decide_again_it_completes_without_a_warning_and_clears_the_request(self, env):
-        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
-
-        env.job.config = dict(self.CONFIG)
-        env.ctx.store.files_with_legacy_review_decisions.return_value = []
-        env.ctx.store.files_waiting_for_other_versions.return_value = []
-        env.ctx.store.files_with_season_audio_intro.return_value = []
-        env.ctx.store.files_decided_by_online_and_server_markers.return_value = []
-        self._ends(env, "COMPLETED")
-        job_runner.run_intro_credits_job("j1")
-        env.dispatcher.submit_items.assert_not_called()
-        env.jm.add_log.assert_any_call("j1", "INFO - No file is left to decide again")
-        env.jm.complete_job.assert_called_once_with("j1")
-        env.sm.delete.assert_called_once_with(DECIDE_AGAIN_KEY)
-
-    def test_any_other_job_lists_its_own_files_and_leaves_the_request(self, env):
-        self._ends(env, "COMPLETED")
-        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
-            job_runner.run_intro_credits_job("j1")
-        assert env.build_context.call_args.kwargs["decide_again"] is False
-        env.ctx.store.files_with_legacy_review_decisions.assert_not_called()
-        env.sm.delete.assert_not_called()
-
-    def test_its_retry_is_an_ordinary_retry_and_a_file_off_disk_gets_none(self, env, monkeypatch):
-        from media_preview_generator.markers import triggers
-
-        settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
-        env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
-        env.job.config = dict(self.CONFIG)
-        env.job.library_name = triggers.DECIDE_AGAIN_JOB_NAME
-        env.ctx.store.files_with_legacy_review_decisions.return_value = ["/m/a.mkv", "/m/b.mkv"]
-        create = MagicMock(return_value=MagicMock(id="retry-1"))
-        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
-        set_cb = MagicMock()
-        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
-
-        def during_wait(timeout=None):
-            callback = set_cb.call_args_list[0].args[0]
-            callback("/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW])
-            callback("/m/b.mkv", "skipped_file_not_found", "", "Lookup", servers=[])
-            return True
-
-        env.tracker.wait.side_effect = during_wait
-        job_runner.run_intro_credits_job("j1")
-        create.assert_called_once_with(
-            library_name=f"Retry: {triggers.DECIDE_AGAIN_JOB_NAME}",
-            priority=3,
-            source=job_runner.DECIDE_AGAIN_SOURCE,
-            file_paths=["/m/a.mkv"],
-            item_id_hints=None,
-            retry_attempt=1,
-            retry_delay_s=60,
-            verify_chain=False,
-            parent_job_id="j1",
-            max_retries=3,
-        )
-
-
-class TestVersionRerunJob:
-    """Legacy batches finish their saved work without automatically queueing another batch."""
-
-    CONFIG = {
-        "kind": JOB_KIND_INTRO_CREDITS,
-        "source": job_runner.VERSION_RERUN_SOURCE,
-        "libraries": [],
-        "file_paths": [],
-        job_runner.VERSION_RERUN: True,
-    }
-    BATCH = {"/tv/B/S01/e2.mkv": {"credits_text": 4}, "/tv/B/S01/e1.mkv": {"credits_text": 4, "server_markers": 5}}
-
-    @pytest.fixture
-    def taken(self, env, monkeypatch):
-        from media_preview_generator.markers import triggers
-
-        calls = MagicMock()
-        calls.next_batch.return_value = dict(self.BATCH)
-        calls.markers_enabled_anywhere.return_value = True
-        monkeypatch.setattr(job_runner, "next_batch", calls.next_batch)
-        monkeypatch.setattr(job_runner, "record_taken", calls.record_taken)
-        env.jm.merge_job_config.side_effect = calls.merge_job_config
-        env.jm.record_file_result.side_effect = calls.record_file_result
-        monkeypatch.setattr(triggers, "create_intro_credits_job", calls.create_job)
-        monkeypatch.setattr(triggers, "markers_enabled_anywhere", calls.markers_enabled_anywhere)
-        env.registry.configs.return_value = ["plex-config"]
-        set_cb = MagicMock()
-        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
-        calls.results = []
-
-        def during_wait(timeout=None):
-            callback = set_cb.call_args_list[0].args[0]
-            for path, outcome in calls.results:
-                callback(path, outcome, "", "GPU Worker 1", servers=[])
-            return True
-
-        env.tracker.wait.side_effect = during_wait
-        return calls
-
-    @staticmethod
-    def _ends(env, status, config=None):
-        from media_preview_generator.web.jobs import JobStatus
-
-        def complete(*_args, **_kwargs):
-            env.job.status = JobStatus[status]
-            if config:
-                env.job.config = {**env.job.config, **config}
-
-        env.jm.complete_job.side_effect = complete
-
-    def test_it_takes_the_next_batch_holds_it_on_the_job_and_runs_it(self, env, taken):
-        env.job.config = dict(self.CONFIG)
-        self._ends(env, "COMPLETED")
-        with patch.object(job_runner, "build_items") as build:
-            job_runner.run_intro_credits_job("j1")
-
-        build.assert_not_called()
-        taken.next_batch.assert_called_once_with(env.ctx.store, env.ctx.settings, ["plex-config"])
-        assert taken.merge_job_config.call_args_list[0] == call("j1", {job_runner.VERSION_RERUN_FILES: self.BATCH})
-        taken.record_taken.assert_not_called()  # nothing ran yet
-        ctx_kwargs = env.build_context.call_args.kwargs
-        assert (ctx_kwargs["force"], ctx_kwargs["decide_again"], ctx_kwargs["online_recheck"]) == (False, False, False)
-        items = env.dispatcher.submit_items.call_args.kwargs["items"]
-        assert [(i.canonical_path, i.item_id_by_server) for i in items] == [
-            ("/tv/B/S01/e1.mkv", {}),
-            ("/tv/B/S01/e2.mkv", {}),
-        ]
-        assert env.dispatcher.submit_items.call_args.kwargs["priority"] == 3
-
-    def test_each_file_is_recorded_as_it_finishes_whatever_its_outcome(self, env, taken):
-        # A file that fails or has no owner ran too: taken again, it would fail again in every batch.
-        env.job.config = dict(self.CONFIG)
-        taken.results = [("/tv/B/S01/e1.mkv", "markers_published"), ("/tv/B/S01/e2.mkv", "failed")]
-        job_runner.run_intro_credits_job("j1")
-
-        assert taken.record_taken.call_args_list == [
-            call(env.ctx.store, {"/tv/B/S01/e1.mkv": self.BATCH["/tv/B/S01/e1.mkv"]}),
-            call(env.ctx.store, {"/tv/B/S01/e2.mkv": self.BATCH["/tv/B/S01/e2.mkv"]}),
-        ]
-        # After the job's own row: a restart in between carries the file (and records it then), never runs it twice.
-        order = [name for name, *_ in taken.method_calls if name in ("record_file_result", "record_taken")]
-        assert order == ["record_file_result", "record_taken"] * 2
-
-    def test_a_file_that_stopped_part_way_on_a_cancel_isnt_recorded(self, env, taken):
-        env.job.config = dict(self.CONFIG)
-        stopped = []
-        env.jm.is_cancellation_requested.side_effect = lambda job_id: bool(stopped)
-        taken.results = [("/tv/B/S01/e1.mkv", "failed")]
-        taken.record_file_result.side_effect = lambda *a, **kw: stopped.append(True)
-
-        job_runner.run_intro_credits_job("j1")
-
-        taken.record_taken.assert_not_called()
-
-    def test_a_job_revived_after_a_restart_runs_the_batch_it_held_and_records_what_it_carries(self, env, taken):
-        env.job.config = {**self.CONFIG, job_runner.VERSION_RERUN_FILES: self.BATCH}
-        env.jm.get_file_results.return_value = [{"file": "/tv/B/S01/e1.mkv", "outcome": "markers_published"}]
-        self._ends(env, "COMPLETED")
-        with patch.object(job_runner, "_unchanged_since_analysed", return_value=True):
-            job_runner.run_intro_credits_job("j1")
-
-        taken.next_batch.assert_not_called()
-        assert call("j1", {job_runner.VERSION_RERUN_FILES: self.BATCH}) not in taken.merge_job_config.call_args_list
-        # Finished before the restart: its row was kept, but maybe not its record.
-        taken.record_taken.assert_called_once_with(env.ctx.store, {"/tv/B/S01/e1.mkv": self.BATCH["/tv/B/S01/e1.mkv"]})
-        items = env.dispatcher.submit_items.call_args.kwargs["items"]
-        assert [i.canonical_path for i in items] == ["/tv/B/S01/e2.mkv"]
-
-    def test_a_revived_finished_batch_does_not_queue_another(self, env, taken):
-        env.job.config = {**self.CONFIG, job_runner.VERSION_RERUN_FILES: self.BATCH}
-        env.jm.get_file_results.return_value = [{"file": p, "outcome": "markers_published"} for p in self.BATCH]
-        self._ends(env, "COMPLETED")
-        with patch.object(job_runner, "_unchanged_since_analysed", return_value=True):
-            job_runner.run_intro_credits_job("j1")
-
-        env.dispatcher.submit_items.assert_not_called()
-        taken.record_taken.assert_called_once_with(env.ctx.store, self.BATCH)
-        taken.create_job.assert_not_called()
-
-    def test_the_batch_leaves_the_jobs_config_once_it_ends(self, env, taken):
-        # Only a revive needs it, and the config ships in every job payload.
-        env.job.config = dict(self.CONFIG)
-        self._ends(env, "COMPLETED")
-        job_runner.run_intro_credits_job("j1")
-
-        assert taken.merge_job_config.call_args_list[-1] == call("j1", {}, remove=(job_runner.VERSION_RERUN_FILES,))
-
-    @pytest.mark.parametrize(
-        ("status", "config"),
-        [
-            ("COMPLETED", None),
-            # Its retry chain keeps the row pending: this batch's own run is done all the same.
-            ("PENDING", {"is_retry_chain": True, "last_outcome": "scheduled"}),
-            ("FAILED", None),
-        ],
-        ids=["completed", "retry-chain-scheduled", "failed"],
-    )
-    def test_finishing_a_batch_does_not_queue_another(self, env, taken, status, config):
-        env.job.config = dict(self.CONFIG)
-        self._ends(env, status, config)
-        job_runner.run_intro_credits_job("j1")
-
-        taken.create_job.assert_not_called()
-
-    def test_a_cancelled_batch_queues_no_next_one(self, env, taken):
-        env.job.config = dict(self.CONFIG)
-        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
-        job_runner.run_intro_credits_job("j1")
-
-        env.jm.cancel_job.assert_called_once_with("j1")
-        taken.create_job.assert_not_called()
-
-    @pytest.mark.parametrize("enabled", [True, False], ids=["nothing-left", "intro-and-credits-off-everywhere"])
-    def test_with_nothing_to_take_it_completes_and_queues_no_next_batch(self, env, taken, enabled):
-        # Turned off during the gap: nothing is taken, so no file is run without an owner and recorded as done.
-        env.job.config = dict(self.CONFIG)
-        taken.markers_enabled_anywhere.return_value = enabled
-        if enabled:
-            taken.next_batch.return_value = {}
-        self._ends(env, "COMPLETED")
-        job_runner.run_intro_credits_job("j1")
-
-        assert taken.next_batch.call_count == int(enabled)
-        env.dispatcher.submit_items.assert_not_called()
-        env.jm.complete_job.assert_called_once_with("j1")
-        taken.record_taken.assert_not_called()
-        taken.create_job.assert_not_called()
-
-    def test_any_other_job_takes_no_batch(self, env, taken):
-        self._ends(env, "COMPLETED")
-        taken.results = [("/m/a.mkv", "markers_published")]
-        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
-            job_runner.run_intro_credits_job("j1")
-
-        taken.next_batch.assert_not_called()
-        taken.record_taken.assert_not_called()
-        taken.create_job.assert_not_called()
-
-    def test_a_batch_waiting_for_its_gap_says_so(self, env, taken, monkeypatch):
-        due = datetime.now(UTC) + timedelta(seconds=90)
-        env.job.config = {**self.CONFIG, "retry_not_before": due.isoformat(), "retry_delay": 1800}
-        env.jm.is_cancellation_requested.return_value = True  # stop the wait at its first check
-        job_runner.run_intro_credits_job("j1")
-
-        message = env.jm.update_progress.call_args_list[0].kwargs["current_item"]
-        assert message.startswith("Next batch starting in ")
-        assert message.endswith(" — re-checking files after an update, 100 at a time")
-        taken.next_batch.assert_not_called()
-
-
-class TestOnlineRecheckJob:
-    """A legacy online re-check job: an ordinary Intro & Credits job over the files whose "no
-    entry" from an online database is due again, listed when it runs."""
-
-    CONFIG = {
-        "kind": JOB_KIND_INTRO_CREDITS,
-        "source": job_runner.ONLINE_RECHECK_SOURCE,
-        "libraries": [],
-        "file_paths": [],
-        job_runner.ONLINE_RECHECK: True,
-    }
-
-    def test_it_lists_the_due_files_and_runs_them_as_any_job(self, env, monkeypatch):
-        env.job.config = dict(self.CONFIG)
-        listed = MagicMock(return_value=["/tv/B/S01/e2.mkv", "/movies/A/a.mkv", "/tv/B/S01/e1.mkv"])
-        monkeypatch.setattr(job_runner, "online_recheck_files", listed)
-        with patch.object(job_runner, "build_items") as build:
-            job_runner.run_intro_credits_job("j1")
-        build.assert_not_called()
-        # Listed with the job's own settings and clock, when it runs.
-        listed.assert_called_once_with(env.ctx.store, env.ctx.settings, env.ctx.now.return_value)
-        ctx_kwargs = env.build_context.call_args.kwargs
-        # Only its log is grouped: it asks and reads only what is due, as any job does.
-        assert (ctx_kwargs["online_recheck"], ctx_kwargs["force"], ctx_kwargs["decide_again"]) == (True, False, False)
-        assert ctx_kwargs["season_recheck"] is False
-        items = env.dispatcher.submit_items.call_args.kwargs["items"]
-        assert [(i.canonical_path, i.item_id_by_server) for i in items] == [
-            ("/movies/A/a.mkv", {}),
-            ("/tv/B/S01/e1.mkv", {}),
-            ("/tv/B/S01/e2.mkv", {}),
-        ]
-        env.jm.complete_job.assert_called_once_with("j1", warning=None)
-
-    def test_a_cancel_stops_the_listing_and_the_job(self, env, monkeypatch):
-        env.job.config = dict(self.CONFIG)
-
-        def listed(store, settings, now):
-            yield "/m/a.mkv"
-            env.jm.is_cancellation_requested.return_value = True
-            yield "/m/b.mkv"
-            raise AssertionError("listed on after the cancel")
-
-        monkeypatch.setattr(job_runner, "online_recheck_files", listed)
-        job_runner.run_intro_credits_job("j1")
-        env.dispatcher.submit_items.assert_not_called()
-        env.jm.cancel_job.assert_called_once_with("j1")
-
-    def test_with_nothing_due_it_completes_without_a_warning(self, env, monkeypatch):
-        env.job.config = dict(self.CONFIG)
-        monkeypatch.setattr(job_runner, "online_recheck_files", MagicMock(return_value=[]))
-        job_runner.run_intro_credits_job("j1")
-        env.dispatcher.submit_items.assert_not_called()
-        env.jm.add_log.assert_any_call("j1", "INFO - No file is due to be asked again online")
-        env.jm.complete_job.assert_called_once_with("j1")
-
-    def test_any_other_job_lists_its_own_files(self, env, monkeypatch):
-        listed = MagicMock()
-        monkeypatch.setattr(job_runner, "online_recheck_files", listed)
-        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
-            job_runner.run_intro_credits_job("j1")
-        assert env.build_context.call_args.kwargs["online_recheck"] is False
-        listed.assert_not_called()
-
-    def test_a_legacy_online_job_does_not_create_a_budget_recheck(self, env, monkeypatch):
-        from media_preview_generator.markers import triggers
-
-        env.job.config = dict(self.CONFIG)
-        monkeypatch.setattr(job_runner, "online_recheck_files", MagicMock(return_value=["/m/a.mkv", "/m/b.mkv"]))
-        refused_at = datetime(2026, 9, 24, 4, 42, tzinfo=UTC)
-        env.ctx.take_budget_rechecks.return_value = (["/m/b.mkv"], refused_at)
-        env.jm.get_pending_jobs.return_value = []
-        create = MagicMock(return_value=MagicMock(id="r1234567"))
-        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
-        monkeypatch.setattr(job_runner, "_utcnow", lambda: refused_at)
-        job_runner.run_intro_credits_job("j1")
-        create.assert_not_called()
-
-    def test_a_file_off_disk_gets_no_retry(self, env, monkeypatch):
-        from media_preview_generator.markers import triggers
-
-        settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
-        env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
-        env.job.config = dict(self.CONFIG)
-        monkeypatch.setattr(job_runner, "online_recheck_files", MagicMock(return_value=["/m/a.mkv"]))
-        create = MagicMock()
-        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
-        set_cb = MagicMock()
-        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
-
-        def during_wait(timeout=None):
-            set_cb.call_args_list[0].args[0]("/m/a.mkv", "skipped_file_not_found", "", "Lookup", servers=[])
-            return True
-
-        env.tracker.wait.side_effect = during_wait
-        job_runner.run_intro_credits_job("j1")
-        create.assert_not_called()

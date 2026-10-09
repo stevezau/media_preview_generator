@@ -102,33 +102,6 @@ def to_utc_naive(value: datetime) -> datetime:
     return datetime.fromtimestamp(value.timestamp(), tz=UTC).replace(tzinfo=None)
 
 
-def calculate_title_width():
-    """Calculate optimal title width based on terminal size.
-
-    Calculates the maximum number of characters that can be used for
-    displaying media titles in the progress bars, accounting for all
-    other UI elements.
-
-    Returns:
-        int: Maximum characters for title display (20-50 range)
-
-    """
-    terminal_width = shutil.get_terminal_size().columns
-
-    worker_prefix = 7  # "GPU 0: " or "CPU 0: "
-    percentage = 6  # " 100% "
-    time_elapsed = 8  # " 00:00:00 "
-    count_display = 12  # " (1/10) "
-    speed_display = 8  # " 2.5x "
-    progress_bar = 20  # Approximate progress bar width
-
-    reserved_space = worker_prefix + percentage + time_elapsed + count_display + speed_display + progress_bar
-    available_width = terminal_width - reserved_space
-
-    # Set reasonable limits: minimum 20 chars, maximum 50 chars
-    return max(min(available_width, 50), 20)
-
-
 def format_display_title(title: str, media_type: str, title_max_width: int) -> str:
     """Format and truncate display title based on media type.
 
@@ -224,6 +197,20 @@ def sanitize_path(path: str) -> str:
     return os.path.normpath(path)
 
 
+def _fsync_dir(path: str) -> None:
+    """Best-effort fsync of a directory so a just-renamed file survives power loss."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def atomic_json_save(filepath: str, data: Any, *, permissions: int | None = None) -> None:
     """Write JSON data to a file atomically.
 
@@ -245,7 +232,10 @@ def atomic_json_save(filepath: str, data: Any, *, permissions: int | None = None
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, filepath)
+        _fsync_dir(parent)
     except BaseException:
         try:
             os.unlink(tmp_path)

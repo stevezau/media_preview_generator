@@ -51,6 +51,24 @@ def job_title(label: str, library_name: str | None, libraries: list, resolved_pa
     return f"{label}: all libraries"
 
 
+def _optional_json_object() -> tuple[dict | None, tuple | None]:
+    """Read a request body that may be empty: ``({}, None)`` when empty, else the JSON object.
+
+    Returns:
+        ``(data, None)``, or ``(None, error_response)`` for a body that isn't a JSON object.
+    """
+    data = request.get_json(silent=True)
+    if data is None:
+        # get_json answers None both for no body and for a body it can't read (no JSON content type, a trailing
+        # comma); only an empty body means "no options".
+        if request.content_length or request.get_data(cache=True):
+            return None, (jsonify({"error": "The request body must be JSON"}), 400)
+        return {}, None
+    if not isinstance(data, dict):
+        return None, (jsonify({"error": "The request body must be a JSON object"}), 400)
+    return data, None
+
+
 def parse_job_request():
     """Read a "start a job" body: ``libraries`` or ``file_paths``, ``priority`` and ``library_name``.
 
@@ -61,15 +79,9 @@ def parse_job_request():
     blocked = _config_unwritable_response()
     if blocked is not None:
         return None, blocked
-    data = request.get_json(silent=True)
-    if data is None:
-        # get_json answers None both for no body and for a body it can't read (no JSON content type, a trailing
-        # comma); only an empty body means "every library".
-        if request.content_length or request.get_data(cache=True):
-            return None, (jsonify({"error": "The request body must be JSON"}), 400)
-        data = {}
-    if not isinstance(data, dict):
-        return None, (jsonify({"error": "The request body must be a JSON object"}), 400)
+    data, bad_body = _optional_json_object()
+    if bad_body is not None:
+        return None, bad_body
     libraries = data.get("libraries") or []
     file_paths = data.get("file_paths") or []
     if not isinstance(libraries, list) or not all(
@@ -143,13 +155,9 @@ def marker_reconcile():
     blocked = _config_unwritable_response()
     if blocked is not None:
         return blocked
-    data = request.get_json(silent=True)
-    if data is None:
-        if request.content_length or request.get_data(cache=True):
-            return jsonify({"error": "The request body must be JSON"}), 400
-        data = {}
-    if not isinstance(data, dict):
-        return jsonify({"error": "The request body must be a JSON object"}), 400
+    data, bad_body = _optional_json_object()
+    if bad_body is not None:
+        return bad_body
     priority = _parse_job_priority(data["priority"]) if "priority" in data else PRIORITY_LOW
     if priority is None:
         return jsonify({"error": "priority must be 1, 2, 3, high, normal or low"}), 400
@@ -161,7 +169,7 @@ def _registry(*, timeout_s: int | None = None) -> Any:
 
     Args:
         timeout_s: Cap every server's request timeout at this many seconds. The editor's publish runs inside a web
-            request, so it shortens the transport instead of inheriting the 30 s a job can afford (ruling P-R1); a
+            request, so it shortens the transport instead of inheriting the 30 s a job can afford; a
             server already configured below the cap keeps its own value.
 
     Returns:
@@ -445,7 +453,7 @@ def _marker_types(raw: object) -> tuple[list[Any] | None, str]:
 def _user_markers(raw: object, duration_ms: int) -> tuple[list[Any] | None, str]:
     """The ``markers`` field as user markers, or the reason it can't be saved.
 
-    Only the two bounds of spec §5.5 rule 2 that a user's own marker keeps are enforced (ruling P-R2): inside the
+    Only the two bounds that a user's own marker keeps are enforced: inside the
     file, and ending after it starts. The 3 s minimum, the intro caps and the first-35 % / last-25 % windows exist to
     catch a source that is wrong, and a user marking a 2 s intro is not wrong — the editor warns, it doesn't refuse.
     """
@@ -560,8 +568,8 @@ def _editor_server_row(row: dict, *, saved: list[Any], duration_ms: int, enabled
         "can_show": list(can_show),
         "cant_show": [m.type.value for m in saved if m.type.value not in can_show],
         "notes": notes,
-        # The types whose own markers this server lost to the user's lock although it is set to keep its own
-        # (spec §5.5 rule 1); empty on every other server.
+        # The types whose own markers this server lost to the user's lock although it is set to keep its own;
+        # empty on every other server.
         "replaced_own": list(row.get(REPLACED_OWN, ())),
     }
 
@@ -573,15 +581,15 @@ def marker_item_save():
 
     Body: ``path`` (or ``server_id`` + ``item_id``, and optionally ``version_file``), plus ``markers``: a list of
     ``{"type", "start_ms", "end_ms"}``, one entry per type, ``end_ms`` null or missing meaning "runs to the end of the
-    file". Saving is locking (ruling P-R3) — there is no adjusted-but-unlocked state — and the save lands before any
-    server is contacted, so a server that fails can't lose the edit (ruling P-R1).
+    file". Saving is locking — there is no adjusted-but-unlocked state — and the save lands before any
+    server is contacted, so a server that fails can't lose the edit.
 
     Returns:
         200 with ``markers`` (every stored marker for the file, the saved ones locked) and ``servers``: one row per
         owning server with ``result`` (``written``, ``unchanged``, ``waiting``, ``failed``, ``not_enabled``,
         or ``nothing_to_publish``), its ``message``, what it ``can_show``, the saved types it
         ``cant_show``, per-field ``notes`` (Emby's credits end), and the types whose own markers the lock
-        ``replaced_own`` on a server set to keep its own (spec §5.5 rule 1), and ``queued_job_id``: the Intro &
+        ``replaced_own`` on a server set to keep its own, and ``queued_job_id``: the Intro &
         Credits job that delivers the save to the servers whose row is ``waiting`` or ``failed`` (null when every
         server took it). 400 for a body this can't be saved
         from, a path outside every server library, or a type no enabled owner can show; 404 for an unknown server

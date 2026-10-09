@@ -106,7 +106,7 @@ def test_settings_override_replaces_the_stored_block(stype, cls):
 
 @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY])
 def test_saved_settings_provider_reaches_the_plex_and_emby_publishers(stype):
-    # Plex writes Plex's database directly, so it re-reads the saved switch before each write (audit C MED-2); Emby
+    # Plex writes Plex's database directly, so it re-reads the saved switch before each write; Emby
     # re-reads "When Emby has its own markers" before each write.
     def provider():
         raise AssertionError("not called while building")

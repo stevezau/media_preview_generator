@@ -46,6 +46,12 @@ if TYPE_CHECKING:
     from ..jobs import Job
 
 
+def _json_object() -> dict:
+    """Return the request's JSON body, or ``{}`` when it is empty or not an object (e.g. a list)."""
+    data = request.get_json()
+    return data if isinstance(data, dict) else {}
+
+
 def _parse_worker_request(data: dict) -> tuple[str, int] | tuple[None, tuple]:
     """Parse worker_type + count from a worker-scaling request body.
 
@@ -110,7 +116,7 @@ def _infer_server_from_library_id(library_id: str) -> tuple[str | None, str | No
 
     Used by the manual job creation path to attribute single-library
     jobs to their server even when the caller didn't pass server_id
-    (D2 — older /Start New Job submissions and any external API caller
+    (older /Start New Job submissions and any external API caller
     that sends only library_ids). Modern UI sends ``server_id``
     explicitly; the inference is a fallback for un-updated clients and
     must refuse rather than guess when it can't disambiguate.
@@ -198,10 +204,10 @@ def auth_status():
 @limiter.limit("10 per minute")
 def api_login():
     """API login endpoint. Rate limited to 10 requests per minute."""
-    data = request.get_json() or {}
+    data = _json_object()
     token = data.get("token", "")
 
-    if validate_token(token):
+    if isinstance(token, str) and validate_token(token):
         start_signed_in_session()
         return jsonify({"success": True})
 
@@ -255,7 +261,7 @@ def api_set_token():
             }
         ), 409
 
-    data = request.get_json() or {}
+    data = _json_object()
     new_token = str(data.get("token") or "").strip()
     confirm_token = str(data.get("confirm_token") or "").strip()
 
@@ -832,8 +838,10 @@ def _check_servers_answer(queued: "ReconcileQueued") -> tuple[Response, int]:
 def create_job():
     """Create a new job.
 
-    Accepts either of (in priority order):
-    * ``library_ids: list[str]`` — canonical multi-library shape (Phase H6).
+    Accepts any of (in priority order):
+    * ``libraries: [{server_id, library_id}]`` — exact libraries, so the same id on two servers stays distinct.
+      One job is created per server, each pinned to its server.
+    * ``library_ids: list[str]`` — flat ids, applied to whichever server the job runs on.
     * ``library_names: list[str]`` — back-compat from older clients.
     * ``library_id: str`` — back-compat single-library shape.
     """
@@ -841,11 +849,35 @@ def create_job():
     if blocked is not None:
         return blocked
 
-    data = request.get_json() or {}
+    data = _json_object()
     try:
         raw_config = normalize_scan_filter_config(data.get("config"))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+
+    pairs = data.get("libraries")
+    if pairs is not None:
+        if not isinstance(pairs, list) or not all(
+            isinstance(x, dict) and str(x.get("server_id") or "").strip() and str(x.get("library_id") or "").strip()
+            for x in pairs
+        ):
+            return jsonify({"error": "libraries must be a list of {server_id, library_id}"}), 400
+        ids_by_server: dict[str, list[str]] = {}
+        for pair in pairs:
+            ids = ids_by_server.setdefault(str(pair["server_id"]).strip(), [])
+            library_id = str(pair["library_id"]).strip()
+            if library_id not in ids:
+                ids.append(library_id)
+        for sid in ids_by_server:
+            if not _resolve_server_context(sid)[0]:
+                return jsonify({"error": f"unknown server {sid!r}"}), 400
+        if ids_by_server:
+            library_name = data.get("library_name", "") if len(ids_by_server) == 1 else ""
+            jobs = [
+                _create_scan_job(data, raw_config, [], server_id, ids, library_name)
+                for server_id, ids in ids_by_server.items()
+            ]
+            return jsonify({**jobs[0].to_dict(), "jobs": [j.id for j in jobs]}), 201
 
     library_ids = list(data.get("library_ids") or [])
     library_names = list(data.get("library_names") or [])
@@ -854,22 +886,27 @@ def create_job():
         if single:
             library_ids = [str(single)]
 
-    priority = data.get("priority", PRIORITY_NORMAL)
-    server_id, server_name, server_type = _resolve_server_context(data.get("server_id"))
+    job = _create_scan_job(
+        data, raw_config, library_names, data.get("server_id"), library_ids, data.get("library_name", "")
+    )
+    return jsonify(job.to_dict()), 201
 
-    # D2 — when the caller didn't pass server_id but picked libraries
-    # from a single server, infer the server so:
-    #   1. The Jobs row gets a server chip (otherwise every "I just
-    #      want TV Shows" manual scan renders as an unlabelled
-    #      "All Servers" entry a user can't tell apart from any other).
-    #   2. ``server_id_filter`` propagates into the dispatcher at
-    #      line ~362 below, so publishing is scoped to the selected
-    #      server. Without the pin, the multi-server fan-out publishes
-    #      to every server that owns the canonical path (found in the
-    #      wild on job c9253a85: user selected 3 Plex libraries, got
-    #      Emby + Jellyfin bundles too). When library IDs span multiple
-    #      servers the pin stays empty — true peer-equal fan-out is
-    #      the correct behaviour for a cross-server scan.
+
+def _create_scan_job(
+    data: dict,
+    raw_config: dict,
+    library_names: list[str],
+    requested_server_id: str | None,
+    library_ids: list[str],
+    library_name: str,
+):
+    """Create and start one library-scan job, pinned to ``requested_server_id`` when given."""
+    priority = data.get("priority", PRIORITY_NORMAL)
+    server_id, server_name, server_type = _resolve_server_context(requested_server_id)
+
+    # With no server_id but libraries from a single server, infer it so the Jobs row gets a server chip and
+    # publishing is scoped to that server (otherwise the multi-server fan-out also publishes to Emby/Jellyfin
+    # servers owning the same files). Library ids spanning several servers stay unpinned.
     if not server_id and library_ids:
         server_id, server_name, server_type = _infer_server_from_library_ids(library_ids)
 
@@ -908,7 +945,7 @@ def create_job():
     job_manager = get_job_manager()
     job = job_manager.create_job(
         library_id=display_library_id,
-        library_name=data.get("library_name", ""),
+        library_name=library_name,
         config=dict(config_overrides),
         priority=priority,
         server_id=server_id,
@@ -917,8 +954,7 @@ def create_job():
     )
 
     _start_job_async(job.id, config_overrides)
-
-    return jsonify(job.to_dict()), 201
+    return job
 
 
 @api.route("/jobs/manual", methods=["POST"])
@@ -938,8 +974,10 @@ def create_manual_job():
     if blocked is not None:
         return blocked
 
-    data = request.get_json() or {}
+    data = _json_object()
     raw_paths = data.get("file_paths") or []
+    if not isinstance(raw_paths, list):
+        return jsonify({"error": "file_paths must be a list of paths"}), 400
     force_regenerate = _param_to_bool(data.get("force_regenerate"), False)
     priority = data.get("priority", PRIORITY_NORMAL)
 
@@ -1391,7 +1429,7 @@ def set_job_priority(job_id):
     Accepts JSON body: {"priority": "high"|"normal"|"low"} or {"priority": 1|2|3}.
     Updates the job model and, if the job is running, the dispatcher tracker.
     """
-    data = request.get_json() or {}
+    data = _json_object()
     raw = data.get("priority")
     if raw is None:
         return jsonify({"error": "priority is required"}), 400
@@ -1668,78 +1706,26 @@ def _get_shared_worker_pool():
     return None
 
 
+def _require_running_job(job_id: str):
+    """Return a 400 response unless the job is running, else ``None``."""
+    job = get_job_manager().get_job(job_id)
+    if not job or job.status != JobStatus.RUNNING:
+        return jsonify({"error": "Job is not running"}), 400
+    return None
+
+
 @api.route("/jobs/<job_id>/workers/add", methods=["POST"])
 @api_token_required
 def add_job_workers(job_id):
-    """Add workers to the shared pool (scoped by job for API symmetry)."""
-    job_manager = get_job_manager()
-    job = job_manager.get_job(job_id)
-    if not job or job.status != JobStatus.RUNNING:
-        return jsonify({"error": "Job is not running"}), 400
-
-    data = request.get_json(silent=True) or {}
-    parsed_type, parsed_count = _parse_worker_request(data)
-    if parsed_type is None:
-        body, status = parsed_count
-        return jsonify(body), status
-    worker_type, count = parsed_type, parsed_count
-    grouped = _scale_group_for_legacy_request(data, worker_type, count)
-    if grouped is not None:
-        return grouped
-
-    worker_pool = job_manager.get_active_worker_pool()
-    if worker_pool is None:
-        return jsonify({"error": "Worker pool is not available"}), 409
-
-    try:
-        added = worker_pool.add_workers(worker_type, count)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    return jsonify(
-        {
-            "success": True,
-            "worker_type": worker_type,
-            "requested": count,
-            "added": added,
-        }
-    )
+    """Alias of ``/workers/add`` for a running job; the shared pool is not scoped to the job."""
+    return _require_running_job(job_id) or add_workers_global()
 
 
 @api.route("/jobs/<job_id>/workers/remove", methods=["POST"])
 @api_token_required
 def remove_job_workers(job_id):
-    """Remove workers from the shared pool (scoped by job for API symmetry)."""
-    job_manager = get_job_manager()
-    job = job_manager.get_job(job_id)
-    if not job or job.status != JobStatus.RUNNING:
-        return jsonify({"error": "Job is not running"}), 400
-
-    data = request.get_json(silent=True) or {}
-    parsed_type, parsed_count = _parse_worker_request(data)
-    if parsed_type is None:
-        body, status = parsed_count
-        return jsonify(body), status
-    worker_type, count = parsed_type, parsed_count
-    grouped = _scale_group_for_legacy_request(data, worker_type, -count)
-    if grouped is not None:
-        return grouped
-
-    worker_pool = job_manager.get_active_worker_pool()
-    if worker_pool is None:
-        return jsonify({"error": "Worker pool is not available"}), 409
-
-    result = worker_pool.remove_workers(worker_type, count)
-    return jsonify(
-        {
-            "success": True,
-            "worker_type": worker_type,
-            "requested": count,
-            "removed": result.get("removed", 0),
-            "scheduled_removal": result.get("scheduled", 0),
-            "unavailable": result.get("unavailable", 0),
-        }
-    )
+    """Alias of ``/workers/remove`` for a running job; the shared pool is not scoped to the job."""
+    return _require_running_job(job_id) or remove_workers_global()
 
 
 @api.route("/jobs/<job_id>/logs", methods=["GET"])

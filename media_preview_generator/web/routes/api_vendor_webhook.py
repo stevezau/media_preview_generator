@@ -42,7 +42,7 @@ _PLUGIN_INSTRUCTIONS = {
             "Set 'Url' to the Webhook URL shown above.",
             "Expand 'Request Headers' and add a header — Name: 'X-Auth-Token', Value: [THIS APP'S TOKEN] (this app's web-auth token; find it under Settings → Authentication).",
             "Tick 'New Media Added' under Events. Add any other events you want to forward.",
-            "Save. Use the 'Test webhook' button below to confirm the round-trip works.",
+            "Save.",
         ],
         "supports_custom_headers": True,
     },
@@ -59,60 +59,54 @@ _PLUGIN_INSTRUCTIONS = {
             "Expand 'Headers', click 'Add Header', set Key: 'X-Auth-Token', Value: [THIS APP'S TOKEN] (this app's web-auth token; find it under Settings → Authentication).",
             "Under 'Notification Type', tick 'Item Added'.",
             "Set 'Item Type' to Movie + Episode at minimum.",
-            "Save. Use the 'Test webhook' button below to confirm the round-trip works.",
+            "Save.",
         ],
         "supports_custom_headers": True,
     },
 }
 
 
-def _resolve_vendor_server(server_id: str | None, expected_type: str) -> tuple[dict | None, str | None, int | None]:
-    """Resolve a configured Emby / Jellyfin server entry by id."""
+def webhook_url(server_id: str | None = None) -> str:
+    """Webhook URL a media server should POST to, on the host the browser is using.
+
+    ``request.host_url`` makes a session connected via http://10.0.0.5:8080 get a URL the
+    media server can reach from its own network. With ``server_id`` the per-server route
+    (:func:`webhook_router.webhook_per_server`) is returned, which routes unambiguously
+    between servers of the same type; without it, the universal ``/incoming`` route.
+    """
+    base = request.host_url.rstrip("/")
+    if server_id:
+        return f"{base}/api/webhooks/server/{server_id}"
+    return f"{base}/api/webhooks/incoming"
+
+
+def find_server_entry(server_id: str, expected_type: str) -> tuple[dict | None, str | None, int | None]:
+    """Look up a configured server by id, requiring it to be of ``expected_type``.
+
+    Returns:
+        ``(entry, None, None)`` on success, else ``(None, error_message, http_status)``.
+    """
     from ..settings_manager import get_settings_manager
 
-    if not server_id:
-        return None, "server_id query parameter is required", 400
-
-    settings = get_settings_manager()
-    media_servers = settings.get("media_servers") or []
-    match = next(
-        (s for s in media_servers if isinstance(s, dict) and s.get("id") == server_id),
-        None,
-    )
+    media_servers = get_settings_manager().get("media_servers") or []
+    match = next((s for s in media_servers if isinstance(s, dict) and s.get("id") == server_id), None)
     if not match:
         return None, f"Server {server_id!r} not configured", 404
     actual_type = (match.get("type") or "").lower()
     if actual_type != expected_type:
         return (
             None,
-            f"Server {server_id!r} is type {actual_type!r}, expected {expected_type!r}",
+            f"Server {server_id!r} is type {actual_type!r}, expected {expected_type!r} (this endpoint is {expected_type.title()}-only)",
             400,
         )
     return match, None, None
 
 
-def _build_webhook_url() -> str:
-    """Return the universal webhook URL with the current host pre-filled.
-
-    Used for the legacy ``?token=…`` fallback and for callers that
-    don't pin a server. Uses ``request.host_url`` so a session
-    connected via http://10.0.0.5:8080 gets a URL Emby/Jellyfin can
-    actually reach back from its own network namespace.
-    """
-    base = request.host_url.rstrip("/")
-    return f"{base}/api/webhooks/incoming"
-
-
-def _build_per_server_webhook_url(server_id: str) -> str:
-    """Return the pinned per-server webhook URL.
-
-    Handled by :func:`webhook_router.webhook_per_server` — the
-    ``server_id`` in the path disambiguates between configured servers
-    of the same type (e.g. two Jellyfin installs) without relying on
-    the payload's ``ServerId`` matching the probed ``server_identity``.
-    """
-    base = request.host_url.rstrip("/")
-    return f"{base}/api/webhooks/server/{server_id}"
+def _resolve_vendor_server(server_id: str | None, expected_type: str) -> tuple[dict | None, str | None, int | None]:
+    """Resolve a configured Emby / Jellyfin server entry by id."""
+    if not server_id:
+        return None, "server_id query parameter is required", 400
+    return find_server_entry(server_id, expected_type)
 
 
 def _info_handler(vendor: str):
@@ -121,7 +115,7 @@ def _info_handler(vendor: str):
     if err:
         return jsonify({"error": err}), status
     instructions = _PLUGIN_INSTRUCTIONS.get(vendor, {})
-    webhook_url_per_server = _build_per_server_webhook_url(server_id)
+    webhook_url_per_server = webhook_url(server_id)
 
     # The plugin authenticates via the X-Auth-Token header. The
     # value (this app's web-auth token) is never returned by this

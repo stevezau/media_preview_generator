@@ -1,4 +1,4 @@
-"""Prose cards at the credits start (spec §5.4, "Prose cards"): an epilogue's sentences on black glued onto the roll.
+"""Prose cards at the credits start: an epilogue's sentences on black glued onto the roll.
 
 Rule J reads boxes, not words, so an epilogue card on black ("Robert Hanssen is now serving a life sentence...") that
 touches the roll is its first card, and the start lands on it (A Beautiful Imperfection, Accused, Breach: 11-71 s

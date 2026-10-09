@@ -25,7 +25,6 @@ import struct
 import subprocess
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import requests
@@ -35,9 +34,7 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
-
-_BIF_MAGIC = bytes([0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A])
-_JPEG_SOI = bytes([0xFF, 0xD8, 0xFF])
+from tests.integration.conftest import BIF_MAGIC, JPEG_SOI
 
 # Plex's docker-compose container name + the in-container config dir.
 PLEX_CONTAINER = "previews-test-plex"
@@ -68,35 +65,13 @@ def _docker_exec(*args: str) -> subprocess.CompletedProcess:
 
 
 @pytest.fixture
-def plex_visible_config(plex_credentials, tmp_path):
-    config = MagicMock()
-    config.plex_url = plex_credentials["PLEX_URL"]
-    config.plex_token = plex_credentials["PLEX_ACCESS_TOKEN"]
-    config.plex_timeout = 60
-    config.plex_libraries = ["Movies"]
-    config.plex_config_folder = str(tmp_path / "plex_config")
-    Path(config.plex_config_folder).mkdir(parents=True, exist_ok=True)
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
+def plex_visible_config(live_config, plex_credentials, tmp_path):
+    live_config.plex_url = plex_credentials["PLEX_URL"]
+    live_config.plex_token = plex_credentials["PLEX_ACCESS_TOKEN"]
+    live_config.plex_libraries = ["Movies"]
+    live_config.plex_config_folder = str(tmp_path / "plex_config")
+    Path(live_config.plex_config_folder).mkdir(parents=True, exist_ok=True)
+    return live_config
 
 
 @pytest.fixture
@@ -173,7 +148,7 @@ class TestPlexServesPublishedBif:
         assert bif_path.exists()
         # Quick sanity: BIF magic + at least one frame.
         raw = bif_path.read_bytes()
-        assert raw[:8] == _BIF_MAGIC
+        assert raw[:8] == BIF_MAGIC
         image_count = struct.unpack("<I", raw[12:16])[0]
         assert image_count > 0
 
@@ -265,5 +240,5 @@ class TestPlexServesPublishedBif:
         assert thumb.status_code == 200, (
             f"Plex didn't serve a thumbnail: HTTP {thumb.status_code}, body={thumb.content[:200]}"
         )
-        assert thumb.content[:3] == _JPEG_SOI, f"Plex returned non-JPEG bytes (first 16: {thumb.content[:16].hex()})"
+        assert thumb.content[:3] == JPEG_SOI, f"Plex returned non-JPEG bytes (first 16: {thumb.content[:16].hex()})"
         assert len(thumb.content) > 100, f"Plex returned suspiciously small thumb ({len(thumb.content)} bytes)"

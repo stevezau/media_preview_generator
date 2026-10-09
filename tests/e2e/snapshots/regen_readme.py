@@ -104,7 +104,7 @@ INIT_SCRIPT = (
 
   // Any string matching one of these patterns is a leak risk and gets
   // rewritten to the placeholder. ``http://localhost:NNNN`` covers the
-  // webhook URL widget (servers.html:35, _automation_triggers.html:495)
+  // webhook URL widget (servers and automation pages)
   // which builds its value from ``window.location.origin`` — Location.origin
   // is a getter on the prototype, so defineProperty overrides are brittle;
   // text-level scrub is simpler and safer. IPs in ALLOWED_IPS are the

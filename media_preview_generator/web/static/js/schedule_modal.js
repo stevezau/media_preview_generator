@@ -168,7 +168,10 @@ function _resetScheduleForm() {
     document.getElementById('scheduleLibraryAll').checked = true;
     document.getElementById('scheduleName').value = '';
     const srvSel = document.getElementById('scheduleServer');
-    if (srvSel) srvSel.value = '';
+    if (srvSel) {
+        srvSel.value = '';
+        delete srvSel.dataset.pinnedServerId;
+    }
     document.getElementById('scheduleCron').value = '';
     document.getElementById('scheduleEditId').value = '';
     document.getElementById('scheduleEnabled').checked = true;
@@ -225,6 +228,16 @@ function showNewScheduleModal() {
     modal.show();
 }
 
+// The server picker lists enabled servers only. A schedule pinned to a disabled or
+// removed one must keep that pin on save instead of silently becoming "All servers".
+function _keepPinnedServerOption() {
+    const sel = document.getElementById('scheduleServer');
+    const pinned = sel && sel.dataset.pinnedServerId;
+    if (!pinned || Array.from(sel.options).some(o => o.value === pinned)) return;
+    sel.add(new Option(`${pinned} (disabled or removed)`, pinned));
+    sel.value = pinned;
+}
+
 function showEditScheduleModal(scheduleId) {
     const schedule = schedules.find(s => s.id === scheduleId);
     if (!schedule) {
@@ -234,6 +247,7 @@ function showEditScheduleModal(scheduleId) {
 
     _resetScheduleForm();
 
+    document.getElementById('scheduleServer').dataset.pinnedServerId = schedule.server_id || '';
     document.getElementById('scheduleEditId').value = schedule.id;
     document.getElementById('scheduleName').value = schedule.name || '';
     document.getElementById('scheduleEnabled').checked = schedule.enabled !== false;
@@ -279,6 +293,7 @@ function showEditScheduleModal(scheduleId) {
     // pre-select the saved library_ids.
     MediaScanFilters.setLoading('schedule', true);
     _populateScheduleServerPicker(schedule.server_id || '')
+        .then(_keepPinnedServerOption)
         .then(onScheduleServerChange)
         .then(_applyLibraryPreselect);
 

@@ -6,10 +6,10 @@ import time
 from media_preview_generator.loudness import job
 from media_preview_generator.web.jobs import JobStatus
 
-from .test_job_lifecycle import Lifecycle, lifecycle  # noqa: F401
+from .conftest import Lifecycle
 
 
-def test_busy_cpu_loudness_lane_holds_no_start_up_slot(lifecycle: Lifecycle, make_gate, monkeypatch):  # noqa: F811
+def test_busy_cpu_loudness_lane_holds_no_start_up_slot(lifecycle: Lifecycle, make_gate, monkeypatch):
     """Loudness jobs queued behind the one CPU worker have all started up (listed their files) and given their
     slot back, so independent GPU work starts up straight away."""
     lifecycle.api_ready = True

@@ -1,6 +1,6 @@
 """One mark everywhere: the docs site, the README, the Unraid template and the app's own UI.
 
-The logo is option A from docs/design/logo/ (spec §9), plus a favicon cut of it drawn on a 2-unit
+The logo has a favicon cut drawn on a 2-unit
 grid so it lands on whole pixels at 16 and 32 px. These fail when one copy of the mark is updated
 and another isn't, or a rendered PNG no longer has the size its <link> declares.
 """
@@ -17,7 +17,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SITE_IMG = REPO_ROOT / "docs" / "assets" / "img"
 APP_IMG = REPO_ROOT / "media_preview_generator" / "web" / "static" / "images"
 BASE_HTML = REPO_ROOT / "media_preview_generator" / "web" / "templates" / "base.html"
-LOGO_DESIGN = REPO_ROOT / "docs" / "design" / "logo"
 # The preview-frame path that makes option A option A.
 LOGO_A_FRAME = "M25 8H51A5 5 0 0 1 56 13V27A5 5 0 0 1 51 32H42L38 36L34 32H25A5 5 0 0 1 20 27V13A5 5 0 0 1 25 8Z"
 
@@ -78,9 +77,3 @@ def test_brand_elements_use_the_mark_and_not_the_old_film_icon() -> None:
 
     assert 'class="offcanvas-brand-mark' in offcanvas_title.group()
     assert "bi-film" not in offcanvas_title.group()
-
-
-def test_unchosen_logo_options_are_gone() -> None:
-    assert not (LOGO_DESIGN / "logo-b.svg").exists()
-    assert not (LOGO_DESIGN / "logo-c.svg").exists()
-    assert not (LOGO_DESIGN / "logo-a.svg").exists()  # moved to docs/assets/img/logo.svg

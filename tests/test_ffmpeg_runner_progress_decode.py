@@ -5,7 +5,7 @@ Live failure (2026-05-14, jobs ``a90c9b87`` and earlier): two TV-show files
 ``UnicodeDecodeError: 'utf-8' codec can't decode byte 0xc5 in position 1989:
 invalid continuation byte``.
 
-The traceback ended at ``processing/ffmpeg_runner.py:534`` —
+The traceback ended in ``processing/ffmpeg_runner.py`` —
 ``with open(output_file, encoding="utf-8") as f: lines = f.readlines()``.
 FFmpeg can emit non-UTF-8 bytes in stderr (Latin-1 metadata in stream tags,
 non-ASCII paths, etc.), and a strict UTF-8 decode crashes the runner mid-loop.

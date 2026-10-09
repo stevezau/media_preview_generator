@@ -102,6 +102,14 @@ def test_warning_notice_survives_unfinished_filter_and_review_clears_other_filte
     assert not errors
 
 
+def _wait_for_posts(page, posts: list, count: int) -> None:
+    for _ in range(250):
+        if len(posts) >= count:
+            return
+        page.wait_for_timeout(20)
+    raise AssertionError(f"expected {count} POST(s), saw {len(posts)}")
+
+
 def test_explicit_rerun_prevents_duplicate_posts_and_recovers_after_request_failure(warning_page):
     page, app_url, _queries, posts, _state = warning_page
     page.goto(app_url)
@@ -112,7 +120,9 @@ def test_explicit_rerun_prevents_duplicate_posts_and_recovers_after_request_fail
     expect(button).to_be_visible()
     button.click()
     expect(button).to_be_disabled()
+    _wait_for_posts(page, posts, 1)
     page.evaluate("void onOperatorReprocess()")
+    page.evaluate("fetch('/login').then((r) => r.status)")  # let a (wrongly) duplicated POST reach the route
     assert len(posts) == 1
     assert posts[0].request.method == "POST"
     assert posts[0].request.post_data_json in (None, {})
@@ -121,6 +131,7 @@ def test_explicit_rerun_prevents_duplicate_posts_and_recovers_after_request_fail
     expect(page.locator(".toast").last).to_contain_text("Failed to reprocess job")
     button.click()
     expect(button).to_be_disabled()
+    _wait_for_posts(page, posts, 2)
     assert len(posts) == 2
     _fulfill_json(posts[1], {"id": "new-requested-run"})
     expect(button).to_be_enabled()

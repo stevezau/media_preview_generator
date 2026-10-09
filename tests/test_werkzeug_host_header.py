@@ -1,4 +1,7 @@
-"""Pins the Werkzeug behaviour behind #196: Docker service names with underscores must be valid Host headers."""
+"""Guards the ``werkzeug`` version pin in pyproject.toml (#196): Docker service names with underscores must be valid Host headers.
+
+Exercises Werkzeug itself on purpose: the project's only defence against the regression is the dependency range.
+"""
 
 import pytest
 from flask import Flask

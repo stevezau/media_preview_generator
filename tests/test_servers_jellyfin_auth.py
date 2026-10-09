@@ -6,13 +6,11 @@ import re
 from unittest.mock import MagicMock, patch
 
 from media_preview_generator.servers.jellyfin_auth import (
-    JellyfinAuthResult,
     QuickConnectInitiation,
     authenticate_jellyfin_with_password,
     exchange_quick_connect,
     initiate_quick_connect,
     poll_quick_connect,
-    quick_connect_blocking,
 )
 
 
@@ -83,7 +81,7 @@ class TestPasswordAuth:
 
         assert not result.ok
         assert result.message, "missing-URL short-circuit must surface a non-empty error message"
-        post.assert_not_called(), "short-circuit must NOT make an HTTP call when URL is empty"
+        post.assert_not_called()
 
     def test_missing_username_short_circuits(self):
         with patch("media_preview_generator.servers._mediabrowser_auth.requests.post") as post:
@@ -91,7 +89,7 @@ class TestPasswordAuth:
 
         assert not result.ok
         assert result.message, "missing-username short-circuit must surface a non-empty error message"
-        post.assert_not_called(), "short-circuit must NOT make an HTTP call when username is empty"
+        post.assert_not_called()
 
 
 class TestInitiateQuickConnect:
@@ -230,43 +228,5 @@ class TestExchangeQuickConnect:
             result = exchange_quick_connect(base_url="http://jellyfin:8096", secret="")
 
         assert not result.ok
-        post.assert_not_called(), "short-circuit must NOT make an HTTP call when secret is empty"
+        post.assert_not_called()
         assert "secret" in result.message.lower(), f"missing-secret error must mention 'secret', got {result.message!r}"
-
-
-class TestQuickConnectBlocking:
-    def test_returns_token_when_approved_first_poll(self):
-        # Patch poll to return True immediately and exchange to return a token.
-        with (
-            patch(
-                "media_preview_generator.servers.jellyfin_auth.poll_quick_connect",
-                return_value=(True, "Approved"),
-            ),
-            patch("media_preview_generator.servers.jellyfin_auth.exchange_quick_connect") as exchange,
-        ):
-            exchange.return_value = JellyfinAuthResult(ok=True, access_token="tok")
-
-            result = quick_connect_blocking(
-                base_url="http://jellyfin:8096",
-                secret="abc",
-                deadline_seconds=10,
-                poll_interval=0.0,
-            )
-
-        assert result.ok is True
-        assert result.access_token == "tok"
-
-    def test_times_out_when_never_approved(self):
-        with patch(
-            "media_preview_generator.servers.jellyfin_auth.poll_quick_connect",
-            return_value=(False, "Pending"),
-        ):
-            result = quick_connect_blocking(
-                base_url="http://jellyfin:8096",
-                secret="abc",
-                deadline_seconds=0,  # immediate timeout
-                poll_interval=0.0,
-            )
-
-        assert not result.ok
-        assert "deadline" in result.message.lower()

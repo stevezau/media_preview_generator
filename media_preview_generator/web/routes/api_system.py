@@ -93,11 +93,38 @@ def list_notifications():
     return jsonify({"notifications": notifications})
 
 
+_GPU_NOTIFICATION_ID_RE = _re.compile(r"[A-Za-z0-9_.-]{1,128}")
+
+
+def _is_known_notification_id(notification_id: str) -> bool:
+    """Whether ``build_active_notifications`` can emit this id (fixed ids, or a per-GPU card id)."""
+    from ...jobs.gpu_fallback import is_gpu_notification_id
+    from ..notifications import (
+        DEPRECATED_IMAGE_ID,
+        MEDIA_MOUNT_UNHEALTHY_ID,
+        SCHEMA_MIGRATION_ID,
+        TIMEZONE_MISCONFIGURED_ID,
+        VULKAN_SOFTWARE_FALLBACK_ID,
+    )
+
+    fixed = {
+        DEPRECATED_IMAGE_ID,
+        MEDIA_MOUNT_UNHEALTHY_ID,
+        SCHEMA_MIGRATION_ID,
+        TIMEZONE_MISCONFIGURED_ID,
+        VULKAN_SOFTWARE_FALLBACK_ID,
+    }
+    if notification_id in fixed:
+        return True
+    return is_gpu_notification_id(notification_id) and _GPU_NOTIFICATION_ID_RE.fullmatch(notification_id) is not None
+
+
 @api.route("/system/notifications/<notification_id>/dismiss", methods=["POST"])
+@setup_or_auth_required
 def dismiss_notification_session(notification_id: str):
     """Dismiss a notification for the current process session only.
 
-    Cleared on container restart.  No authentication required.
+    Cleared on container restart.
 
     The schema-migration card is special: dismissing it clears the
     persistent ``_pending_migration_notice`` flag too, so the card never
@@ -109,6 +136,9 @@ def dismiss_notification_session(notification_id: str):
         dismiss_session,
     )
 
+    if not _is_known_notification_id(notification_id):
+        return jsonify({"ok": False, "error": "Unknown notification"}), 400
+
     dismiss_session(notification_id)
     if notification_id == SCHEMA_MIGRATION_ID:
         try:
@@ -119,10 +149,11 @@ def dismiss_notification_session(notification_id: str):
 
 
 @api.route("/system/notifications/<notification_id>/dismiss-permanent", methods=["POST"])
+@setup_or_auth_required
 def dismiss_notification_permanent(notification_id: str):
     """Dismiss a notification permanently (persist to ``settings.json``).
 
-    Survives container restarts.  No authentication required.
+    Survives container restarts.
 
     Two cards are special. A session-only one (``is_session_only_dismissal``) is refused: it can only be hidden until
     the next restart. The schema-migration card is dismissed by clearing ``_pending_migration_notice``, as the session route
@@ -134,6 +165,9 @@ def dismiss_notification_permanent(notification_id: str):
         is_session_only_dismissal,
     )
     from ..settings_manager import get_settings_manager
+
+    if not _is_known_notification_id(notification_id):
+        return jsonify({"ok": False, "error": "Unknown notification"}), 400
 
     if is_session_only_dismissal(notification_id):
         return (

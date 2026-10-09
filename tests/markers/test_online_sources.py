@@ -14,7 +14,7 @@ T = MarkerType
 RM_S01E01 = MediaIds("episode", tmdb="60625", imdb="tt2861424", tvdb="275274", season=1, episode=1)
 TOY_STORY = MediaIds("movie", tmdb="862", imdb="tt0114709")
 SECRET = "tidb-SECRET-9f8e7d6c"
-# Echo fields every real 200 carries (evidence/online/online_results.json).
+# Echo fields every real 200 carries.
 TIDB_EP = {"tmdb_id": 60625, "type": "tv", "season": 1, "episode": 1}
 IDB_EP = {"imdb_id": "tt2861424", "season": 1, "episode": 1, "intro": None, "recap": None, "outro": None}
 
@@ -178,9 +178,11 @@ class TestTheIntroDb:
     def test_error_statuses_are_unavailable(self, status, detail):
         session = MagicMock()
         session.get.return_value = _resp(status, {})
-        result = TheIntroDbClient("k", limiter=_limiter(), session=session).lookup(RM_S01E01, duration_ms=1, priority=2)
+        result = TheIntroDbClient(SECRET, limiter=_limiter(), session=session).lookup(
+            RM_S01E01, duration_ms=1, priority=2
+        )
         assert result.status == "unavailable" and detail in result.detail
-        assert "k" not in result.detail.replace("key", "")  # never echo the key
+        assert SECRET not in result.detail  # never echo the key
 
     @pytest.mark.parametrize("status", [401, 403])
     def test_auth_refusal_without_a_key_says_a_key_is_needed(self, status):
@@ -192,7 +194,7 @@ class TestTheIntroDb:
     @pytest.mark.parametrize(
         ("key", "responses", "warning"),
         [
-            (SECRET + "​", [], "TheIntroDB API key contains invalid characters"),
+            (SECRET + "\u200b", [], "TheIntroDB API key contains invalid characters"),
             (SECRET, [_resp(401, {}), _resp(403, {})], "TheIntroDB rejected the API key (HTTP 401)"),
             ("", [_resp(401, {}), _resp(401, {})], "TheIntroDB requires an API key (HTTP 401)"),
         ],
@@ -851,9 +853,6 @@ class TestHttpSession:
         assert session is online.http_session()
         assert session.headers["User-Agent"].startswith(f"MediaPreviewGenerator/{__version__} ")
         assert "Authorization" not in session.headers
-
-    def test_lookup_result_defaults(self):
-        assert online.LookupResult("no_data") == online.LookupResult("no_data", (), "")
 
 
 class TestIsBudgetExhausted:

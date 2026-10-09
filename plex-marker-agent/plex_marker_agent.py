@@ -135,7 +135,7 @@ def create_app(
         raise SystemExit("Set PLEX_CONFIG_DIR to Plex's config folder as this container sees it.")
 
     # static_folder=None: the agent serves markers, not files. Flask's default would register /static/<path:filename>
-    # on a service whose whole surface is meant to be the eight /v1 routes below.
+    # on a service whose whole surface is meant to be the /v1 routes below.
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
     database = LocalPlexDb(lambda: plex_db_path(folder), label="agent", mountinfo_path=mountinfo_path)

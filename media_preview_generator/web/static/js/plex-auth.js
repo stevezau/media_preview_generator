@@ -212,15 +212,12 @@ class PlexServerManager {
      * @returns {Promise<Array>}
      */
     async getLibraries(url = null, token = null, verifySsl = null) {
-        const params = new URLSearchParams();
-        if (url) params.append('url', url);
-        if (token) params.append('token', token);
-        if (verifySsl !== null && verifySsl !== undefined) params.append('verify_ssl', verifySsl ? 'true' : 'false');
-
-        const queryString = params.toString();
-        const endpoint = queryString ? `/api/plex/libraries?${queryString}` : '/api/plex/libraries';
-
-        const response = await fetch(endpoint);
+        // POST so the token stays out of the URL (and out of proxy/access logs).
+        const response = await fetch('/api/plex/libraries', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, token, verify_ssl: verifySsl })
+        });
 
         if (!response.ok) {
             let detail = `HTTP ${response.status}`;

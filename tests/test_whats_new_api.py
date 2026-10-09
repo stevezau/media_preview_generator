@@ -99,10 +99,11 @@ class TestDismissWhatsNewWriteback:
         (proven by the absence of a releases mock — any call would hit
         real network / bundled JSON, but we don't care because the
         parseable branch returns before that call)."""
-        with self._patch_version("4.0.0"):
+        with self._patch_version("4.0.0"), self._patch_releases([]) as fetch:
             resp = self._post(client)
         assert resp.status_code == 200
         assert _settings_manager().get("last_seen_version") == "4.0.0"
+        fetch.assert_not_called()
 
     def test_dev_docker_persists_max_release_version(self, client):
         """Issue #237: install_type=dev_docker, current_version="dev@a2d0362"

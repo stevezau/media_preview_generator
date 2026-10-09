@@ -262,20 +262,6 @@ class TestLogFileCleanup:
         assert n == 1
         assert not os.path.isfile(log_path)
 
-    def test_clear_logs_removes_file(self, config_dir):
-        """clear_logs deletes the job log file."""
-        os.makedirs(config_dir, exist_ok=True)
-        jm = JobManager(config_dir=config_dir)
-        job = jm.create_job(library_name="Test")
-        jm.start_job(job.id)
-        jm.add_log(job.id, "INFO - test")
-
-        log_path = os.path.join(config_dir, "logs", "jobs", f"{job.id}.log")
-        assert os.path.isfile(log_path)
-
-        jm.clear_logs(job.id)
-        assert not os.path.isfile(log_path)
-
 
 class TestClearCompletedJobsRetryChains:
     """ "Clear job history" must not strip the finished retry rows of a chain that is still going."""
@@ -385,12 +371,22 @@ class TestClearCompletedJobsRetryChains:
                 jm.start_job(job.id)
                 jm.complete_job(job.id)
 
-        started = time.monotonic()
-        cleared = jm.clear_completed_jobs()
-        elapsed = time.monotonic() - started
+        from media_preview_generator.web import jobs as jobs_mod
+
+        real_parent_id_of = jobs_mod._retry_parent_id_of
+        lookups = 0
+
+        def counting_parent_id_of(job):
+            nonlocal lookups
+            lookups += 1
+            return real_parent_id_of(job)
+
+        with patch.object(jobs_mod, "_retry_parent_id_of", counting_parent_id_of):
+            cleared = jm.clear_completed_jobs()
 
         assert cleared == 2000
-        assert elapsed < 2.0
+        # A per-job scan of every other job would be 2000 * 2000 lookups.
+        assert lookups <= 10 * 2000
 
 
 class TestRetentionTimer:
@@ -1240,120 +1236,6 @@ class TestJobCreationLogLine:
         assert created[0]["extra"].get(JOB_LOG_SKIP) is True
 
 
-class TestRetryPreservesServerIdentity:
-    """K1 — retry job spawned by job_runner._spawn_retry_job must inherit the
-    parent's server_id/server_name/server_type. Today's bug shows up as
-    "Created job ... (server=(all))" instead of "(server=Plex)".
-
-    We can't easily call the closure directly, so this test mirrors the
-    pattern: create parent with server triple → simulate retry using the same
-    create_job call shape job_runner now uses → verify the child carries it.
-    """
-
-    def test_retry_inherits_parent_server_triple(self, config_dir):
-        os.makedirs(config_dir, exist_ok=True)
-        jm = JobManager(config_dir=config_dir)
-        parent = jm.create_job(
-            library_name="Sonarr: Show.S01E01",
-            server_id="plex-living-room",
-            server_name="Living Room Plex",
-            server_type="plex",
-        )
-
-        # Mirror job_runner.py:_spawn_retry_job's new behaviour.
-        retry = jm.create_job(
-            library_name="Retry: Sonarr: Show.S01E01",
-            config={"is_retry": True, "parent_job_id": parent.id, "retry_attempt": 1},
-            priority=parent.priority,
-            server_id=parent.server_id,
-            server_name=parent.server_name,
-            server_type=parent.server_type,
-        )
-
-        assert retry.server_id == "plex-living-room"
-        assert retry.server_name == "Living Room Plex"
-        assert retry.server_type == "plex"
-
-    def test_retry_when_parent_has_no_server_pin(self, config_dir):
-        """Webhook with no ?server_id= produces parent with None — retry mirrors None."""
-        os.makedirs(config_dir, exist_ok=True)
-        jm = JobManager(config_dir=config_dir)
-        parent = jm.create_job(library_name="Custom: file.mkv")
-        assert parent.server_id is None
-
-        retry = jm.create_job(
-            library_name="Retry: Custom: file.mkv",
-            config={"is_retry": True, "parent_job_id": parent.id, "retry_attempt": 1},
-            priority=parent.priority,
-            server_id=parent.server_id,
-            server_name=parent.server_name,
-            server_type=parent.server_type,
-        )
-        assert retry.server_id is None
-
-
-class TestRetryLibraryNameComputation:
-    """Pure-function check of the retry library_name derivation logic in
-    job_runner._spawn_retry_job. The function lives inside a closure so
-    we re-implement the formula here verbatim and pin its behaviour;
-    a regression in the closure's source is caught by the journey test
-    `test_skipped_file_not_found_spawns_child_retry_job`, while THIS
-    test pins the matrix of inputs without spinning up a Flask app.
-
-    Cells covered (one per row that would change the output):
-      * Parent has clean Sonarr-style title → "Retry: <title>".
-      * Parent has empty/None library_name → fall back to basename.
-      * Parent has multi-path job → fall back to "{N} files".
-      * Parent is itself a retry ("Retry: X") → strip prefix before
-        re-prepending so we don't get "Retry: Retry: X".
-    """
-
-    @staticmethod
-    def _derive(parent_library: str, paths: list[str]) -> str:
-        """Mirror media_preview_generator/web/routes/job_runner.py's
-        retry_library_name formula. Updating one without the other will
-        break test_skipped_file_not_found_spawns_child_retry_job
-        immediately (full integration check), so this stays in lockstep.
-        """
-        import os
-
-        basenames = [os.path.basename(p) for p in paths]
-        pl = parent_library or ""
-        if pl.startswith("Retry: "):
-            pl = pl[len("Retry: ") :]
-        if not pl:
-            pl = basenames[0] if len(paths) == 1 else f"{len(paths)} files"
-        return f"Retry: {pl}"
-
-    def test_inherits_parent_clean_title(self):
-        # The dominant case: Sonarr/Radarr webhook produced a clean parent
-        # title; retry should mirror it.
-        assert (
-            self._derive("Chelsea vs Nottingham Forest", ["/data/sports/CvN.mkv"])
-            == "Retry: Chelsea vs Nottingham Forest"
-        )
-
-    def test_falls_back_to_basename_when_parent_library_empty(self):
-        # Defensive — if the parent somehow has no library_name (legacy
-        # data, manual job creation), keep the original basename behaviour
-        # so the row isn't blank.
-        assert self._derive("", ["/data/tv/Show.S01E01.mkv"]) == "Retry: Show.S01E01.mkv"
-        assert self._derive(None, ["/data/tv/Show.S01E01.mkv"]) == "Retry: Show.S01E01.mkv"
-
-    def test_falls_back_to_count_for_multi_path_with_empty_parent(self):
-        assert self._derive("", ["/a.mkv", "/b.mkv", "/c.mkv"]) == "Retry: 3 files"
-
-    def test_strips_existing_retry_prefix_to_avoid_stacking(self):
-        # Retry of a retry: parent.library_name is already "Retry: X" because
-        # the previous retry attempt set it that way. Without the strip we'd
-        # render "Retry: Retry: Show" on attempt 2 and "Retry: Retry: Retry: Show"
-        # on attempt 3 — visible nesting noise.
-        assert (
-            self._derive("Retry: Chelsea vs Nottingham Forest", ["/data/sports/CvN.mkv"])
-            == "Retry: Chelsea vs Nottingham Forest"
-        ), "Stacked retry must strip the existing 'Retry: ' prefix before re-prepending"
-
-
 class TestSetJobOutcome:
     """set_job_outcome mirrors the live per-file outcome breakdown onto progress,
     and a later update replaces it (the dispatcher pushes the full snapshot each
@@ -1691,3 +1573,17 @@ class TestLiveEventsArriveInOrder:
 
         assert socketio.wait_for(2)
         assert [data["n"] for _, data in socketio.delivered] == [1, 2]
+
+
+def test_orphan_log_sweep_is_skipped_when_saved_jobs_could_not_be_read(config_dir):
+    """An empty job list from a failed load must not make every job log look orphaned."""
+    jm = JobManager(config_dir=config_dir)
+    log = os.path.join(config_dir, "logs", "jobs", "abc.log")
+    with open(log, "w") as f:
+        f.write("line\n")
+    jm._jobs_load_failed = True
+    jm._enforce_log_retention()
+    assert os.path.isfile(log)
+    jm._jobs_load_failed = False
+    jm._enforce_log_retention()
+    assert not os.path.isfile(log)

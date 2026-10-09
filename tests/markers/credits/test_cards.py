@@ -1,4 +1,4 @@
-"""Prose cards at the credits start (spec §5.4, "Prose cards"): the cards, the prose rule and the walk past them."""
+"""Prose cards at the credits start: the cards, the prose rule and the walk past them."""
 
 from __future__ import annotations
 

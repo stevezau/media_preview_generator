@@ -23,46 +23,15 @@ aren't affected.
 
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import requests
 
 from media_preview_generator.processing.multi_server import process_canonical_path
 from media_preview_generator.servers import ServerRegistry
-
-
-@pytest.fixture
-def jf_dedup_config(tmp_path):
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = ""
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
 
 
 @pytest.fixture
@@ -140,7 +109,7 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
     def test_after_fix_jellyfin_serves_trickplay_through_api(
         self,
         jf_registry,
-        jf_dedup_config,
+        live_config,
         media_root,
         jellyfin_credentials,
         restore_jellyfin_library_options,
@@ -151,8 +120,6 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         trickplay_dir = Path(canonical).parent / "trickplay"
         if trickplay_dir.exists():
-            import shutil
-
             shutil.rmtree(trickplay_dir)
 
         server = jf_registry.get("jf-trickfix")
@@ -161,7 +128,7 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
         result = process_canonical_path(
             canonical_path=canonical,
             registry=jf_registry,
-            config=jf_dedup_config,
+            config=live_config,
             gpu=None,
             gpu_device_path=None,
         )
@@ -238,12 +205,10 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
                     # ``{<item_id>: {<width>: {...metadata...}}}`` —
                     # mirroring the on-disk manifest. Drill down to the
                     # innermost width-keyed dict.
-                    by_width = next(iter(tp.values())) if tp else {}
-                    if not isinstance(by_width, dict) or not by_width:
-                        continue
+                    by_width = next(iter(tp.values()))
+                    assert isinstance(by_width, dict) and by_width, f"unexpected Trickplay shape: {tp}"
                     info = by_width.get("320") or next(iter(by_width.values()))
-                    if not isinstance(info, dict) or "TileWidth" not in info:
-                        continue
+                    assert isinstance(info, dict) and "TileWidth" in info, f"unexpected Trickplay shape: {tp}"
                     seen_trickplay = True
                     assert info["TileWidth"] == 10
                     assert info["TileHeight"] == 10
@@ -269,9 +234,6 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
                 f"Jellyfin still 404s the tile sheet after 30s: {sheet.status_code if sheet else 'no response'}"
             )
             assert sheet.content[:2] == b"\xff\xd8", "served bytes are not a JPEG"
-            assert len(sheet.content) > 0
         finally:
             if trickplay_dir.exists():
-                import shutil
-
                 shutil.rmtree(trickplay_dir)

@@ -8,9 +8,11 @@ domain were ever removed. Each allowed exception says why it needs the old host.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from media_preview_generator.servers.jellyfin import JellyfinServer
@@ -26,6 +28,8 @@ ALLOWED = {
 
 
 def test_no_old_host_outside_the_allowlist() -> None:
+    if shutil.which("git") is None or not (REPO_ROOT / ".git").exists():
+        pytest.skip("needs a git checkout to list tracked files")
     tracked = subprocess.run(
         ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
     ).stdout.split("\n")

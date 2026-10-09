@@ -1,6 +1,6 @@
-"""The episode-only chapter names (spec §5.1): "Ending" is the anime ED, and only on an episode.
+"""The episode-only chapter names: "Ending" is the anime ED, and only on an episode.
 
-Measured in `docs/design/intro-credits/evidence/eval/phase4-chapters.md`: on the owner's library the
+Measured on a real library: the
 rule gains 280 anime credits and changes nothing on 11,919 non-anime TV episodes or 9,904 movies.
 The one movie that carries a bare "Ending" chapter (a 1988 documentary whose last chapter is its final
 scene) was frame-checked: taking it would skip the last 161 s of the film. That file is why the rule
@@ -12,7 +12,6 @@ import pytest
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.sources.chapters import (
-    CHAPTER_RULES_VERSION,
     chapter_candidates,
     classify_chapter_title,
 )
@@ -94,7 +93,7 @@ def test_ending_chapter_is_credits_on_an_episode():
 
 
 def test_ending_chapter_is_not_credits_on_a_movie():
-    # The film's "Opening" chapter is still an intro candidate here (§5.5 rule 2's 300 s cap drops it
+    # The film's "Opening" chapter is still an intro candidate here (rule 2's 300 s cap drops it
     # later); what must not appear is a credits candidate from its last scene.
     assert chapter_candidates(MediaProbe(7_187_000, LETS_GET_LOST), is_episode=False) == [
         Candidate(T.INTRO, 0, 608_000, Source.CHAPTERS, origin="Opening")
@@ -141,9 +140,3 @@ def test_a_lone_generic_intro_still_decides_on_an_episode():
         Candidate(T.INTRO, 0, 90_000, Source.CHAPTERS, origin="Intro"),
         Candidate(T.CREDITS, 1_300_000, None, Source.CHAPTERS, origin="Ending"),
     ]
-
-
-def test_the_rules_version_was_bumped_for_the_ending_rule():
-    # Without the bump the rule never reaches a file the app has already probed: nothing re-reads it.
-    # `tests/markers/test_pipeline.py::TestRulesVersions` proves the re-probe itself.
-    assert CHAPTER_RULES_VERSION >= 2

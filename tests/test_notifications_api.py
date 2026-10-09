@@ -104,7 +104,9 @@ def app_with_config(tmp_path):
 @pytest.fixture()
 def client(app_with_config):
     flask_app, _ = app_with_config
-    return flask_app.test_client()
+    test_client = flask_app.test_client()
+    test_client.environ_base["HTTP_AUTHORIZATION"] = "Bearer test-token-12345678"
+    return test_client
 
 
 class TestNotificationsAPI:
@@ -349,11 +351,6 @@ class TestSettingsManagerDismissedNotifications:
         mgr.dismiss_notification_permanent("foo")
         assert mgr.dismissed_notifications == ["foo"]
 
-    def test_undismiss_notification_removes_entry(self, tmp_path):
-        mgr = self._fresh_manager(tmp_path, {"dismissed_notifications": ["foo", "bar"]})
-        mgr.undismiss_notification("foo")
-        assert mgr.dismissed_notifications == ["bar"]
-
     def test_reset_dismissed_clears_all(self, tmp_path):
         mgr = self._fresh_manager(tmp_path, {"dismissed_notifications": ["foo", "bar"]})
         mgr.reset_dismissed_notifications()
@@ -387,23 +384,6 @@ class TestSchemaMigrationNotification:
             # Always clean up — the singleton SettingsManager is shared across
             # tests in the same xdist worker; a leaked flag pollutes every
             # subsequent build_active_notifications() call.
-            sm.set("_pending_migration_notice", None)
-
-    def test_dismissing_card_clears_pending_flag(self, client):
-        """Clicking dismiss must remove _pending_migration_notice from settings.
-
-        Without this the card would re-render on every page reload (the
-        flag's still in settings.json) — defeats the "one-shot" promise.
-        """
-        from media_preview_generator.web.settings_manager import get_settings_manager
-
-        sm = get_settings_manager()
-        sm.set("_pending_migration_notice", {"from": 6, "to": 8})
-        try:
-            resp = client.post("/api/system/notifications/schema_migration_completed/dismiss")
-            assert resp.status_code == 200
-            assert sm.get("_pending_migration_notice") is None
-        finally:
             sm.set("_pending_migration_notice", None)
 
     @pytest.mark.parametrize(

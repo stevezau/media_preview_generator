@@ -275,14 +275,14 @@ class TestCancelRunningJob:
         from media_preview_generator.web.routes.job_runner import _start_job_async
 
         run_started = threading.Event()
+        cancel_posted = threading.Event()
 
         def fake_run_processing_returns_none(config, selected_gpus, **kwargs):
             run_started.set()
             # Simulate the orchestrator's no-servers / connection-error bail
-            # AFTER the user has cancelled. The cancellation flag is set
-            # before we return None, so the new branch in _start_job_async
-            # should see it and prefer CANCELLED.
-            time.sleep(0.05)
+            # AFTER the user has cancelled: only return None once the cancel
+            # request has been accepted, so the cancellation flag is already set.
+            assert cancel_posted.wait(timeout=5.0), "cancel was never posted"
             return None
 
         client = app.test_client()
@@ -298,13 +298,14 @@ class TestCancelRunningJob:
 
             assert run_started.wait(timeout=3.0), "Orchestrator was never invoked"
 
-            # Fire cancel WHILE the orchestrator is mid-bail (the 50 ms sleep
-            # in the fake gives us a window to set the flag before the None
-            # return reaches _start_job_async's `if result is None` branch).
+            # Fire cancel while the orchestrator is blocked mid-run; the fake only
+            # returns None after this POST, so the flag is set before the None
+            # return reaches _start_job_async's `if result is None` branch.
             cancel_response = client.post(
                 f"/api/jobs/{job.id}/cancel",
                 headers=_auth_headers(),
             )
+            cancel_posted.set()
             assert cancel_response.status_code == 200
 
             assert _wait_until(

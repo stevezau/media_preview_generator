@@ -1,8 +1,8 @@
-"""Check servers (reconcile, spec §6.2 step 6): the job that makes sure servers still show what this app published.
+"""Check servers (reconcile): the job that makes sure servers still show what this app published.
 
 A normal job already reads a file's markers back before calling it up to date, and replaced files get a delayed verify
 job. Check servers covers every other file, on the schedule the user sets (nothing is scheduled by default) or when
-asked (``POST /api/markers/reconcile``, the dashboard's Start job dialog). It reads back each published server item
+asked (``POST /api/markers/reconcile``). It reads back each published server item
 (Plex item by item under its database lock proof, Jellyfin and Emby one request per item) and runs the pipeline only
 for the files of items that drifted (Plex's own forced detection, a Jellyfin rescan, an Emby refresh the plugin couldn't
 heal, a Plex version added since, an item the server replaced), which publishes them again under the normal rules
@@ -19,7 +19,7 @@ import os
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, NamedTuple
 
 from loguru import logger
@@ -28,6 +28,7 @@ from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..web.jobs import PRIORITY_LOW, Job, get_job_manager, is_live_retry_chain
+from .models import utcnow as _utcnow
 from .outcomes import NOT_IN_LIBRARY, ServerStatus
 from .ownership import marker_matches
 from .pipeline import RECHECK_AFTER, markers_for_path
@@ -53,10 +54,6 @@ _RUN_LIVE_FILES = frozenset({Shown.VERSIONS_CHANGED, Shown.REPLACED, Shown.MISSI
 
 # Serialises "is a Check servers job already queued?" with its creation (a schedule tick and a click at once).
 _queue_lock = threading.Lock()
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def _runnable(path: str, configs: list[ServerConfig]) -> bool:

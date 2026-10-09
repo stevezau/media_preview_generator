@@ -5,7 +5,6 @@ import signal
 import sqlite3
 import sys
 import threading
-import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,7 +14,6 @@ import pytest
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS, ItemOutcome, KindHandlers
 from media_preview_generator.jobs.dispatcher import reset_dispatcher
 from media_preview_generator.markers import job_runner, pipeline, triggers
-from media_preview_generator.markers.job_log import SEASON_RECHECK_LABEL
 from media_preview_generator.markers.pipeline import PipelineContext
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers import plex_db
@@ -27,7 +25,7 @@ from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerType
 from media_preview_generator.web.job_gate import JobGate
 from media_preview_generator.web.jobs import JobManager, JobStatus, is_user_visible_job
-from tests.markers.fakes import FakeRegistry, ready_publisher, server_config
+from tests.markers.fakes import FakeRegistry, ready_publisher, server_config, wait_for
 from tests.markers.test_external_ids import EXTRA_SUFFIXES, EXTRAS_FOLDERS
 
 DURATION = 1_321_472
@@ -37,15 +35,6 @@ CHAPTERS = (
     Chapter(157_068, 1_295_324, "Chapter 2"),
     Chapter(1_295_324, None, "Credits"),
 )
-
-
-def _wait_for(predicate, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return False
 
 
 @pytest.fixture
@@ -112,10 +101,6 @@ class TestRetryThroughThePipeline:
                 priority,
                 force=False,
                 recheck_empty_server_markers=False,
-                season_recheck=False,
-                recheck_label=SEASON_RECHECK_LABEL,
-                decide_again=False,
-                online_recheck=False,
             ):
                 return PipelineContext(
                     registry=registry,
@@ -125,13 +110,9 @@ class TestRetryThroughThePipeline:
                     priority=priority,
                     ffprobe="ffprobe",
                     force=force,
-                    decide_again=decide_again,
-                    online_recheck=online_recheck,
                     clients={},
                     live_config=registry.get_config,  # the fake registry stands in for the saved servers
                     recheck_empty_server_markers=recheck_empty_server_markers,
-                    season_recheck=season_recheck,
-                    recheck_label=recheck_label,
                 )
 
             monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)
@@ -708,7 +689,7 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
 class TestGoneFromDiskThroughThePipeline:
     """A file missing from disk, on the real runner and pipeline, as previews treat it (``source_replaced_reason``).
 
-    Production, 2026-09-26: Sonarr replaced Blood Legacy (2024) S01E05 with a new release. The preview job counted the
+    Sonarr replaced a file with a new release. The preview job counted the
     old path "Gone from disk"; the Intro & Credits follow-up ran three retries over 16 minutes and ended in two red jobs
     and an ERROR. A file a newer one replaced in its folder now ends "Gone from disk" with no retry and the job green;
     one with no replacement keeps today's retry (a webhook's file may still be copying) or today's "not found" (a scan).
@@ -887,27 +868,26 @@ class TestRealJobThread:
         job = triggers.create_intro_credits_job(library_name="real thread", priority=3, source="manual")
         jm, gate = engine.jm, engine.gate
         try:
-            assert _wait_for(lambda: "/m/slow.mkv" in checked), "the job thread never dispatched"
+            assert wait_for(lambda: "/m/slow.mkv" in checked), "the job thread never dispatched"
             assert jm.get_job(job.id).status is JobStatus.RUNNING
-            assert _wait_for(lambda: gate.snapshot()[0] == 0), "a submitted job kept its start-up slot"
+            assert wait_for(lambda: gate.snapshot()[0] == 0), "a submitted job kept its start-up slot"
             assert jm.request_pause(job.id)
             assert gate.acquire(1, cancel_check=lambda: False) is True  # a HIGH preview job starts up at once
             gate.release()
             release_item.set()
             assert jm.request_resume(job.id)
-            assert _wait_for(lambda: jm.get_job(job.id).status is JobStatus.COMPLETED), jm.get_job(job.id).status
+            assert wait_for(lambda: jm.get_job(job.id).status is JobStatus.COMPLETED), jm.get_job(job.id).status
         finally:
             release_item.set()
         assert _outcome(jm, job.id) == {"markers_published": 3}
         # The job is marked completed before its thread's teardown gives the slot back.
-        assert _wait_for(lambda: gate.snapshot()[0] == 0), "the finished job kept its slot"
+        assert wait_for(lambda: gate.snapshot()[0] == 0), "the finished job kept its slot"
         assert sorted(r["file"] for r in jm.get_file_results(job.id)) == ["/m/a.mkv", "/m/c.mkv", "/m/slow.mkv"]
-        assert _wait_for(lambda: job.id not in job_runner._inflight_jobs)
+        assert wait_for(lambda: job.id not in job_runner._inflight_jobs)
 
 
 class TestCreditTextOnTheWorkers:
-    """Worker → pipeline → credit text detector on the real runner, gate, dispatcher and worker (spec §6.4 items 4 and
-    7): the text is read on the worker's own GPU, a GPU decode failure reruns the file on the CPU in the same worker,
+    """Worker → pipeline → credit text detector on the real runner, gate, dispatcher and worker (the text is read on the worker's own GPU, a GPU decode failure reruns the file on the CPU in the same worker,
     and a cancel or a text detection failure gives every worker and job slot back. Only the decode (with its start-time
     probe) and the helper pool are faked (the frame and helper boundaries)."""
 
@@ -948,10 +928,6 @@ class TestCreditTextOnTheWorkers:
             priority,
             force=False,
             recheck_empty_server_markers=False,
-            season_recheck=False,
-            recheck_label=SEASON_RECHECK_LABEL,
-            decide_again=False,
-            online_recheck=False,
         ):
             return PipelineContext(
                 registry=registry,
@@ -961,8 +937,6 @@ class TestCreditTextOnTheWorkers:
                 priority=priority,
                 ffprobe="ffprobe",
                 force=force,
-                decide_again=decide_again,
-                online_recheck=online_recheck,
                 clients={},
                 local_detectors=default_local_detectors(settings, config, credits_text=TextDetState.AVAILABLE),
                 credits_text=TextDetState.AVAILABLE,
@@ -1015,7 +989,7 @@ class TestCreditTextOnTheWorkers:
 
     def _released(self, engine):
         worker = self._worker()
-        return engine.gate.snapshot()[0] == 0 and _wait_for(lambda: not worker.is_busy)
+        return engine.gate.snapshot()[0] == 0 and wait_for(lambda: not worker.is_busy)
 
     def test_the_worker_reads_the_text_on_its_gpu(self, engine, setup):
         job = self._run(engine, setup)
@@ -1102,7 +1076,7 @@ class TestCreditTextOnTheWorkers:
         ]
 
     def test_a_file_cut_short_is_no_gpu_fallback_and_is_not_read_again(self, engine, setup, monkeypatch):
-        # Production, 2026-09-26: 14 of 19 GPU->CPU fallbacks were files cut short, the GPU blamed for each.
+        # Most GPU->CPU fallbacks seen in production were files cut short, the GPU blamed for each.
         from media_preview_generator.markers.credits import detector, frames
         from media_preview_generator.markers.models import Source
 
@@ -1264,7 +1238,7 @@ if "rawvideo" in sys.argv:
     while True:
         sys.stdout.buffer.write(frame)
         sys.stdout.buffer.flush()
-time.sleep(600)
+time.sleep(60)  # the test kills the process; this only bounds a leak
 """
 
 
@@ -1298,7 +1272,7 @@ class _Hold:
 
 
 class TestACancelStopsTheFileWheneverItLands:
-    """Lab regression phase 3 row 6: a cancel stops the file's work whenever it lands. The job's own thread ends as soon
+    """A cancel stops the file's work whenever it lands. The job's own thread ends as soon
     as the dispatcher lets go of a cancelled job, and its teardown clears the job's cancel flag while the file may still
     be running: a step that didn't look at the cancel in those milliseconds (a text detection helper starting on a fresh
     app, an ffprobe, the worker picking the file up) must still see it afterwards.
@@ -1424,7 +1398,7 @@ class TestACancelStopsTheFileWheneverItLands:
         for pid, _argv in started():
             if _running(pid):
                 os.kill(pid, signal.SIGKILL)
-        _wait_for(lambda: not TestCreditTextOnTheWorkers._worker().is_busy, timeout=15)
+        wait_for(lambda: not TestCreditTextOnTheWorkers._worker().is_busy, timeout=15)
         store.close()
 
     @staticmethod
@@ -1439,7 +1413,7 @@ class TestACancelStopsTheFileWheneverItLands:
         runner = threading.Thread(target=job_runner.run_intro_credits_job, args=(job.id,), daemon=True)
         runner.start()
         if arm_on is not None:
-            assert _wait_for(lambda: any(arm_on in argv for _pid, argv in lab.started())), lab.started()
+            assert wait_for(lambda: any(arm_on in argv for _pid, argv in lab.started())), lab.started()
             lab.hold.armed.set()
         assert lab.hold.reached.wait(10), f"the file never reached the {hold_at}"
         if before_cancel is not None:
@@ -1461,7 +1435,7 @@ class TestACancelStopsTheFileWheneverItLands:
     @staticmethod
     def _assert_stopped_with_nothing_kept(engine, lab, job, stored, *, decodes):
         worker = TestCreditTextOnTheWorkers._worker()
-        assert _wait_for(lambda: not worker.is_busy, timeout=5), f"the file ran on after the cancel: {lab.started()}"
+        assert wait_for(lambda: not worker.is_busy, timeout=5), f"the file ran on after the cancel: {lab.started()}"
         assert len(lab.started()) == decodes, lab.started()
         assert not [pid for pid, _argv in lab.started() if _running(pid)], "a decode outlived the cancel"
         assert lab.snapshot() == stored  # no answer, fingerprint, end picture or decision stored after the cancel
@@ -1477,7 +1451,7 @@ class TestACancelStopsTheFileWheneverItLands:
 
         def second_queued(job):
             tracker = get_dispatcher()._trackers[job.id]
-            assert _wait_for(lambda: [item.canonical_path for item in tracker.item_queue] == [second])
+            assert wait_for(lambda: [item.canonical_path for item in tracker.item_queue] == [second])
 
         job, stored = self._cancel_while_held(engine, lab, [first, second], hold_at="pickup",
                                               before_cancel=second_queued)  # fmt: skip
@@ -1499,7 +1473,7 @@ class TestACancelStopsTheFileWheneverItLands:
     def _decode_ends_while_held(lab):
         # The request is still busy (a helper starting takes 10-14 s): the decode must already be gone, not wait for it.
         def check():
-            assert _wait_for(lambda: not [pid for pid, _argv in lab.started() if _running(pid)], timeout=3), (
+            assert wait_for(lambda: not [pid for pid, _argv in lab.started() if _running(pid)], timeout=3), (
                 "the decode ran on while text detection was busy"
             )
 
@@ -1507,7 +1481,7 @@ class TestACancelStopsTheFileWheneverItLands:
 
     def test_a_cancel_while_a_fresh_apps_text_detection_helper_starts_stops_the_credit_text_decode(self, engine, lab):
         # The first text detection request of a fresh app waits for its helper to start and self-test (10-14 s): the
-        # lab row's cancel lands there, just after the decode appears, and ffmpeg stops then, not after the request.
+        # the cancel lands there, just after the decode appears, and ffmpeg stops then, not after the request.
         job, stored = self._cancel_while_held(engine, lab, lab.episodes[:1], hold_at="text detection",
                                               before_release=self._decode_ends_while_held(lab))  # fmt: skip
         self._assert_stopped_with_nothing_kept(engine, lab, job, stored, decodes=1)

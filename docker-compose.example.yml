@@ -1,7 +1,10 @@
 # Docker Compose Examples for Media Preview Generator
 #
 # Copy this file to docker-compose.yml and modify as needed.
-# Choose ONE of the configurations below based on your setup.
+# Choose ONE of the configurations below based on your setup. The GPU service starts
+# with `docker compose up -d`; the CPU-only and Unraid ones are opt-in profiles
+# (`docker compose --profile cpu up -d`, `docker compose --profile unraid up -d`), so the
+# three never fight over the same container name and port 8080.
 #
 # All settings (Plex, GPU, processing) are configured in the web UI at
 # http://YOUR_IP:8080. settings.json in /config is the source of truth.
@@ -82,6 +85,7 @@ services:
 # =============================================================================
 
   plex-previews-cpu:
+    profiles: ["cpu"]
     image: stevezzau/media_preview_generator:latest
     container_name: media-preview-generator
     restart: unless-stopped
@@ -109,6 +113,7 @@ services:
 # =============================================================================
 
   plex-previews-unraid:
+    profiles: ["unraid"]
     image: stevezzau/media_preview_generator:latest
     container_name: media-preview-generator
     restart: unless-stopped

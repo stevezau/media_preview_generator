@@ -1,7 +1,7 @@
 # Pre- and post-processing below are adapted from rapidocr_onnxruntime 1.4.4 (ch_ppocr_det/text_detect.py and
 # ch_ppocr_det/utils.py): Copyright (c) 2020 PaddlePaddle Authors, Licensed under the Apache License, Version 2.0
 # (http://www.apache.org/licenses/LICENSE-2.0). See PP-OCRv4-det-NOTICE.txt.
-"""Text boxes on credit frames: PP-OCRv4's detection model on ONNX Runtime (spec §5.4).
+"""Text boxes on credit frames: PP-OCRv4's detection model on ONNX Runtime .
 
 Vendored because rapidocr_onnxruntime 1.4.4 caps Python below 3.13 and is no longer maintained. It must give the same
 boxes: ``tests/markers/credits/test_textdet.py`` compares it with a verbatim copy on generated inputs and
@@ -17,6 +17,7 @@ import hashlib
 import math
 import os
 import threading
+from collections.abc import Callable
 
 import cv2
 import numpy as np
@@ -55,33 +56,49 @@ class WebGpuSessionError(TextDetError):
     """ONNX Runtime didn't put the session on the WebGPU device."""
 
 
-def verify_model(path: str) -> None:
-    """Check the model is the pinned file (size, then sha256).
+def verify_pinned(path: str, size: int, sha256: str, label: str, hint: str = "") -> None:
+    """Check a model is the pinned file (size, then sha256).
+
+    Args:
+        path: The model file.
+        size: Its pinned size in bytes.
+        sha256: Its pinned hex digest.
+        label: What the model does, for the messages ("text detection").
+        hint: Added to the message for a missing file.
 
     Raises:
         ModelError: Missing, unreadable, or another file.
     """
     if not os.path.isfile(path):
         raise ModelError(
-            f"Needs the text detection model, which the Docker image includes; it isn't at {path}. "
-            "Set MEDIA_PREVIEW_TEXTDET_MODEL to point at it."
+            f"Needs the {label} model, which the Docker image includes; it isn't at {path}"
+            + (f". {hint}" if hint else "")
         )
     try:
-        if os.path.getsize(path) != MODEL_SIZE:
-            raise ModelError(f"The text detection model at {path} isn't the expected file")
+        if os.path.getsize(path) != size:
+            raise ModelError(f"The {label} model at {path} isn't the expected file")
         digest = hashlib.sha256()
         with open(path, "rb") as fh:
             for block in iter(lambda: fh.read(1 << 20), b""):
                 digest.update(block)
     except OSError as exc:
-        raise ModelError(f"The text detection model at {path} can't be read: {exc}") from exc
-    if digest.hexdigest() != MODEL_SHA256:
-        raise ModelError(f"The text detection model at {path} isn't the expected file")
+        raise ModelError(f"The {label} model at {path} can't be read: {exc}") from exc
+    if digest.hexdigest() != sha256:
+        raise ModelError(f"The {label} model at {path} isn't the expected file")
+
+
+def verify_model(path: str) -> None:
+    """Check the detection model is the pinned file.
+
+    Raises:
+        ModelError: Missing, unreadable, or another file.
+    """
+    verify_pinned(path, MODEL_SIZE, MODEL_SHA256, "text detection", "Set MEDIA_PREVIEW_TEXTDET_MODEL to point at it.")
 
 
 def _resize_limit(max_side: int) -> int:
     # rapidocr's TextDetector.get_preprocess: under limit type "max" the configured 320 is replaced by 960, 1500 or
-    # 2000, so frames under 960 px keep their own size (spec §5.4's "at the frame's own 320 px").
+    # 2000, so frames under 960 px keep their own size.
     if max_side < 960:
         return 960
     return 1500 if max_side < 1500 else 2000
@@ -211,7 +228,7 @@ def postprocess(pred: np.ndarray, src_hw: tuple[int, int]) -> np.ndarray:
     return np.array(kept) if kept else np.zeros((0, 4, 2), dtype=np.float32)
 
 
-def _session_options(intra_op_threads: int) -> ort.SessionOptions:
+def session_options(intra_op_threads: int) -> ort.SessionOptions:
     # rapidocr's OrtInferSession options: graph optimisations and arena settings change the numbers at the margin.
     opts = ort.SessionOptions()
     opts.log_severity_level = 4
@@ -222,16 +239,28 @@ def _session_options(intra_op_threads: int) -> ort.SessionOptions:
     return opts
 
 
-def cpu_session(model_path: str, intra_op_threads: int = INTRA_OP_THREADS) -> ort.InferenceSession:
-    """An ONNX Runtime CPU session of the model (verified first).
+def cpu_session(
+    model_path: str,
+    intra_op_threads: int = INTRA_OP_THREADS,
+    *,
+    verify: Callable[[str], None] | None = None,
+    options: Callable[[int], ort.SessionOptions] | None = None,
+) -> ort.InferenceSession:
+    """An ONNX Runtime CPU session of a model (verified first).
+
+    Args:
+        model_path: The model file.
+        intra_op_threads: Threads for one operator.
+        verify: Checks the model file; the detection model's check by default (the recognition model passes its own).
+        options: Builds the session options; :func:`session_options` by default.
 
     Raises:
         ModelError: The model is missing or not the pinned file.
     """
-    verify_model(model_path)
+    (verify or verify_model)(model_path)
     return ort.InferenceSession(
         model_path,
-        sess_options=_session_options(intra_op_threads),
+        sess_options=(options or session_options)(intra_op_threads),
         providers=[("CPUExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"})],
     )
 
@@ -250,26 +279,40 @@ def webgpu_devices() -> list:
     return [d for d in ort.get_ep_devices() if d.ep_name == webgpu_ep.get_ep_name()]
 
 
-def webgpu_session(model_path: str, device, intra_op_threads: int = INTRA_OP_THREADS) -> ort.InferenceSession:
-    """A session of the model on one WebGPU EP device.
+def webgpu_session(
+    model_path: str,
+    device,
+    intra_op_threads: int = INTRA_OP_THREADS,
+    *,
+    verify: Callable[[str], None] | None = None,
+    options: Callable[[int], ort.SessionOptions] | None = None,
+    label: str = "text detection",
+) -> ort.InferenceSession:
+    """A session of a model on one WebGPU EP device.
 
     ``device`` selects the execution provider, not the GPU: Dawn runs on the adapter the process's Vulkan environment
     leaves it (``MESA_VK_DEVICE_SELECT`` and the ICD overrides), which the caller sets before this process starts.
+
+    Args:
+        model_path: The model file.
+        device: An ``OrtEpDevice`` from :func:`webgpu_devices`.
+        intra_op_threads: Threads for one operator.
+        verify: As for :func:`cpu_session`.
+        options: As for :func:`cpu_session`.
+        label: What the model does, for the error message.
 
     Raises:
         ModelError: The model is missing or not the pinned file.
         WebGpuSessionError: The session came up without the WebGPU provider.
     """
-    verify_model(model_path)
-    opts = _session_options(intra_op_threads)
+    (verify or verify_model)(model_path)
+    opts = (options or session_options)(intra_op_threads)
     opts.add_provider_for_devices([device], {})
     session = ort.InferenceSession(model_path, sess_options=opts)
     # With no usable adapter (no Vulkan driver, a device id past the first) ONNX Runtime quietly builds a CPU session.
     providers = session.get_providers()
     if device.ep_name not in providers:
-        raise WebGpuSessionError(
-            f"ONNX Runtime didn't start {device.ep_name} for text detection (providers: {providers})"
-        )
+        raise WebGpuSessionError(f"ONNX Runtime didn't start {device.ep_name} for {label} (providers: {providers})")
     return session
 
 

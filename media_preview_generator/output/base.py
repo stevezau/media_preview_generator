@@ -42,9 +42,6 @@ class BifBundle:
     width: int
     height: int
     frame_count: int
-    # Enumeration metadata is retained for compatibility with job callers;
-    # Plex output paths ignore it (it may describe a file since replaced).
-    prefetched_bundle_metadata: tuple[tuple[str, str], ...] = ()
     # Owning server's display name, threaded through purely for log
     # attribution in the BIF packing helper (``generate_bif`` prefixes its
     # "Generated BIF file:" line with ``[server_display_name]`` so an op

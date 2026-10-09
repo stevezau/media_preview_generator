@@ -1,7 +1,6 @@
-"""Credits text (spec §5.4) in the decision rules (§5.5): every cell where it meets chapters, SkipDB, markers already on
-servers, the publish setting, sanity bounds and the preview overlap check. The owner's answers of 2026-09-16 are pinned:
-Q1 (it publishes alone at Medium), Q2 (it and a server's own marker are independent), Q3 (its end, when a scene follows
-the roll, is the safer end of any cluster it confirms)."""
+"""Credits text in the decision rules: every cell where it meets chapters, SkipDB, markers already on servers, the
+publish setting, sanity bounds and the preview overlap check. Pinned: it publishes alone at Medium, it and a server's
+own marker are independent, and its end, when a scene follows the roll, is the safer end of any cluster it confirms."""
 
 from __future__ import annotations
 
@@ -18,12 +17,12 @@ from media_preview_generator.markers.decide import (
     decide,
 )
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
+from tests.markers.fakes import SOURCE_ORDER
 
 T = MarkerType
 MOVIE_MS = 6_000_000
 EPISODE_MS = 1_320_000
-ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous", "credits_text",
-         "server_markers", "server_markers_imported")  # fmt: skip
+ORDER = SOURCE_ORDER
 SHORTENED = "; start shortened to the server's own marker (plex-1)"
 TEXT_FIRST = ("chapters", "credits_text", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous",
               "server_markers", "server_markers_imported")  # fmt: skip
@@ -62,7 +61,7 @@ def credits(candidates, *, level="high", duration=MOVIE_MS, is_movie=True, order
 
 class TestAlone:
     def test_high_needs_a_second_source(self):
-        # "high" is the evaluation harness's level only: the app decides at "medium" (2026-09-24).
+        # "high" is the evaluation harness's level only: the app decides at "medium".
         d = credits([text(5_700_000)])[T.CREDITS]
         why = 'only on-screen text found the credits; at "high" a second source must agree'
         assert (d.status, d.reason, d.marker) == (DecisionStatus.NO_EVIDENCE, why, None)
@@ -294,7 +293,7 @@ class TestWithServerMarkers:
         )
 
     def test_skipdb_and_a_skipdb_importers_copy_are_one_source_against_it_at_high(self):
-        # Rule 8 (ruling 2026-09-16): the copy agreeing with SkipDB 1 s apart is SkipDB again, not a second opinion.
+        # Rule 8: the copy agreeing with SkipDB 1 s apart is SkipDB again, not a second opinion.
         d = credits([text(5_700_000), skipdb(5_730_000), imported(5_731_000, "skipdb")], level="high")[T.CREDITS]
         assert (d.status, d.reason, d.marker) == (
             DecisionStatus.NO_EVIDENCE,
@@ -363,7 +362,7 @@ class TestWithChapters:
         assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (5_640_000, MOVIE_MS, ("chapters",))
 
     def test_text_and_skipdb_agreeing_against_the_chapter_outvote_it_at_the_text_start(self):
-        # Rule 3 since 2026-09-25 (Somebody Somewhere S03: HMAX chapters 40-70 s late): the file's own frames and an
+        # Rule 3 (Somebody Somewhere S03: HMAX chapters 40-70 s late): the file's own frames and an
         # independent answer outvote the chapter; the start is credit text's, not SkipDB's by source order.
         d = credits([chapter(5_640_000), text(5_700_000), skipdb(5_698_000)])[T.CREDITS]
         assert (d.status, d.reason) == (
@@ -378,7 +377,7 @@ class TestWithChapters:
 
 
 class TestTextOverAnOnlineStart:
-    """Rule 4 since 2026-09-27: credit text supplies an agreed credits start when the source-order winner starts more
+    """Rule 4: credit text supplies an agreed credits start when the source-order winner starts more
     than 5 s from it (Stargate Atlantis S01E06/E07: IntroDB, read at 25/23.976, 6-7 s into the roll)."""
 
     @pytest.mark.parametrize("online", [skipdb, introdb], ids=["skipdb", "introdb"])
@@ -413,7 +412,7 @@ def hinted(
 
 
 class TestTextMovesAChaptersStart:
-    """Rule 3 since 2026-09-27: credit text read against the credits chapter moves the chapter's start to the roll when
+    """Rule 3: credit text read against the credits chapter moves the chapter's start to the roll when
     the frames show the chapter off it (``rule_j.chapter_moves_to``)."""
 
     @pytest.mark.parametrize("start_ms", [5_580_000, 5_720_000])
@@ -438,8 +437,8 @@ class TestTextMovesAChaptersStart:
         )
 
     def test_a_hint_naming_its_own_start_moves_the_chapter_there(self):
-        # Version 7: a chapter on the story moves to the first text after it, before the roll rule J reads later
-        # (10 Things I Hate About You: the chapter on the final kiss, the crawl's first lines 44 s later, rule J 166 s
+        # a chapter on the story moves to the first text after it, before the roll rule J reads later
+        # (the chapter on the final kiss, the crawl's first lines 44 s later, rule J 166 s
         # after those). The answer itself keeps rule J's start; only the chapter moves to the hint's.
         d = credits([chapter(5_529_000), hinted(5_738_000, 5_529_000, to_ms=5_573_000)])[T.CREDITS]
         assert (d.status, d.reason) == (DecisionStatus.DECIDED, TEXT_MOVES_CHAPTER_REASON)
@@ -473,9 +472,8 @@ class TestTextMovesAChaptersStart:
     )
     def test_another_source_agreeing_with_the_chapter_keeps_it(self, second):
         d = credits([chapter(5_650_000), hinted(5_580_000, 5_650_000), second], level="medium")[T.CREDITS]
-        assert d.marker is not None or d.proposed is not None
-        kept = d.marker or d.proposed
-        assert kept.start_ms == 5_650_000
+        assert (d.status, d.reason, d.proposed) == (DecisionStatus.DECIDED, "chapters", None)
+        assert (d.marker.start_ms, d.marker.decided_by) == (5_650_000, ("chapters",))
 
     def test_the_skip_ends_at_the_earlier_of_the_chapters_and_the_rolls_end(self):
         d = credits([Candidate(T.CREDITS, 5_650_000, 5_950_000, Source.CHAPTERS, 1.0, "Credits"),
@@ -494,8 +492,8 @@ class TestTextMovesAChaptersStart:
         assert credits_chapter_start_ms([text(5_650_000)], duration_ms=MOVIE_MS, is_movie=True) is None
 
 
-class TestEndQ3:
-    """Owner, Q3: a credits text candidate ends at the roll's last credit frame when more than 30 s follows it."""
+class TestEndWhenASceneFollows:
+    """A credits text candidate ends at the roll's last credit frame when more than 30 s follows it."""
 
     def test_alone_at_medium_the_skip_stops_before_the_scene(self):
         d = credits([text(5_700_000, 5_900_000)], level="medium")[T.CREDITS]
@@ -605,7 +603,7 @@ def test_a_preview_overlapping_text_decided_credits_is_left_undecided():
 # Cells that collapse into others:
 # - Two credits text candidates are one independence group: rule 6's self-agreement check (test_decide) covers them.
 # - A locked user marker wins over every source the same way (rule 1; TestLockAndDisabled in test_decide).
-# - Season audio never answers credits (spec §5.3: 54 % precision, rejected), so it never meets credits text.
+# - Season audio never answers credits, so it never meets credits text.
 
 
 @pytest.mark.parametrize(

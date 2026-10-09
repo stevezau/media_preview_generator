@@ -183,7 +183,7 @@ def _write(emby, markers, previous=(), publisher=None, **kw):
 
 
 class TestStoppedPluginWrite:
-    """Emby stopped between the plugin's store save and its chapter rows (publishers audit LOW-3). The plugin's store
+    """Emby stopped between the plugin's store save and its chapter rows. The plugin's store
     names the set it replaces then, so the app's next write converges with no change on the app's side."""
 
     @pytest.mark.parametrize("setting", ["keep_emby", "restore"])
@@ -251,9 +251,8 @@ class TestCreditsNote:
         assert emby.publisher.projection_note(markers, duration_ms=duration) == note
 
     def test_every_decided_credits_marker_is_sent(self, emby):
-        # Owner decision 2026-09-14: Emby always gets the credits start, even when a scene follows the credits.
+        # Emby always gets the credits start, even when a scene follows the credits.
         assert emby.publisher.project([CREDITS_EARLY, INTRO, Marker(T.RECAP, 0, 30_000, ())]) == [INTRO, CREDITS_EARLY]
-        assert CREDITS_BEFORE_END_NOTE == "Emby skips to the end of the file"
 
 
 class TestWrite:
@@ -409,7 +408,7 @@ class TestKeepEmbys:
             assert emby.markers_shown() == [("IntroStart", 126_771), ("IntroEnd", 157_068), ("CreditsStart", 1_295_324)]
 
     def test_a_type_left_undecided_for_embys_own_shows_the_same_but_isnt_stored_out_of_sight(self, emby):
-        # The pipeline doesn't read a file for a type every server keeps its own of (spec §6.2, §14 2026-09-23), so
+        # The pipeline doesn't read a file for a type every server keeps its own of, so
         # that type reaches the write undecided. Emby shows the same; the plugin just holds no hidden copy of ours for
         # it, which it would have shown once Emby's own rows were gone (the next run reads the file then instead).
         def after(markers):

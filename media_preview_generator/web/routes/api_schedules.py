@@ -105,13 +105,12 @@ def create_schedule():
     except ValueError as e:
         logger.warning(
             "New schedule rejected — invalid parameters ({}: {}). "
-            "The Schedules page will show the validation error to you; "
-            "common causes are an empty name, missing trigger (need either a cron expression "
+            "Common causes are an empty name, missing trigger (need either a cron expression "
             "or an interval in minutes), or a malformed cron syntax.",
             type(e).__name__,
             e,
         )
-        return jsonify({"error": "Invalid schedule parameters"}), 400
+        return jsonify({"error": f"Invalid schedule parameters: {e}"}), 400
     except Exception as e:
         # A read-only /config makes APScheduler's INSERT into scheduler.db
         # fail with "attempt to write a readonly database" — nothing to do
@@ -197,7 +196,7 @@ def update_schedule(schedule_id):
             type(e).__name__,
             e,
         )
-        return jsonify({"error": "Invalid schedule parameters"}), 400
+        return jsonify({"error": f"Invalid schedule parameters: {e}"}), 400
 
     if schedule:
         return jsonify(schedule)
@@ -239,10 +238,14 @@ def disable_schedule(schedule_id):
 @api.route("/schedules/<schedule_id>/run", methods=["POST"])
 @api_token_required
 def run_schedule_now(schedule_id):
-    """Run a schedule immediately."""
+    """Run a schedule immediately.
+
+    Like Start job, the job is created even while processing is paused; the pause holds it until processing
+    resumes, so the response says ``paused: true`` in that case.
+    """
     schedule_manager = get_schedule_manager()
     if schedule_manager.run_now(schedule_id):
-        return jsonify({"success": True})
+        return jsonify({"success": True, "paused": bool(get_settings_manager().processing_paused)})
     return jsonify({"error": "Schedule not found"}), 404
 
 

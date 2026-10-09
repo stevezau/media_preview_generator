@@ -3,6 +3,7 @@
 Uses APScheduler with SQLite storage for persistent scheduled jobs.
 """
 
+import copy
 import json
 import os
 import threading
@@ -50,13 +51,10 @@ def _parse_hhmm(value: str | None) -> tuple[int, int] | None:
     return hour, minute
 
 
-# D21 / D26 — Quiet-hours cron job-id prefixes. With multi-window
-# support each window registers TWO crons (`__qh_pause_{idx}` /
-# `__qh_resume_{idx}`); the legacy single-window IDs are kept here so
-# apply_quiet_hours can clean them up on first multi-window save for
-# installs that ran the D21 single-window code.
-_QUIET_HOURS_PAUSE_JOB_ID = "__quiet_hours_pause"  # legacy D21 single-window id
-_QUIET_HOURS_RESUME_JOB_ID = "__quiet_hours_resume"  # legacy D21 single-window id
+# Quiet-hours job ids. The per-minute recheck is the only live job; the other
+# ids belong to earlier schemes and are removed on every apply.
+_QUIET_HOURS_PAUSE_JOB_ID = "__quiet_hours_pause"
+_QUIET_HOURS_RESUME_JOB_ID = "__quiet_hours_resume"
 _QUIET_HOURS_PAUSE_PREFIX = "__qh_pause_"
 _QUIET_HOURS_RESUME_PREFIX = "__qh_resume_"
 _QUIET_HOURS_RECHECK = "__qh_recheck"
@@ -65,29 +63,6 @@ _QUIET_HOURS_RECHECK = "__qh_recheck"
 # strings — keep these literal so a typo in the JS payload can't slip
 # through to a silent no-op.
 _QUIET_HOURS_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-
-
-def is_in_quiet_window(
-    now_hm: tuple[int, int],
-    pause_hm: tuple[int, int],
-    resume_hm: tuple[int, int],
-) -> bool:
-    """Return ``True`` when ``now_hm`` falls inside the paused window.
-
-    Equal pause/resume times disable the window (returns ``False``).
-    Cross-midnight windows (pause > resume) are handled — e.g. pause=08:00,
-    resume=01:00 means processing is paused all day until 1 AM. Day-of-
-    week filtering is the caller's responsibility (see
-    :func:`is_now_in_any_quiet_window`).
-    """
-    n = now_hm[0] * 60 + now_hm[1]
-    p = pause_hm[0] * 60 + pause_hm[1]
-    r = resume_hm[0] * 60 + resume_hm[1]
-    if p == r:
-        return False
-    if p < r:
-        return p <= n < r
-    return n >= p or n < r
 
 
 def normalise_quiet_hours(raw: dict | None) -> dict:
@@ -110,10 +85,7 @@ def is_now_in_any_quiet_window(quiet_hours: dict | None, now: datetime | None = 
 def _quiet_hours_recompute_and_apply(*, drain: bool = True) -> None:
     """Idempotent state flip — set processing_paused to whether ANY window is active.
 
-    Called from BOTH the pause-boundary and resume-boundary crons so
-    overlapping windows don't fight each other (e.g. window A's resume
-    cron firing while window B is still active correctly leaves the
-    queue paused). Also called from the boot-time gate.
+    Called by the per-minute recheck job and from the boot-time gate.
     """
     try:
         from .jobs import get_job_manager
@@ -146,9 +118,7 @@ def _quiet_hours_recompute_and_apply(*, drain: bool = True) -> None:
         logger.exception("Quiet-hours recompute hit an unexpected error")
 
 
-# Module-level callbacks (must be picklable for APScheduler's SQLAlchemy
-# jobstore). Both the pause-edge and resume-edge cron jobs call the
-# same recompute helper — see _quiet_hours_recompute_and_apply.
+# Jobs stored by older releases (``__qh_pause_N`` / ``__qh_resume_N``) still reference these names.
 def _quiet_hours_pause() -> None:
     _quiet_hours_recompute_and_apply()
 
@@ -436,6 +406,7 @@ def execute_scheduled_job(
     server_id: str | None = None,
     *,
     library_id: str | None = None,
+    ignore_pause: bool = False,
 ) -> None:
     """Execute a scheduled job — module-level function for APScheduler pickling.
 
@@ -501,7 +472,7 @@ def execute_scheduled_job(
     try:
         from .settings_manager import get_settings_manager
 
-        if get_settings_manager().processing_paused:
+        if not ignore_pause and get_settings_manager().processing_paused:
             logger.info(
                 "Schedule {} skipped — processing is currently paused (quiet hours / manual pause). "
                 "It will fire again on its next normal tick.",
@@ -746,7 +717,7 @@ class ScheduleManager:
             try:
                 with open(self.schedules_file) as f:
                     data = json.load(f)
-                raw_schedules = data.get("schedules", {})
+                raw_schedules = data.get("schedules", {}) if isinstance(data, dict) else {}
 
                 # J4: filter per-record so one bad schedule doesn't wipe the rest.
                 # Mirrors web/jobs.py:_load_jobs (Fix-5 Phase H pattern). A
@@ -1146,7 +1117,7 @@ class ScheduleManager:
 
             # Snapshot under the lock so the dict can't mutate mid-serialisation.
             with self._lock:
-                snapshot = dict(self._schedules)
+                snapshot = copy.deepcopy(self._schedules)
             atomic_json_save_with_backup(self.schedules_file, {"schedules": snapshot})
         except OSError as e:
             logger.error(
@@ -1214,35 +1185,24 @@ class ScheduleManager:
             logger.info("Scheduler started")
 
     def apply_quiet_hours(self, settings_dict: dict | None, *, drain: bool = True) -> None:
-        """Register / refresh the per-window quiet-hours crons (D21 + D26).
+        """Re-evaluate quiet hours now and (re)register the per-minute recheck.
 
-        ``settings_dict`` is the value of ``settings["quiet_hours"]``.
-        Accepts both the legacy single-window shape
-        ``{"enabled": bool, "start": "HH:MM", "end": "HH:MM"}`` and the
-        new multi-window shape
-        ``{"enabled": bool, "windows": [{"start", "end", "days"}]}`` —
-        normalise_quiet_hours migrates the former. Each window
-        registers TWO crons (pause at start, resume at end) keyed by
-        index. Both callbacks recompute "is any window currently
-        active?" so overlapping windows don't fight each other (e.g. a
-        resume cron firing while another window is still active won't
-        accidentally un-pause the queue).
+        ``settings_dict`` is the value of ``settings["quiet_hours"]``; legacy
+        shapes are migrated by ``normalise_quiet_hours``. The recheck job
+        recomputes "is any window active?" from the weekly mask every
+        minute, which also recovers missed boundaries after a restart or DST
+        change, so no per-window cron jobs are needed.
         """
-        # Wipe ALL existing quiet-hours crons (legacy single-window IDs
-        # AND any per-window IDs from a prior apply). One full rebuild
-        # is simpler than reconciling adds/removes individually.
         for job in self.scheduler.get_jobs():
-            if (
-                job.id == _QUIET_HOURS_RECHECK
-                or job.id == _QUIET_HOURS_PAUSE_JOB_ID
-                or job.id == _QUIET_HOURS_RESUME_JOB_ID
-                or job.id.startswith(_QUIET_HOURS_PAUSE_PREFIX)
-                or job.id.startswith(_QUIET_HOURS_RESUME_PREFIX)
-            ):
+            if job.id in (
+                _QUIET_HOURS_RECHECK,
+                _QUIET_HOURS_PAUSE_JOB_ID,
+                _QUIET_HOURS_RESUME_JOB_ID,
+            ) or job.id.startswith((_QUIET_HOURS_PAUSE_PREFIX, _QUIET_HOURS_RESUME_PREFIX)):
                 try:
                     self.scheduler.remove_job(job.id)
                 except Exception:
-                    pass
+                    logger.debug("Could not remove quiet-hours job {}", job.id)
 
         qh = normalise_quiet_hours(settings_dict)
         _quiet_hours_recompute_and_apply(drain=drain)
@@ -1252,62 +1212,12 @@ class ScheduleManager:
         if not self.scheduler.running:
             self.start()
 
-        # Startup, edits and minute reevaluation recover missed boundaries/DST;
-        # crons supply prompt edges rather than owning a latched pause flag.
         self.scheduler.add_job(
             _quiet_hours_recompute_and_apply,
             trigger=IntervalTrigger(minutes=1),
             id=_QUIET_HOURS_RECHECK,
             replace_existing=True,
         )
-        registered = 0
-        for idx, w in enumerate(qh["windows"]):
-            try:
-                start_hm = _parse_hhmm(str(w.get("start") or ""))
-                end_hm = _parse_hhmm(str(w.get("end") or ""))
-            except ValueError:
-                logger.warning(
-                    "Quiet-hours window #{} has malformed times {}; skipping.",
-                    idx,
-                    w,
-                )
-                continue
-            if start_hm is None or end_hm is None or start_hm == end_hm:
-                continue
-            days = w.get("days") or list(_QUIET_HOURS_DAYS)
-            day_filter = ",".join(d for d in days if d in _QUIET_HOURS_DAYS)
-            if not day_filter:
-                continue
-            self.scheduler.add_job(
-                _quiet_hours_pause,
-                trigger=CronTrigger(day_of_week=day_filter, hour=start_hm[0], minute=start_hm[1]),
-                id=f"{_QUIET_HOURS_PAUSE_PREFIX}{idx}",
-                replace_existing=True,
-            )
-            end_days = (
-                days
-                if start_hm < end_hm
-                else [_QUIET_HOURS_DAYS[(_QUIET_HOURS_DAYS.index(day) + 1) % 7] for day in days]
-            )
-            self.scheduler.add_job(
-                _quiet_hours_resume,
-                trigger=CronTrigger(day_of_week=",".join(end_days), hour=end_hm[0], minute=end_hm[1]),
-                id=f"{_QUIET_HOURS_RESUME_PREFIX}{idx}",
-                replace_existing=True,
-            )
-            registered += 1
-            logger.info(
-                "Quiet hours window #{}: pause {:02d}:{:02d} → resume {:02d}:{:02d} on {} (container TZ)",
-                idx,
-                start_hm[0],
-                start_hm[1],
-                end_hm[0],
-                end_hm[1],
-                day_filter,
-            )
-
-        if registered == 0:
-            logger.info("Quiet hours enabled but no valid windows found — no crons registered.")
 
     def stop(self) -> None:
         """Stop the scheduler."""
@@ -1373,11 +1283,11 @@ class ScheduleManager:
 
         # Create trigger
         if cron_expression:
-            trigger = CronTrigger.from_crontab(cron_expression)
+            trigger = self._build_trigger("cron", cron_expression)
             trigger_type = "cron"
             trigger_value = cron_expression
         elif interval_minutes:
-            trigger = IntervalTrigger(minutes=interval_minutes)
+            trigger = self._build_trigger("interval", str(interval_minutes))
             trigger_type = "interval"
             trigger_value = str(interval_minutes)
             # stop_time only makes sense for time-of-day triggers.
@@ -1492,96 +1402,104 @@ class ScheduleManager:
             if schedule_id not in self._schedules:
                 return None
 
-            schedule = self._schedules[schedule_id]
+            stored = self._schedules[schedule_id]
+            # Edit a copy so invalid input (bad cron, bad stop_time) leaves the
+            # stored schedule and its APScheduler job untouched.
+            schedule = copy.deepcopy(stored)
 
-        # Update fields
-        if name is not None:
-            schedule["name"] = name
-        if library_ids is not None:
-            # Canonical multi-select store. Also mirror to library_id for
-            # any downstream that hasn't migrated.
-            ids = [str(x) for x in (library_ids or []) if str(x).strip()]
-            schedule["library_ids"] = ids
-            schedule["library_id"] = ids[0] if len(ids) == 1 else None
-        elif library_id is not None:
-            # Single-library back-compat path.
-            schedule["library_id"] = library_id
-            schedule["library_ids"] = [str(library_id)] if library_id else []
-        if library_name is not None:
-            schedule["library_name"] = library_name
-        resumes_other_jobs = config is not None and (
-            _resumed_kind(config) != _resumed_kind(schedule.get("config"))
-            or (config.get("job_type") == "recently_added")
-            != ((schedule.get("config") or {}).get("job_type") == "recently_added")
-        )
-        if config is not None:
-            schedule["config"] = config
-        if enabled is not None:
-            schedule["enabled"] = enabled
-        if priority is not ScheduleManager._PRIORITY_UNSET:
-            schedule["priority"] = priority
-        if server_id is not None:
-            # Empty string means "clear the pin", null means "leave alone".
-            schedule["server_id"] = server_id or None
-        if stop_time is not None:
-            # Validate before persisting; ValueError surfaces as a 400 in API.
-            _ = _parse_hhmm(stop_time)  # may raise
-            schedule["stop_time"] = stop_time or ""
-
-        # Update trigger if changed
-        if cron_expression is not None:
-            schedule["trigger_type"] = "cron"
-            schedule["trigger_value"] = cron_expression
-        elif interval_minutes is not None:
-            schedule["trigger_type"] = "interval"
-            schedule["trigger_value"] = str(interval_minutes)
-            # stop_time is meaningless for interval triggers — clear it
-            # automatically so a user changing trigger type doesn't end
-            # up with an orphan stop cron firing daily.
-            schedule["stop_time"] = ""
-
-        # Remove existing job (may not exist if schedule was disabled)
-        try:
-            self.scheduler.remove_job(schedule_id)
-        except Exception:
-            logger.debug("No existing scheduler job to remove for {}", schedule_id)
-        # Always remove the stop-cron too; we'll re-register it below if
-        # the (possibly updated) stop_time still applies.
-        self._remove_stop_job(schedule_id)
-
-        # Re-add job if enabled
-        if schedule["enabled"]:
-            if schedule["trigger_type"] == "cron":
-                trigger = CronTrigger.from_crontab(schedule["trigger_value"])
-            else:
-                trigger = IntervalTrigger(minutes=int(schedule["trigger_value"]))
-
-            job = self.scheduler.add_job(
-                execute_scheduled_job,
-                trigger=trigger,
-                id=schedule_id,
-                args=[
-                    schedule_id,
-                    schedule.get("library_ids", []),
-                    schedule["library_name"],
-                    schedule["config"],
-                    schedule.get("priority"),
-                    schedule.get("server_id"),
-                ],
-                replace_existing=True,
+            if name is not None:
+                schedule["name"] = name
+            if library_ids is not None:
+                # Canonical multi-select store. Also mirror to library_id for
+                # any downstream that hasn't migrated.
+                ids = [str(x) for x in (library_ids or []) if str(x).strip()]
+                schedule["library_ids"] = ids
+                schedule["library_id"] = ids[0] if len(ids) == 1 else None
+            elif library_id is not None:
+                # Single-library back-compat path.
+                schedule["library_id"] = library_id
+                schedule["library_ids"] = [str(library_id)] if library_id else []
+            if library_name is not None:
+                schedule["library_name"] = library_name
+            resumes_other_jobs = config is not None and (
+                _resumed_kind(config) != _resumed_kind(stored.get("config"))
+                or (config.get("job_type") == "recently_added")
+                != ((stored.get("config") or {}).get("job_type") == "recently_added")
             )
-            schedule["next_run"] = job.next_run_time.isoformat() if job.next_run_time else None
-            stop_hm = _parse_hhmm(schedule.get("stop_time") or "")
-            if stop_hm is not None and schedule["trigger_type"] == "cron":
-                self._register_stop_job(schedule_id, stop_hm)
-        else:
-            schedule["next_run"] = None
+            if config is not None:
+                schedule["config"] = config
+            if enabled is not None:
+                schedule["enabled"] = enabled
+            if priority is not ScheduleManager._PRIORITY_UNSET:
+                schedule["priority"] = priority
+            if server_id is not None:
+                # Empty string means "clear the pin", null means "leave alone".
+                schedule["server_id"] = server_id or None
+            if stop_time is not None:
+                _parse_hhmm(stop_time)  # raises ValueError, surfaced as a 400
+                schedule["stop_time"] = stop_time or ""
 
-        self._save_schedules()
+            if cron_expression is not None:
+                schedule["trigger_type"] = "cron"
+                schedule["trigger_value"] = cron_expression
+            elif interval_minutes is not None:
+                schedule["trigger_type"] = "interval"
+                schedule["trigger_value"] = str(interval_minutes)
+                # stop_time is meaningless for interval triggers; clear it so
+                # changing trigger type doesn't leave an orphan stop cron.
+                schedule["stop_time"] = ""
+
+            trigger = None
+            if schedule["enabled"]:
+                trigger = self._build_trigger(schedule["trigger_type"], schedule["trigger_value"])
+            stop_hm = _parse_hhmm(schedule.get("stop_time") or "")
+
+            # Everything validated; now swap the jobs.
+            try:
+                self.scheduler.remove_job(schedule_id)
+            except Exception:
+                logger.debug("No existing scheduler job to remove for {}", schedule_id)
+            self._remove_stop_job(schedule_id)
+
+            if trigger is not None:
+                job = self.scheduler.add_job(
+                    execute_scheduled_job,
+                    trigger=trigger,
+                    id=schedule_id,
+                    args=[
+                        schedule_id,
+                        schedule.get("library_ids", []),
+                        schedule["library_name"],
+                        schedule["config"],
+                        schedule.get("priority"),
+                        schedule.get("server_id"),
+                    ],
+                    replace_existing=True,
+                )
+                schedule["next_run"] = job.next_run_time.isoformat() if job.next_run_time else None
+                if stop_hm is not None and schedule["trigger_type"] == "cron":
+                    self._register_stop_job(schedule_id, stop_hm)
+            else:
+                schedule["next_run"] = None
+
+            stored.clear()
+            stored.update(schedule)
+            self._save_schedules()
+
         logger.info("Updated schedule {}", schedule_id)
         if resumes_other_jobs:
             _warn_stop_paused_jobs_left_behind(schedule_id, schedule.get("name", schedule_id), schedule["config"])
-        return schedule
+        return stored
+
+    @staticmethod
+    def _build_trigger(trigger_type: str, trigger_value: str):
+        """Build the APScheduler trigger for a schedule, raising ValueError if invalid."""
+        if trigger_type == "cron":
+            return CronTrigger.from_crontab(trigger_value)
+        minutes = int(trigger_value)
+        if minutes <= 0:
+            raise ValueError("interval_minutes must be a positive integer")
+        return IntervalTrigger(minutes=minutes)
 
     def delete_schedule(self, schedule_id: str) -> bool:
         """Delete a schedule."""
@@ -1654,24 +1572,16 @@ class ScheduleManager:
             schedule.get("config"),
             schedule.get("priority"),
             schedule.get("server_id"),
+            ignore_pause=True,  # explicit user action: "Run now" must not silently no-op while paused
         )
-        self._save_schedules()
+        with self._lock:
+            self._save_schedules()
         return True
 
 
 # Global scheduler instance
 _schedule_manager: ScheduleManager | None = None
 _schedule_lock = threading.Lock()
-
-# Default config directory from environment. Mirrors the lazy-resolver
-# pattern in jobs.py — see ``_resolve_default_config_dir`` below.
-DEFAULT_CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
-
-
-def _resolve_default_config_dir() -> str:
-    """Re-read CONFIG_DIR on every call so test fixtures using
-    monkeypatch.setenv work as expected."""
-    return os.environ.get("CONFIG_DIR", "/config")
 
 
 def get_schedule_manager(config_dir: str | None = None, run_job_callback: Callable | None = None) -> ScheduleManager:
@@ -1680,7 +1590,7 @@ def get_schedule_manager(config_dir: str | None = None, run_job_callback: Callab
     with _schedule_lock:
         if _schedule_manager is None:
             _schedule_manager = ScheduleManager(
-                config_dir=config_dir or _resolve_default_config_dir(),
+                config_dir=config_dir or os.environ.get("CONFIG_DIR", "/config"),
                 run_job_callback=run_job_callback,
             )
         elif run_job_callback and _schedule_manager.run_job_callback is None:

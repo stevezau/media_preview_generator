@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,37 +21,6 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
-
-
-@pytest.fixture
-def fail_config(tmp_path):
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = ""
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
 
 
 @pytest.fixture
@@ -84,7 +52,7 @@ def readonly_media_root(media_root: Path, tmp_path: Path):
 class TestReadOnlyMediaDir:
     """A read-only media directory → publisher returns FAILED, no crash."""
 
-    def test_eacces_on_sidecar_write_returns_failed(self, emby_credentials, readonly_media_root, fail_config):
+    def test_eacces_on_sidecar_write_returns_failed(self, emby_credentials, readonly_media_root, live_config):
         media_root = readonly_media_root
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
 
@@ -118,7 +86,7 @@ class TestReadOnlyMediaDir:
         result = process_canonical_path(
             canonical_path=canonical,
             registry=registry,
-            config=fail_config,
+            config=live_config,
             gpu=None,
             gpu_device_path=None,
         )
@@ -136,7 +104,7 @@ class TestReadOnlyMediaDir:
 class TestUnreadableSourceFile:
     """Source file is mode 000 — generate_images can't open it."""
 
-    def test_unreadable_source_returns_failed(self, emby_credentials, fail_config, tmp_path, media_root):
+    def test_unreadable_source_returns_failed(self, emby_credentials, live_config, tmp_path, media_root):
         """When the source file isn't readable by us, the dispatcher
         catches the FFmpeg failure and returns FAILED.
 
@@ -184,7 +152,7 @@ class TestUnreadableSourceFile:
             result = process_canonical_path(
                 canonical_path=str(target),
                 registry=registry,
-                config=fail_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
             )
@@ -208,7 +176,7 @@ class TestUnreadableSourceFile:
 class TestPartialFailureIsolation:
     """One server fails, others succeed — only the failing one is FAILED."""
 
-    def test_one_server_failure_doesnt_block_others(self, emby_credentials, media_root, fail_config, tmp_path):
+    def test_one_server_failure_doesnt_block_others(self, emby_credentials, media_root, live_config, tmp_path):
         """Configure two Emby servers — one with a writable media dir,
         one with a read-only dir. Verify the writable one publishes and
         the read-only one returns FAILED. Confirms no global lock or
@@ -292,7 +260,7 @@ class TestPartialFailureIsolation:
             result = process_canonical_path(
                 canonical_path=canonical,
                 registry=registry,
-                config=fail_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
             )

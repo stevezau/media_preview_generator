@@ -91,6 +91,7 @@ class TestInfoIconRule:
         icon = authed_page.locator('label[for="logLevel"] .info-icon')
         expect(icon).not_to_have_class("info-icon-more")
         icon.click()
+        authed_page.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))")
         expect(authed_page.locator("#globalInfoModal")).to_be_hidden()
 
     def test_gpu_tuning_explains_where_worker_allocation_lives(self, authed_page: Page, app_url: str) -> None:

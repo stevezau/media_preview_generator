@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import struct
 import threading
 import time
 from datetime import UTC, datetime
@@ -12,7 +11,6 @@ from unittest.mock import MagicMock
 import pytest
 from PIL import Image
 
-from media_preview_generator.bif_reader import BIF_MAGIC
 from media_preview_generator.inspector.previews import (
     NO_CONFIG_FOLDER_NOTE,
     NO_JELLYFIN_FOLDER_NOTE,
@@ -23,22 +21,13 @@ from media_preview_generator.inspector.previews import (
 )
 from media_preview_generator.servers.base import Library, ServerConfig, ServerType
 from media_preview_generator.servers.ownership import OwnershipMatch
+from tests.conftest import write_bif
 
 MTIME = 1_780_000_000.0
 
 
 def _write_bif(path, *, frames: int, multiplier_ms: int = 10_000) -> str:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    jpegs = [b"\xff\xd8\xff" + bytes([i]) * 10 for i in range(frames)]
-    header = BIF_MAGIC + struct.pack("<III", 0, frames, multiplier_ms) + b"\x00" * 44
-    offset = len(header) + 8 * (frames + 1)
-    index = b""
-    for i, jpeg in enumerate(jpegs):
-        index += struct.pack("<II", i, offset)
-        offset += len(jpeg)
-    index += struct.pack("<II", 0xFFFFFFFF, offset)
-    with open(path, "wb") as f:
-        f.write(header + index + b"".join(jpegs))
+    write_bif(path, frames=frames, multiplier_ms=multiplier_ms)
     os.utime(path, (MTIME, MTIME))
     return str(path)
 

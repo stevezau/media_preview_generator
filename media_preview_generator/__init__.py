@@ -1,12 +1,8 @@
-"""Plex Video Preview Generator
+"""Media Preview Generator
 
-A tool for generating video preview thumbnails for Plex Media Server.
+A tool for generating video preview thumbnails for Plex, Emby and Jellyfin.
 Supports GPU acceleration (NVIDIA, AMD, Intel, Windows) and CPU processing.
 """
-
-# Touched 2026-05-02 to measure Docker layer-cache hit rate after the Layer A
-# (deps) / Layer B (app) split. This single-line edit must invalidate ONLY
-# Layer B in CI; if it invalidates Layer A too, the cache scope was wrong.
 
 import os
 import uuid
@@ -51,4 +47,4 @@ def _get_version() -> str:
 __version__ = _get_version()
 
 __author__ = "stevezau"
-__description__ = "Generate video preview thumbnails for Plex Media Server"
+__description__ = "Generate video preview thumbnails for Plex, Emby and Jellyfin"

@@ -1,6 +1,6 @@
 """The Inspector editor's publish (``pipeline.publish_now``): the same per-server write a job does, bounded.
 
-Matrix: server type x capability x marker type x kept types, plus the two halves of ruling P-R1's bound (nothing
+Matrix: server type x capability x marker type x kept types, plus the two halves of the request's bound (nothing
 outlives the request; an unreachable server can't multiply into one wait per server).
 """
 
@@ -20,7 +20,6 @@ from media_preview_generator.markers.outcomes import PLEX_PASS_UNKNOWN, ServerSt
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, PublishError
 from media_preview_generator.markers.publishers.emby import CREDITS_BEFORE_END_NOTE
 from media_preview_generator.markers.settings import load_global, validate_global
-from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import ServerType
 from tests.markers.fakes import FakeRegistry, ready_publisher, server_config
 
@@ -40,13 +39,6 @@ def media(tmp_path):
     f = folder / "Show - S01E01.mkv"
     f.write_bytes(b"x" * 100)
     return str(f)
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
 
 
 def _registry(media, *server_types, **markers_by_id):
@@ -243,7 +235,7 @@ class TestTypesAndNotes:
     def test_a_type_a_server_cannot_show_is_left_out_of_that_servers_write_only(
         self, store, media, monkeypatch, extra, plex_types, jf_types
     ):
-        """D8: Plex and Emby take neither recap nor preview; Jellyfin takes both, from the same save."""
+        """Plex and Emby take neither recap nor preview; Jellyfin takes both, from the same save."""
         _known(store, media, [INTRO, extra])
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
         plex = ready_publisher()
@@ -255,7 +247,7 @@ class TestTypesAndNotes:
     def test_an_edited_credits_end_reaches_emby_and_the_row_says_what_emby_does_with_it(
         self, store, media, monkeypatch
     ):
-        """D8: the end is accepted and published start-only, never silently dropped."""
+        """The end is accepted and published start-only, never silently dropped."""
         _known(store, media, [CREDITS_EARLY])
         reg = _registry(media, ServerType.EMBY)
         emby = ready_publisher("emby_bridge")
@@ -298,17 +290,18 @@ class TestTypesAndNotes:
 
 class TestTheBound:
     def test_nothing_outlives_the_request(self, store, media, monkeypatch):
-        """P-R1 / step 6: no thread, no job and no worker slot -- the fan-out finishes inside the call."""
+        """No thread, no job and no worker slot -- the fan-out finishes inside the call."""
         _known(store, media, [INTRO])
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
         pubs = {
             "plex-1": ready_publisher(),
             "jellyfin-1": ready_publisher("jellyfin_bridge", ("intro", "credits", "recap", "preview")),
         }
-        before = threading.active_count()
+        before = set(threading.enumerate())
         rows = _publish(monkeypatch, store, media, reg, pubs)
-        assert threading.active_count() == before
-        assert all(r["status"] != "" for r in rows)
+        assert set(threading.enumerate()) <= before
+        assert [r["server_id"] for r in rows] == ["plex-1", "jellyfin-1"]
+        assert {r["status"] for r in rows} == {"markers_written"}
         # Every publisher was called on this thread, not handed to anything -- and with this file's own arguments,
         # so a fan-out that reached the right number of servers with the wrong item or path still fails here.
         saved = dataclasses.replace(INTRO, locked=True)  # every marker the editor saved is a lock

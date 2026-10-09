@@ -8,12 +8,10 @@ and thread safety of progress updates.
 
 import threading
 import time
-from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from media_preview_generator.jobs import worker as worker_module
 from media_preview_generator.jobs.worker import Worker, WorkerPool
 from tests.conftest import _ms, _pi, _pi_list_or_passthrough  # noqa: F401
 
@@ -40,39 +38,6 @@ def _slow_process_item(*args, **kwargs):
     """Block until ``_SLOW_PROCESS_RELEASE`` is set or a short timeout elapses."""
     _SLOW_PROCESS_RELEASE.wait(timeout=0.1)
     return _ms("generated")
-
-
-def _very_slow_process_item(*args, progress_callback=None, **kwargs):
-    """Simulate processing slow enough for the headless poll loop to observe.
-
-    Pair this with ``_instant_worker_emits`` rather than relying on the sleep
-    alone: the poll loop's real cadence is 1.0 s, and sleeping just past it
-    made the test a race that flaked in CI (run 33882999354) while passing
-    locally even under 3x CPU oversubscription. With the cadence forced to 0
-    the loop emits on its very first 5 ms poll, so this only has to outlast
-    the dispatch, not a wall-clock threshold.
-    """
-    if progress_callback:
-        progress_callback(
-            progress_percent=50.0,
-            speed="1.2x",
-            current_duration=30.0,
-            total_duration=60.0,
-            remaining_time=30.0,
-        )
-    time.sleep(0.2)
-    return _ms("generated")
-
-
-@contextmanager
-def _instant_worker_emits():
-    """Force the headless poll loop to emit worker status on every poll.
-
-    Removes the wall-clock race from callback assertions — see
-    ``_very_slow_process_item``.
-    """
-    with patch.object(worker_module, "WORKER_STATUS_EMIT_INTERVAL_S", 0.0):
-        yield
 
 
 def _failing_process_item(*args, **kwargs):
@@ -155,18 +120,6 @@ class TestWorker:
         assert w.failed == 1
         assert w.completed == 0
 
-    def test_find_available_prioritises_gpu(self):
-        gpu_w = Worker(0, "GPU", "nvidia", "/dev/nvidia0", 0, "RTX 4090")
-        cpu_w = Worker(1, "CPU")
-        assert Worker.find_available([gpu_w, cpu_w]) is gpu_w
-
-    def test_find_available_none_when_all_busy(self, mock_config, mock_registry):
-        w = Worker(0, "CPU")
-        with patch("media_preview_generator.processing.multi_server.process_canonical_path", _slow_process_item):
-            w.assign_task(_pi("/key/1", title="Test", media_type="movie"), mock_config, mock_registry)
-            assert Worker.find_available([w]) is None
-        w.shutdown()
-
     def test_shutdown_waits_for_thread(self, mock_config, mock_registry):
         w = Worker(0, "CPU")
         with patch("media_preview_generator.processing.multi_server.process_canonical_path", _fake_process_item):
@@ -214,119 +167,6 @@ class TestWorkerPoolInit:
     def test_has_busy_workers_initially_false(self):
         pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
         assert not pool.has_busy_workers()
-
-    def test_has_available_workers_initially_true(self):
-        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
-        assert pool.has_available_workers()
-
-
-# ---------------------------------------------------------------------------
-# WorkerPool processing
-# ---------------------------------------------------------------------------
-
-
-class TestWorkerPoolProcessing:
-    """Test WorkerPool item processing with real threads."""
-
-    def test_process_all_items_headless(self, mock_config, mock_registry):
-        """All items should be processed; completed count matches."""
-        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
-        items = [(f"/key/{i}", f"Item {i}", "movie") for i in range(6)]
-        progress_calls = []
-
-        def progress_cb(current, total, msg):
-            progress_calls.append((current, total))
-
-        with patch("media_preview_generator.processing.multi_server.process_canonical_path", _fake_process_item):
-            pool.process_items_headless(
-                _pi_list_or_passthrough(items),
-                mock_config,
-                mock_registry,
-                progress_callback=progress_cb,
-            )
-
-        total_completed = sum(w.completed for w in pool.workers)
-        assert total_completed == 6
-        # Progress is throttled (0.5s) to avoid SocketIO flood, but the
-        # final completion is always reported.
-        assert len(progress_calls) >= 1
-        assert progress_calls[-1] == (6, 6)
-
-    def test_failed_items_tracked(self, mock_config, mock_registry):
-        """Failed items should increment failed counter, not completed."""
-        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
-        items = [("/key/1", "Bad Item", "movie")]
-
-        with patch("media_preview_generator.processing.multi_server.process_canonical_path", _failing_process_item):
-            pool.process_items_headless(_pi_list_or_passthrough(items), mock_config, mock_registry)
-
-        assert sum(w.failed for w in pool.workers) == 1
-        assert sum(w.completed for w in pool.workers) == 0
-
-    def test_mixed_success_and_failure(self, mock_config, mock_registry):
-        """Mix of successes and failures should add up to total."""
-        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
-        items = [(f"/key/{i}", f"Item {i}", "movie") for i in range(4)]
-
-        call_count = {"n": 0}
-
-        def alternating_process(*args, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] % 2 == 0:
-                raise RuntimeError("fail on even")
-            time.sleep(0.01)
-            return _ms("generated")
-
-        with patch("media_preview_generator.processing.multi_server.process_canonical_path", alternating_process):
-            pool.process_items_headless(_pi_list_or_passthrough(items), mock_config, mock_registry)
-
-        total = sum(w.completed + w.failed for w in pool.workers)
-        assert total == 4
-
-
-# ---------------------------------------------------------------------------
-# In-place CPU fallback
-# ---------------------------------------------------------------------------
-
-
-class TestInPlaceCpuFallback:
-    """Test GPU→CPU fallback via the codec-error path.
-
-    The GPU worker retries the same item on CPU in-place — there is no
-    longer a separate fallback queue or dedicated fallback pool.
-    """
-
-    def test_codec_error_retries_on_cpu_in_place(self, mock_config, mock_registry):
-        """GPU worker catches CodecNotSupportedError, retries with gpu=None, succeeds."""
-        mock_config.cpu_threads = 0  # No dedicated CPU workers — retry stays in GPU worker.
-
-        pool = WorkerPool(gpu_workers=1, cpu_workers=0, selected_gpus=_make_gpu_list(1))
-        gpu_worker = [w for w in pool.workers if w.worker_type == "GPU"][0]
-
-        call_log = []
-
-        def gpu_then_cpu(*args, gpu=None, **kwargs):
-            call_log.append(gpu)
-            if gpu is not None:
-                from media_preview_generator.processing import (
-                    CodecNotSupportedError,
-                )
-
-                raise CodecNotSupportedError("HEVC not supported")
-            time.sleep(0.01)
-            return _ms("generated")
-
-        items = [("/key/1", "Codec Test", "movie")]
-
-        with patch("media_preview_generator.processing.multi_server.process_canonical_path", gpu_then_cpu):
-            pool.process_items_headless(_pi_list_or_passthrough(items), mock_config, mock_registry)
-
-        # Two calls on the same GPU worker: first GPU, then CPU retry.
-        assert call_log == ["nvidia", None]
-        assert gpu_worker.completed == 1
-        assert gpu_worker.failed == 0
-        assert gpu_worker.fallback_active is True
-        assert "HEVC not supported" in (gpu_worker.fallback_reason or "")
 
 
 # ---------------------------------------------------------------------------
@@ -418,88 +258,3 @@ class TestProgressThreadSafety:
         # All reads should return valid dicts
         assert all(isinstance(d, dict) for d in results)
         assert all("progress_percent" in d for d in results)
-
-
-# ---------------------------------------------------------------------------
-# Worker callback in headless mode
-# ---------------------------------------------------------------------------
-
-
-class TestWorkerCallback:
-    """Test worker status callback in headless mode."""
-
-    def test_worker_callback_called(self, mock_config, mock_registry):
-        """Worker callback MUST fire at least once during processing.
-
-        Originally this test had a comment "Callback may or may not fire
-        depending on timing, but shouldn't crash" — which is exactly the
-        bug-blind pattern that lets "callback never wired" regressions
-        slip through (the production symptom: UI never shows worker
-        activity for short jobs). Drive a slow-enough item so the 1Hz
-        emit cadence guarantees at least one fire.
-        """
-        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
-        items = [("/key/1", "CB Test", "movie")]
-        worker_updates = []
-
-        def worker_cb(statuses):
-            worker_updates.append(statuses)
-
-        # ``_instant_worker_emits`` drops the emit cadence to 0 so the poll
-        # loop fires on its first 5 ms tick — no wall-clock race.
-        with (
-            _instant_worker_emits(),
-            patch("media_preview_generator.processing.multi_server.process_canonical_path", _very_slow_process_item),
-        ):
-            pool.process_items_headless(
-                _pi_list_or_passthrough(items),
-                mock_config,
-                mock_registry,
-                worker_callback=worker_cb,
-            )
-
-        # Hard contract: callback fired at least once with a non-empty
-        # worker list, AND the worker became "busy" with our test item
-        # at some point (proves the integration boundary is wired).
-        assert worker_updates, "worker_callback never fired — UI worker panel would be silent for this job"
-        saw_busy = False
-        for update in worker_updates:
-            assert isinstance(update, list)
-            for ws in update:
-                assert "worker_id" in ws
-                assert "status" in ws
-                if ws.get("status") in ("processing", "busy") and ws.get("current_title") == "CB Test":
-                    saw_busy = True
-        assert saw_busy, (
-            f"worker_callback fired but no update showed worker busy with our test item — updates={worker_updates!r}"
-        )
-
-    def test_worker_callback_includes_remaining_time(self, mock_config, mock_registry):
-        """Worker callback payload should include remaining_time while processing."""
-        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
-        items = [("/key/1", "CB ETA Test", "movie")]
-        worker_updates = []
-
-        def worker_cb(statuses):
-            worker_updates.append(statuses)
-
-        with (
-            _instant_worker_emits(),
-            patch("media_preview_generator.processing.multi_server.process_canonical_path", _very_slow_process_item),
-        ):
-            pool.process_items_headless(
-                _pi_list_or_passthrough(items),
-                mock_config,
-                mock_registry,
-                worker_callback=worker_cb,
-            )
-
-        assert worker_updates, "Expected at least one worker status callback"
-        flat_updates = [ws for update in worker_updates for ws in update]
-        processing_updates = [ws for ws in flat_updates if ws.get("status") == "processing"]
-        assert processing_updates, "Expected at least one processing worker update"
-        assert any("remaining_time" in ws for ws in processing_updates)
-        assert any(
-            isinstance(ws.get("remaining_time"), int | float) and ws.get("remaining_time", 0) > 0
-            for ws in processing_updates
-        )

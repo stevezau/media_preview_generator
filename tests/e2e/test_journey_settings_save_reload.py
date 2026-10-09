@@ -127,16 +127,15 @@ class TestSettingsSaveAndReloadPersists:
             data='{"log_level": "DEBUG"}',
             timeout=_API_TIMEOUT,
         )
-        # Endpoint may not exist on every build — accept 200 OR fall back to
-        # asserting the setting can round-trip via /api/settings.
-        if resp.status_code == 404:
-            pytest.skip("/api/settings/log-level not registered in this build")
-        assert resp.ok, f"POST /api/settings/log-level: {resp.status_code} {resp.text}"
+        assert resp.ok, f"PUT /api/settings/log-level: {resp.status_code} {resp.text}"
 
         settings_path = Path(config_dir) / "settings.json"
         for _ in range(40):
             if settings_path.exists():
-                disk = json.loads(settings_path.read_text())
+                try:
+                    disk = json.loads(settings_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    disk = {}
                 if disk.get("log_level") == "DEBUG":
                     break
             backend_real_page.wait_for_timeout(200)
@@ -156,8 +155,7 @@ class TestSettingsSaveAndReloadPersists:
         backend_real_page: Page,
         backend_real_app: tuple[str, str],
     ) -> None:
-        """Settings → Intro & Credits: a reordered source list survives a reload, and no publish rule is saved (the
-        High/Medium choice was removed 2026-09-24).
+        """Settings → Intro & Credits: a reordered source list survives a reload, and no publish rule is saved.
 
         Drives the real ``POST /api/settings`` (``markers.settings.validate_global``) and the real GET that masks the
         TheIntroDB key, so a regression anywhere between the form and settings.json shows up after the reload.

@@ -280,9 +280,21 @@ class TestEmbyServerIdentityForWebhookRouting:
 
 @pytest.mark.integration
 class TestEmbyTriggerRefresh:
-    def test_trigger_refresh_does_not_raise(self, live_registry, media_root):
-        """The post-publish refresh nudge succeeds against the live server."""
+    def test_trigger_refresh_reaches_emby_for_the_mapped_path(self, live_registry, media_root, monkeypatch):
+        """The post-publish refresh nudge succeeds against the live server for the Emby-side path."""
         server = live_registry.get("emby-int-1")
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        # Should not raise; failures are best-effort and swallowed.
+
+        # trigger_refresh swallows per-path failures, so record only the calls that returned normally.
+        succeeded: list[str] = []
+        original = server._trigger_path_refresh
+
+        def _record(server_view_path: str) -> None:
+            original(server_view_path)
+            succeeded.append(server_view_path)
+
+        monkeypatch.setattr(server, "_trigger_path_refresh", _record)
         server.trigger_refresh(item_id=None, remote_path=canonical)
+
+        assert succeeded, "Emby rejected the refresh nudge (see the logged warning)"
+        assert all(path.startswith("/em-media/Movies/") for path in succeeded), succeeded

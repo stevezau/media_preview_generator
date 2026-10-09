@@ -24,7 +24,9 @@ def test_system_quick_actions_and_job_stats_cards_have_the_same_height(authed_pa
     page.set_viewport_size({"width": 1600, "height": 900})
     page.goto(f"{app_url}/")
 
-    expect(page.locator(".dashboard-stats-card")).to_be_visible()
+    for card in (".dashboard-system-card", ".dashboard-quick-card", ".dashboard-stats-card"):
+        expect(page.locator(card)).to_be_visible()
+    page.wait_for_load_state("networkidle")  # the system and quick cards fill in from API reads
     heights = [
         page.locator(sel).evaluate("e => Math.round(e.getBoundingClientRect().height)")
         for sel in (".dashboard-system-card", ".dashboard-quick-card", ".dashboard-stats-card")

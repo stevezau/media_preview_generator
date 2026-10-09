@@ -1,4 +1,4 @@
-"""Webhook preview jobs ask for their Intro & Credits follow-up in their saved config (spec §6.4 item 9).
+"""Webhook preview jobs ask for their Intro & Credits follow-up in their saved config.
 
 The batch asks when it opens, so a job revived after a restart during the debounce asks too; the preview runner
 queues the follow-up when it starts the job (``markers.triggers.submit_pending_follow_up``) and takes the request

@@ -30,7 +30,7 @@ from media_preview_generator.output.jellyfin_trickplay import JellyfinTrickplayA
 from media_preview_generator.output.plex_bundle import PlexBundleAdapter
 
 
-def _bundle(canonical_path: str, *, prefetched=None) -> BifBundle:
+def _bundle(canonical_path: str) -> BifBundle:
     """Minimal BifBundle for path-derivation tests (no real frames needed)."""
     return BifBundle(
         canonical_path=canonical_path,
@@ -40,7 +40,6 @@ def _bundle(canonical_path: str, *, prefetched=None) -> BifBundle:
         width=320,
         height=180,
         frame_count=0,
-        prefetched_bundle_metadata=prefetched or (),
     )
 
 
@@ -75,7 +74,6 @@ class TestPlexBundleAdapterPathLayout:
 
     @pytest.mark.parametrize("server_kind", ["none", "plex", "other"])
     @pytest.mark.parametrize("item_id", [None, "42"])
-    @pytest.mark.parametrize("prefetched", [False, True])
     @pytest.mark.parametrize(
         ("payload", "expected_suffix"),
         [
@@ -85,15 +83,14 @@ class TestPlexBundleAdapterPathLayout:
         ids=["small-file-signature", "64-kib-hash"],
     )
     def test_local_source_defines_layout_without_server_metadata(
-        self, tmp_path, server_kind, item_id, prefetched, payload, expected_suffix
+        self, tmp_path, server_kind, item_id, payload, expected_suffix
     ):
-        """Pin exact layout for local hashes, ignoring server hints even when stale."""
+        """Pin exact layout for local hashes, ignoring server hints."""
         from media_preview_generator.servers.plex import PlexServer
 
         media = tmp_path / "Test (2024).mkv"
         media.write_bytes(payload)
-        metadata = (("deadbeef" * 5, str(media)),) if prefetched else ()
-        bundle = _bundle(str(media), prefetched=metadata)
+        bundle = _bundle(str(media))
         server = None
         if server_kind == "plex":
             server = MagicMock(spec=PlexServer)
@@ -233,45 +230,3 @@ class TestJellyfinTrickplayAdapterPathLayout:
         adapter = JellyfinTrickplayAdapter(width=320, frame_interval=10)
         paths = adapter.compute_output_paths(_bundle("/d/x.mkv"), server=None, item_id=None)
         assert paths[0].as_posix() == "/d/x.trickplay/320 - 10x10/0.jpg"
-
-
-# ---------------------------------------------------------------------------
-# Cross-adapter parametrized matrix — single concentrated contract pin
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "adapter_factory,canonical_path,item_id,server_factory,expected_path",
-    [
-        # (factory, canonical, item_id, server, expected)
-        pytest.param(
-            lambda: EmbyBifAdapter(width=320, frame_interval=10),
-            "/data/movies/Foo.mkv",
-            None,
-            lambda: None,
-            "/data/movies/Foo-320-10.bif",
-            id="emby_basic",
-        ),
-        pytest.param(
-            lambda: JellyfinTrickplayAdapter(width=320, frame_interval=10),
-            "/data/movies/Foo.mkv",
-            "jelly-id",
-            lambda: None,
-            "/data/movies/Foo.trickplay/320 - 10x10/0.jpg",
-            id="jellyfin_basic",
-        ),
-    ],
-)
-def test_pure_adapter_path_matrix(adapter_factory, canonical_path, item_id, server_factory, expected_path):
-    """Single parametrized sweep over the pure (no-server-metadata) adapters'
-    layouts. The Plex variant lives in TestPlexBundleAdapterPathLayout
-    above because it requires PlexServer mocking.
-
-    Catches a class of bugs where adding a NEW adapter accidentally
-    breaks the path layout of an existing one (same dispatch path).
-    """
-    adapter = adapter_factory()
-    bundle = _bundle(canonical_path)
-    paths = adapter.compute_output_paths(bundle, server=server_factory(), item_id=item_id)
-    assert len(paths) == 1
-    assert str(paths[0]) == expected_path, f"{adapter.name} path layout drift: {paths[0]}"

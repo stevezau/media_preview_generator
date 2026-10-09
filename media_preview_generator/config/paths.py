@@ -223,8 +223,7 @@ def detect_unhealthy_media_mounts(path_mappings: list[dict[str, Any]]) -> list[d
     - ``"empty"`` — the directory exists but has no entries. This is the
       stale-bind-mount signature: the container captured the empty local
       underlay before the network share was mounted, so every media read
-      fails as "missing on disk" even though the host sees the files
-      (job ``be0151d2``; see project_stale_bindmount_missing_on_disk).
+      fails as "missing on disk" even though the host sees the files.
 
     A legitimately-empty disk would also be flagged, but this is an
     advisory signal (not a hard error), and an empty *media* mount is
@@ -278,16 +277,18 @@ def path_to_canonical_local(path: str, path_mappings: list[dict[str, Any]]) -> s
     if not path or not path_mappings:
         return path or ""
     path = (path or "").strip().replace("\\", "/")
+    # _path_matches_prefix compares in NFC, so slice the NFC form: an NFD path has a different length.
+    nfc_path = unicodedata.normalize("NFC", path)
     for m in path_mappings:
         plex_prefix = _normalize_prefix(m.get("remote_prefix") or m.get("plex_prefix") or "")
         local_prefix = _normalize_prefix(m.get("local_prefix") or "")
         if plex_prefix and _path_matches_prefix(path, plex_prefix):
-            rest = path[len(plex_prefix) :].lstrip("/")
+            rest = nfc_path[len(plex_prefix) :].lstrip("/")
             return f"{local_prefix.rstrip('/')}/{rest}" if rest else (local_prefix or "/")
         for wp in m.get("webhook_prefixes") or []:
             wp = _normalize_prefix(wp)
             if wp and _path_matches_prefix(path, wp):
-                rest = path[len(wp) :].lstrip("/")
+                rest = nfc_path[len(wp) :].lstrip("/")
                 return f"{local_prefix.rstrip('/')}/{rest}" if rest else (local_prefix or "/")
     return path
 
@@ -319,6 +320,7 @@ def expand_path_mapping_candidates(path: str, path_mappings: list[dict[str, Any]
 
     candidates = [cleaned_path]
     seen = {cleaned_path}
+    nfc_path = unicodedata.normalize("NFC", cleaned_path)
 
     def _add_mapped_candidate(source_prefix: str, target_prefix: str) -> None:
         source = _normalize_prefix(source_prefix)
@@ -327,7 +329,7 @@ def expand_path_mapping_candidates(path: str, path_mappings: list[dict[str, Any]
             return
         if not _path_matches_prefix(cleaned_path, source):
             return
-        rest = cleaned_path[len(source) :].lstrip("/")
+        rest = nfc_path[len(source) :].lstrip("/")
         candidate = f"{target.rstrip('/')}/{rest}" if rest else (target or "/")
         if candidate not in seen:
             seen.add(candidate)
@@ -375,7 +377,7 @@ def local_path_to_webhook_aliases(path: str, path_mappings: list[dict[str, Any]]
     """
     if not path or not path_mappings:
         return []
-    path = (path or "").strip().replace("\\", "/")
+    path = unicodedata.normalize("NFC", (path or "").strip().replace("\\", "/"))
     out = []
     for m in path_mappings:
         local_prefix = _normalize_prefix(m.get("local_prefix") or "")

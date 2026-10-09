@@ -127,6 +127,7 @@ class TestWorkerCardLogs:
         button = authed_page.get_by_role("button", name="View logs for job abcd1234-0000-4000-8000-000000000001")
         expect(button).to_be_visible()
         expect(button).to_have_attribute("title", "Job logs")
+        # evaluate() calls a function-valued result, which pushes one spurious entry; clear it before the click.
         authed_page.evaluate("window.__opened.length = 0")
         button.click()
         assert authed_page.evaluate("window.__opened") == [["abcd1234-0000-4000-8000-000000000001", "logs"]]
@@ -141,19 +142,18 @@ class TestLongHardwareNames:
     def test_long_gpu_name_stays_on_one_line_with_the_full_name_in_title(self, authed_page: Page, app_url: str) -> None:
         mock_dashboard_defaults(authed_page)
         groups = mock_worker_groups(authed_page)
-        gpu = groups["state"]["groups"][1]
-        gpu["name"] = "GPU video"
+        groups["state"]["groups"][1]["name"] = "GPU video"
         groups["state"]["hardware"][0]["name"] = LONG_DEVICE
         authed_page.set_viewport_size({"width": 1440, "height": 900})
         authed_page.goto(app_url + "/")
         # The System card line is read-only and summarises counts only, so the device name lives on the member row.
         expect(authed_page.locator('[data-system-group="gpu"] .pool-lbl small')).to_have_text("1 GPU")
-        for subtitle in [authed_page.locator('[data-member-block="gpu:m1"] .devname .nm')]:
-            expect(subtitle).to_have_text(LONG_DEVICE)
-            expect(subtitle).to_have_attribute("title", LONG_DEVICE)
-            line_height = subtitle.evaluate("e => parseFloat(getComputedStyle(e).lineHeight) || e.scrollHeight")
-            assert subtitle.evaluate("e => e.getBoundingClientRect().height") <= line_height + 1
-            assert subtitle.evaluate("e => getComputedStyle(e).textOverflow") == "ellipsis"
+        subtitle = authed_page.locator('[data-member-block="gpu:m1"] .devname .nm')
+        expect(subtitle).to_have_text(LONG_DEVICE)
+        expect(subtitle).to_have_attribute("title", LONG_DEVICE)
+        line_height = subtitle.evaluate("e => parseFloat(getComputedStyle(e).lineHeight) || e.scrollHeight")
+        assert subtitle.evaluate("e => e.getBoundingClientRect().height") <= line_height + 1
+        assert subtitle.evaluate("e => getComputedStyle(e).textOverflow") == "ellipsis"
 
     def test_long_device_name_does_not_widen_the_page_when_viewport_is_phone_sized(
         self, authed_page: Page, app_url: str
@@ -266,7 +266,8 @@ class TestQueuedProgressText:
         expect(line).to_have_text(short)
         expect(line).to_have_attribute("title", message)
         expect(line).to_have_attribute("aria-label", message)
-        assert "Queued" not in cell.inner_text().replace(message, "") or short.startswith("Queued")
+        if not short.startswith("Queued"):
+            expect(cell).not_to_contain_text("Queued")
         style = line.evaluate(
             "e => { const s = getComputedStyle(e); return [s.whiteSpace, s.textOverflow, s.overflow]; }"
         )

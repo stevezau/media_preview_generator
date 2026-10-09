@@ -128,6 +128,7 @@
         // Chain off the previous save (catch to break error propagation)
         // so we serialize per-container and never lose a later edit to an
         // earlier failed save.
+        const saveId = (state.saveCounter = (state.saveCounter || 0) + 1);
         state.savePromise = state.savePromise.catch(() => {}).then(async () => {
             _render(state, 'saving');
             try {
@@ -139,9 +140,8 @@
                 // Fade to idle after a moment so the indicator doesn't
                 // stay "just saved" forever.
                 setTimeout(() => {
-                    // Only fade if still in the saved state (i.e. no
-                    // newer save has kicked in since).
-                    if (state.lastError === null) _render(state, 'idle');
+                    // Only fade if no newer save has started since.
+                    if (state.saveCounter === saveId && state.lastError === null) _render(state, 'idle');
                 }, SAVED_FADE_MS);
             } catch (err) {
                 console.error('Auto-save failed:', err);

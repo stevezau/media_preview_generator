@@ -1,8 +1,7 @@
 """Tests for ``JobManager.upsert_retry_chain_job`` — the method that
 MUTATES the originating dispatch Job into chain mode.
 
-After the chain rewrite (PLAN at
-``.claude/plans/check-the-last-30-40-binary-engelbart.md``):
+Chain design:
 - There is NO separate ``retry-<sha256(path)[:16]>`` Job.
 - The originating dispatch's Job (the worker-pool Job that ran the
   initial FFmpeg + Plex/Emby publish) IS the chain Job. Its UUID is
@@ -686,13 +685,11 @@ class TestPersistenceAndRestart:
         config) MUST survive a restart so the modal Attempts dropdown
         can show history.
 
-        Pre-fix: non-terminal chains were marked FAILED on load with
-        'Retry interrupted by container restart'. The user then had
-        to manually re-trigger the source webhook to resume. That
-        was hostile UX — a chain mid-backoff when DEV_RELOAD reloaded
-        the container died for no reason the user could control.
+        Non-terminal chains must not be marked FAILED on load: a chain
+        mid-backoff when the container restarts should resume, not die for
+        a reason the user can't control.
 
-        Post-fix: chains in PENDING (waiting on backoff) keep their
+        Chains in PENDING (waiting on backoff) keep their
         PENDING state + retry_eta, and the JobManager collects them
         into ``interrupted_retry_chains()`` so the boot reconciler
         can check whether a living retry child Job survived. Retry
@@ -1104,8 +1101,7 @@ class TestJobLevelRetryContract:
     The contract:
       1. A chain head with multiple pending paths produces ONE chain
          row, not N (the per-file model's collapse onto the dispatcher
-         created 191 attempt-children for job 756255aa from 61 distinct
-         paths).
+         once created 191 attempt-children from 61 distinct paths).
       2. The chain head supports being called with ``canonical_path=""``
          (the job-level caller passes no per-file scope) without
          clobbering the title or breaking state machine transitions.
@@ -1147,7 +1143,7 @@ class TestJobLevelRetryContract:
 
     def test_empty_canonical_path_preserves_batch_title(self, jm):
         """When the caller is the job-level retry path (empty
-        canonical_path), the title heuristic at jobs.py:1273-1300 MUST
+        canonical_path), the title heuristic in the job manager MUST
         short-circuit. Without the guard, basename="333 files" would
         get compared against an extension-bearing existing title and
         could be incorrectly swapped.

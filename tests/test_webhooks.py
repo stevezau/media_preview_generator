@@ -643,9 +643,8 @@ def test_webhook_clear_history(authed_client):
 @patch("media_preview_generator.web.webhooks.threading.Timer")
 def test_webhook_debounce(mock_timer_cls, client):
     """Two rapid webhooks for same source should cancel the first timer."""
-    mock_timer = MagicMock()
-    mock_timer.daemon = True
-    mock_timer_cls.return_value = mock_timer
+    first_timer, second_timer = MagicMock(), MagicMock()
+    mock_timer_cls.side_effect = [first_timer, second_timer]
 
     payload = {
         "eventType": "Download",
@@ -660,9 +659,8 @@ def test_webhook_debounce(mock_timer_cls, client):
     payload["movieFile"]["path"] = "/movies/Movie B/Movie B.mkv"
     client.post("/api/webhooks/radarr", json=payload, headers=_auth_headers())
 
-    # The first timer should have been cancelled
-    assert mock_timer.cancel.called
-    # Timer should have been created twice
+    first_timer.cancel.assert_called_once()
+    second_timer.cancel.assert_not_called()
     assert mock_timer_cls.call_count == 2
 
 
@@ -1372,10 +1370,10 @@ def test_create_vendor_webhook_job_does_NOT_dedup_across_sources(mock_start, app
 
 
 # ---------------------------------------------------------------------------
-# TEST_AUDIT P0.7 — title fallback ACTUALLY WIRED IN
+# Title fallback actually wired in
 #
 # The unit test ``test_clean_title_from_basename`` (above) only proves the
-# helper is correct in isolation. The bug class P0.7 protects against is:
+# helper is correct in isolation. The bug class protected against here is:
 # helper exists, but ``create_vendor_webhook_job`` doesn't actually call
 # it. A regression at the call site (e.g. dropping the ``or`` fallback,
 # passing the raw basename instead, or hard-coding "Webhook job") would
@@ -1836,13 +1834,10 @@ class TestWebhookHistoryDiskRoundTrip:
     """
 
     def test_add_entry_writes_file_and_load_rehydrates_deque(self, tmp_path, monkeypatch):
-        import importlib
-
         import media_preview_generator.web.webhooks as wh
 
-        # Point the persistence at a fresh tmp config dir for isolation.
+        # Point the persistence at a fresh tmp config dir for isolation (the path is read per call).
         monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
-        importlib.reload(wh)
 
         wh._webhook_history.clear()
         wh._add_history_entry("radarr", "Download", "Movie A", "queued")
@@ -1880,12 +1875,9 @@ class TestWebhookHistoryDiskRoundTrip:
         truncated on load. Otherwise an ever-growing webhook_history.json
         would slowly leak memory until the deque was overwritten.
         """
-        import importlib
-
         import media_preview_generator.web.webhooks as wh
 
         monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
-        importlib.reload(wh)
 
         oversized = [
             {
@@ -1917,12 +1909,9 @@ class TestWebhookHistoryDiskRoundTrip:
     def test_load_silently_no_ops_when_file_missing(self, tmp_path, monkeypatch):
         """Fresh install: no webhook_history.json exists → load must
         not raise and the deque must remain empty."""
-        import importlib
-
         import media_preview_generator.web.webhooks as wh
 
         monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
-        importlib.reload(wh)
 
         wh._webhook_history.clear()
         wh._load_history_from_disk()  # must not raise
@@ -1937,7 +1926,7 @@ _SONARR_SERIES = {
     "id": 412,
     "title": "Accused: Guilty or Innocent?",
     "titleSlug": "accused-guilty-or-innocent",
-    "path": "/data_16tb3/TV Shows/Accused Guilty or Innocent (2020) {tvdb-390742}",
+    "path": "/disk3/TV Shows/Accused Guilty or Innocent (2020) {tvdb-390742}",
     "tvdbId": 390742,
     "tvMazeId": 51004,
     "tmdbId": 112840,
@@ -2204,11 +2193,11 @@ class TestSonarrImportComplete:
 
     def test_import_complete_paths_are_normalised_like_a_per_file_event(self, client):
         payload = _sonarr_import_complete_payload([3])
-        payload["episodeFiles"][0]["path"] = "/data_16tb3/TV Shows/./Accused//Season 04/../Season 04/E03.mkv"
+        payload["episodeFiles"][0]["path"] = "/disk3/TV Shows/./Accused//Season 04/../Season 04/E03.mkv"
 
         client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
 
-        assert self._batch_paths() == {"/data_16tb3/TV Shows/Accused/Season 04/E03.mkv"}
+        assert self._batch_paths() == {"/disk3/TV Shows/Accused/Season 04/E03.mkv"}
 
     @pytest.mark.parametrize(
         "episode_files",
@@ -2314,3 +2303,81 @@ class TestWebhookBatchMaxWait:
         assert second["job_id"] != first["job_id"]
         assert second["file_paths"] == {"/tv/Show/S01E02.mkv"}
         assert timers == [120, 120]
+
+
+class TestUntrustedInputHandling:
+    """Receivers answer hostile input with 401/400, never a 500."""
+
+    @pytest.mark.parametrize("header", ["X-Auth-Token", "Authorization"])
+    def test_non_ascii_token_gets_401_not_500(self, client, app, header):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        with app.app_context():
+            get_settings_manager().set("webhook_secret", "the-real-secret")
+        value = "café-token" if header == "X-Auth-Token" else "Bearer café-token"
+
+        resp = client.post("/api/webhooks/radarr", json={"eventType": "Test"}, headers={header: value})
+
+        assert resp.status_code == 401
+
+    def test_non_ascii_query_token_gets_401_not_500(self, client, app):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        with app.app_context():
+            get_settings_manager().set("webhook_secret", "the-real-secret")
+
+        resp = client.post("/api/webhooks/radarr?token=%C3%A9", json={"eventType": "Test"})
+
+        assert resp.status_code == 401
+
+    @pytest.mark.parametrize("path", ["radarr", "sonarr", "sportarr", "custom"])
+    @pytest.mark.parametrize("body", [[1], "text", 5])
+    def test_non_object_json_body_gets_400(self, client, path, body):
+        resp = client.post(f"/api/webhooks/{path}", json=body, headers=_auth_headers())
+
+        assert resp.status_code == 400
+        assert resp.get_json()["success"] is False
+
+    def test_failed_job_creation_does_not_block_the_senders_retry(self, app):
+        import media_preview_generator.web.webhooks as wh
+
+        with patch.object(wh, "get_job_manager") as get_jm:
+            get_jm.return_value.create_job.side_effect = RuntimeError("db down")
+            with pytest.raises(RuntimeError):
+                wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+
+        assert wh._recent_dispatches == {}
+        assert not wh._pending_batches
+
+    def test_failure_resolving_server_context_does_not_block_the_senders_retry(self, app):
+        import media_preview_generator.web.webhooks as wh
+
+        with patch.object(wh, "_resolve_webhook_server_context", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+
+        assert wh._recent_dispatches == {}
+
+    def test_duplicate_download_is_reported_as_duplicate_not_missing_path(self, client):
+        import media_preview_generator.web.webhooks as wh
+
+        payload = {"eventType": "Download", "movie": {"title": "Film"}, "movieFile": {"path": "/movies/Film.mkv"}}
+        with patch.object(wh, "_schedule_webhook_job", return_value=False):
+            resp = client.post("/api/webhooks/radarr", json=payload, headers=_auth_headers())
+
+        assert resp.status_code == 200
+        assert "already queued" in resp.get_json()["message"]
+        assert not any(e["status"] == "ignored_no_path" for e in wh._webhook_history)
+
+    def test_payload_without_path_is_reported_as_missing_path(self, client):
+        import media_preview_generator.web.webhooks as wh
+
+        resp = client.post(
+            "/api/webhooks/radarr",
+            json={"eventType": "Download", "movie": {"title": "Film"}},
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 200
+        assert "no file path" in resp.get_json()["message"]
+        assert any(e["status"] == "ignored_no_path" for e in wh._webhook_history)

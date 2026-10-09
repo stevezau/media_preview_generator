@@ -84,7 +84,7 @@ import pytest
 if shutil.which("ffmpeg") is None:
     pytest.skip("ffmpeg binary not available on PATH", allow_module_level=True)
 
-PIL = pytest.importorskip("PIL", reason="Pillow required for pixel comparison")
+pytest.importorskip("PIL", reason="Pillow required for pixel comparison")
 np = pytest.importorskip("numpy", reason="numpy required for PSNR computation")
 
 from PIL import Image  # noqa: E402

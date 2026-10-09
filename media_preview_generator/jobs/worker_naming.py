@@ -66,9 +66,7 @@ def gpu_worker_label(seq: int, device_label: str) -> str:
     """Stable per-job label for a GPU worker row.
 
     ``seq`` is the per-job GPU-worker counter (1..N), not a global identifier.
-    Matches the legacy WorkerPool's ``f"GPU Worker {n} ({device_name})"``
-    format that pre-dates the multi-server refactor — keeping it stable means
-    long-time users don't see the labels shift around.
+    Format ``"GPU Worker {n} ({device_name})"`` — kept stable so users don't see the labels shift around.
     """
     return f"GPU Worker {int(seq)} ({device_label})"
 

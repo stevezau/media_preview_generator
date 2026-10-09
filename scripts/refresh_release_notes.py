@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -36,6 +37,10 @@ from pathlib import Path
 REPO = "stevezau/media_preview_generator"
 LIMIT = 30  # plenty of room for upgraders coming from very old versions
 OUT_PATH = Path(__file__).resolve().parent.parent / "media_preview_generator" / "release_notes.json"
+
+
+# App releases are bare semver tags; plugin and agent releases use their own prefixes and version streams.
+APP_TAG = re.compile(r"^v?\d+\.\d+\.\d+$")
 
 
 def fetch_releases() -> list[dict]:
@@ -62,12 +67,14 @@ def fetch_releases() -> list[dict]:
 def normalize(raw: list[dict]) -> list[dict]:
     """Project the GitHub Releases payload into the runtime shape.
 
-    Drops drafts and the chunk of GH fields the runtime doesn't render
+    Drops drafts, plugin/agent releases (plugin-v*, emby-plugin-v*, marker-agent-v*) and the chunk of GH fields the runtime doesn't render
     (author, assets, mentions, etc.) so the bundled file stays small.
     """
     out: list[dict] = []
     for r in raw:
         if r.get("draft"):
+            continue
+        if not APP_TAG.match(r.get("tag_name") or ""):
             continue
         out.append(
             {

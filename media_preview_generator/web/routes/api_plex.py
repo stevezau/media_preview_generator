@@ -6,7 +6,7 @@ from loguru import logger
 
 from ..auth import setup_or_auth_required
 from . import api
-from ._helpers import _param_to_bool
+from ._helpers import _param_to_bool, resolve_plex_credentials
 
 PLEX_HEADERS = {
     "X-Plex-Product": "Plex Preview Generator",
@@ -208,10 +208,13 @@ def get_plex_servers():
         return jsonify({"error": "Failed to get servers", "servers": []}), 500
 
 
-@api.route("/plex/libraries")
+@api.route("/plex/libraries", methods=["GET", "POST"])
 @setup_or_auth_required
 def get_plex_libraries():
-    """Get libraries from a Plex server."""
+    """Get libraries from a Plex server.
+
+    Credentials come from the JSON body (POST, keeps the token out of URLs and access logs) or the query string (GET).
+    """
     import requests
 
     from ..settings_manager import get_settings_manager
@@ -219,9 +222,9 @@ def get_plex_libraries():
 
     settings = get_settings_manager()
 
-    plex_url = request.args.get("url") or settings.plex_url
-    plex_token = request.args.get("token") or settings.plex_token
-    verify_ssl = _param_to_bool(request.args.get("verify_ssl"), settings.plex_verify_ssl)
+    params = (request.get_json(silent=True) or {}) if request.method == "POST" else request.args
+    plex_url, plex_token = resolve_plex_credentials(params.get("url"), params.get("token"), settings)
+    verify_ssl = _param_to_bool(params.get("verify_ssl"), settings.plex_verify_ssl)
 
     if not plex_url or not plex_token:
         return jsonify({"error": "Plex URL and token required", "libraries": []}), 400
@@ -325,8 +328,7 @@ def test_plex_connection():
     settings = get_settings_manager()
     data = request.get_json() or {}
 
-    plex_url = data.get("url") or settings.plex_url
-    plex_token = data.get("token") or settings.plex_token
+    plex_url, plex_token = resolve_plex_credentials(data.get("url"), data.get("token"), settings)
     verify_ssl = _param_to_bool(data.get("verify_ssl"), settings.plex_verify_ssl)
 
     if not plex_url or not plex_token:

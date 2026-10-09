@@ -184,6 +184,10 @@ def _diagnose_vulkan_environment() -> dict:
     }
 
 
+# The loader-rejected diagnosis is polled every minute; log it once per state change.
+_loader_rejected_logged = False
+
+
 def _get_vulkan_info() -> dict:
     """Return Vulkan device info and warn when DV5 thumbnails will have the wrong colours.
 
@@ -218,8 +222,10 @@ def _get_vulkan_info() -> dict:
     device = info.device
     is_software = info.is_software
 
+    global _loader_rejected_logged
     result: dict = {"device": device}
     if not is_software:
+        _loader_rejected_logged = False
         logger.debug("Vulkan warning: device={!r} is_software=False; no DV5 warning will be shown.", device)
         return result
 
@@ -243,7 +249,7 @@ def _get_vulkan_info() -> dict:
     dri_render_nodes = glob.glob("/dev/dri/renderD*")
     dri_mapped = bool(dri_render_nodes)
 
-    logger.info(
+    logger.debug(
         "Vulkan warning inputs: device={!r} vendors={} has_nvidia={} has_mesa={} dri_render_nodes={}",
         device,
         sorted(vendors),
@@ -252,6 +258,7 @@ def _get_vulkan_info() -> dict:
         dri_render_nodes or "[]",
     )
 
+    loader_rejected = False
     nvidia_name = _vendor_display_name(gpus, "NVIDIA") if has_nvidia else ""
     # Prefer AMD for the Mesa label when both AMD and Intel are present
     # (AMD is more likely to be the user's primary display GPU); either
@@ -296,7 +303,7 @@ def _get_vulkan_info() -> dict:
             # nvidia-container-toolkit didn't inject the Vulkan ICD at all.
             # This is ~80% of real pure-NVIDIA reports.
             current_caps = diag["nvidia_capabilities"] or "(unset)"
-            logger.info(
+            logger.debug(
                 "Vulkan warning: selected Case A1 (missing 'graphics' capability) for {!r}; NVIDIA_DRIVER_CAPABILITIES={!r}",
                 nvidia_name,
                 current_caps,
@@ -342,7 +349,7 @@ def _get_vulkan_info() -> dict:
             # fixed in 580 (nvidia-container-toolkit#1041), or a CDI
             # manifest bug (#1559).
             driver_version = diag["nvidia_driver_version"]
-            logger.info(
+            logger.debug(
                 "Vulkan warning: selected Case A2 (graphics cap set but nvidia_icd.json missing) for {!r}; driver_version={!r}",
                 nvidia_name,
                 driver_version,
@@ -388,7 +395,7 @@ def _get_vulkan_info() -> dict:
         elif not diag["libnvidia_glvkspirv_found"]:
             # Case A3: ICD JSON exists but the supporting library is
             # missing. Almost always the CDI manifest bug (#1559).
-            logger.info(
+            logger.debug(
                 "Vulkan warning: selected Case A3 (nvidia_icd.json at {} but libnvidia-glvkspirv not found) for {!r}",
                 diag["nvidia_icd_json_path"],
                 nvidia_name,
@@ -429,15 +436,17 @@ def _get_vulkan_info() -> dict:
             # Case A4: everything on the checklist is correct but the
             # loader still rejected the ICD. This is the "please file
             # an issue with diagnostics" path.
-            logger.warning(
-                "Dolby Vision Profile 5 warning: your NVIDIA driver looks correctly installed in this "
-                "container ({!r}, all toolkit checks pass), but the Vulkan loader still rejected it. "
-                "This is rare — please open a GitHub issue and include the diagnostic bundle from "
-                "the 'Copy diagnostic bundle' button on the Settings page (or GET /api/system/vulkan/debug). "
-                "Until then, Dolby Vision Profile 5 thumbnails have the wrong colours (no tone mapping); "
-                "all other thumbnails are unaffected.",
-                nvidia_name,
-            )
+            loader_rejected = True
+            if not _loader_rejected_logged:
+                logger.warning(
+                    "Dolby Vision Profile 5 warning: your NVIDIA driver looks correctly installed in this "
+                    "container ({!r}, all toolkit checks pass), but the Vulkan loader still rejected it. "
+                    "This is rare — please open a GitHub issue and include the diagnostic bundle from "
+                    "the 'Copy diagnostic bundle' button on the Settings page (or GET /api/system/vulkan/debug). "
+                    "Until then, Dolby Vision Profile 5 thumbnails have the wrong colours (no tone mapping); "
+                    "all other thumbnails are unaffected.",
+                    nvidia_name,
+                )
             body = (
                 f"<strong>Your GPU:</strong> {nvidia_name_esc}"
                 "<br><br>"
@@ -460,7 +469,7 @@ def _get_vulkan_info() -> dict:
     elif has_nvidia and has_mesa_vendor and not dri_mapped:
         # NVIDIA + Intel/AMD but /dev/dri not forwarded: mounting the
         # render node lets libplacebo use Mesa alongside NVIDIA decoding.
-        logger.info(
+        logger.debug(
             "Vulkan warning: selected Case B (NVIDIA + Mesa, /dev/dri not mapped) for NVIDIA={!r} Mesa={!r}",
             nvidia_name,
             mesa_name,
@@ -492,7 +501,7 @@ def _get_vulkan_info() -> dict:
         )
     elif has_mesa_vendor and not has_nvidia and not dri_mapped:
         # Intel/AMD only, no render node: straight mount fix.
-        logger.info("Vulkan warning: selected Case C (Mesa only, /dev/dri not mapped) for {!r}", mesa_name)
+        logger.debug("Vulkan warning: selected Case C (Mesa only, /dev/dri not mapped) for {!r}", mesa_name)
         body = (
             f"<strong>Your GPU:</strong> {html_escape.escape(mesa_name)}"
             "<br><br>"
@@ -515,7 +524,7 @@ def _get_vulkan_info() -> dict:
     elif has_mesa_vendor and dri_mapped:
         # Intel/AMD (with or without NVIDIA) already has /dev/dri but
         # rendering still fell back to software. Usually host-side.
-        logger.info(
+        logger.debug(
             "Vulkan warning: selected Case D (Mesa with /dev/dri mapped but rendering still fell back) for {!r}; dri_nodes={}",
             mesa_name,
             dri_render_nodes,
@@ -542,7 +551,7 @@ def _get_vulkan_info() -> dict:
         )
     else:
         # No GPU detected at all.
-        logger.info("Vulkan warning: selected Case E (no GPU detected)")
+        logger.debug("Vulkan warning: selected Case E (no GPU detected)")
         body = (
             "<strong>No GPU detected in this container.</strong>"
             "<br><br>"
@@ -558,6 +567,7 @@ def _get_vulkan_info() -> dict:
             "</ul>"
         )
 
+    _loader_rejected_logged = loader_rejected
     result["warning"] = header + body + footer
     return result
 

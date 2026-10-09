@@ -20,9 +20,10 @@ import pytest
 
 from media_preview_generator.markers.credits import textdet_helper as th
 from media_preview_generator.markers.credits.textdet_helper import TextDetState
+from tests.markers.fakes import infos_in, warnings_in
 
 FAKE = Path(__file__).with_name("fake_textdet_helper.py")
-HARDWARE = SimpleNamespace(device="Quadro P5000 (NVIDIA)", is_software=False)
+HARDWARE = SimpleNamespace(device="NVIDIA GPU (NVIDIA)", is_software=False)
 SOFTWARE = SimpleNamespace(device="llvmpipe (LLVM 19.1.1, 256 bits)", is_software=True)
 NO_VULKAN = SimpleNamespace(device=None, is_software=False)
 PLANES = np.stack([np.zeros((180, 320), np.uint8), np.full((180, 320), 255, np.uint8)])
@@ -118,14 +119,6 @@ class Clock:
 @pytest.fixture
 def clock(monkeypatch):
     return Clock(monkeypatch)
-
-
-def warnings_in(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-
-
-def infos_in(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
 
 
 class InFlight:
@@ -260,7 +253,7 @@ class TestRouting:
         assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:1") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:1", "webgpu", True)]
         assert env.pool.backend_of("NVIDIA", "cuda:1") == "webgpu"
-        # Controller note N1: only the environment puts a helper on its own card, so the two must differ.
+        # Only the environment puts a helper on its own card, so the two must differ.
         assert [k["env"]["DRI_PRIME"] for k in env.started] == ["pci-0000_02_00_0", "pci-0000_65_00_0"]
 
 
@@ -905,7 +898,7 @@ class TestCpuHelpers:
         assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         assert len(env.cpu_starts()) == 2
 
-    def test_a_raise_before_a_busy_helper_is_returned_keeps_it(self, envs, monkeypatch, release):
+    def test_lowering_then_raising_the_count_while_both_are_busy_keeps_both_helpers(self, envs, monkeypatch, release):
         env = envs(modes={"cpu": "held"}, cpu_workers=2)
         flight = InFlight(monkeypatch, wanted=2)
         running = Concurrent(cpu_request(env), threads=2)
@@ -984,7 +977,7 @@ class TestCpuHelpers:
 
 
 class TestGpuPinning:
-    """Only the helper's environment puts it on a physical GPU (controller note N1, measured 2026-09-16)."""
+    """Only the helper's environment puts it on a physical GPU."""
 
     def test_an_nvidia_worker_without_a_known_address_is_not_pinned(self, envs, monkeypatch):
         env = envs()
@@ -1083,7 +1076,7 @@ class FakeClock:
     ("gpu_counts", "gpu_shift", "gpu_s", "use_gpu", "same"),
     [
         ([1, 0, 3], 0, 0.005, True, True),
-        # A GPU worker's work runs on its GPU (the owner's worker model): a slower GPU is still used.
+        # A GPU worker's work runs on its GPU: a slower GPU is still used.
         ([1, 0, 3], 0, 0.030, True, True),
         ([1, 1, 3], 0, 0.005, False, False),
         # The same number of boxes in other places. Rule J version 3 reads row[3], so this backend answers
@@ -1198,7 +1191,7 @@ class TestAvailability:
         )
 
     def test_a_missing_recognition_model_is_absent(self, monkeypatch):
-        # The card at a credits start is read with it (spec §5.4, "Prose cards"): without it credit text can't answer
+        # The card at a credits start is read with it: without it credit text can't answer
         # as the image does, so it is as unavailable as without the detection model.
         self.rec_model.unlink()
         self._run(monkeypatch, AssertionError("must not run"))
@@ -1669,7 +1662,7 @@ class TestHelperProcessBackendChoice:
 
 
 class TestShutdown:
-    """close_all() is the end of the pool: nothing it kills counts as that device failing (I1, I2)."""
+    """close_all() is the end of the pool: nothing it kills counts as that device failing."""
 
     def test_close_all_racing_an_in_flight_request_never_demotes_the_device(self, envs, loguru_caplog):
         env = envs(modes={"webgpu": "hang-on-request"}, request_timeout_s=30.0)
@@ -1783,15 +1776,11 @@ def test_a_second_worker_on_one_device_never_acts_on_a_stale_gpu_verdict(envs, m
     assert errors == [] and results == [ANSWER, ANSWER]
     gpu_starts = [spec for spec in env.specs if spec.backend == "webgpu"]
     assert env.specs[0] is gpu_starts[0] and gpu_starts[0].selftest is True
-    if mode == "selftest-cpu":
-        # The first's self-test gave the device its CPU verdict: the second never starts a GPU helper.
-        assert gpu_starts == [env.specs[0]]
-        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
-    else:
-        # The first's self-test passed and its request then failed: the second, asking inside the back-off that
-        # failure started, is read on the CPU rather than starting a second GPU helper.
-        assert gpu_starts == [env.specs[0]]
-        assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
+    # selftest-cpu: the first's self-test gave the device its CPU verdict. crash-on-request: the first's self-test
+    # passed and its request then failed, so the second asks inside the back-off that failure started. Either way the
+    # second is read on the CPU rather than starting a second GPU helper.
+    assert gpu_starts == [env.specs[0]]
+    assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
 
 
 def test_a_helper_that_goes_idle_on_every_request_is_not_restarted_forever(envs):
@@ -1858,7 +1847,7 @@ def test_reconciling_the_cpu_helpers_reaches_the_apps_pool(monkeypatch):
 
 
 class TestProtocol:
-    """The wire between helper and parent carries each frame's own boxes (spec §5.4 rows), not just how many."""
+    """The wire between helper and parent carries each frame's own boxes, not just how many."""
 
     PLANES = np.stack([np.zeros((2, 3), np.uint8), np.full((2, 3), 9, np.uint8)])
     BOXES = [((1, 2, 3, 4), (5, 6, 7, 8)), ()]
@@ -1966,7 +1955,7 @@ class TestProtocol:
 
 class TestReadingACard:
     """``read_text``: a card at a credits start is read by the same helper, on the same device, with the same
-    fallback, as its boxes are found (spec §5.4, "Prose cards")."""
+    fallback, as its boxes are found."""
 
     def test_a_gpu_workers_card_is_read_by_its_gpu_helper(self, envs):
         env = envs()

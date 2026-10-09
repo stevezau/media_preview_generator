@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+import time
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
@@ -213,3 +215,118 @@ class FakePlexItems:
 
     def served(self, item_id):
         return [_served(m) for m in self.shown.get(item_id, [])]
+
+
+# Every source in the order the decision rules are tested with (chapters first, a server's own markers last).
+SOURCE_ORDER = (
+    "chapters",
+    "theintrodb",
+    "introdb",
+    "skipdb",
+    "season_audio",
+    "season_audio_previous",
+    "credits_text",
+    "server_markers",
+    "server_markers_imported",
+)
+
+
+def warnings_in(caplog) -> list[str]:
+    """The WARNING messages ``caplog`` captured."""
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+
+def infos_in(caplog) -> list[str]:
+    """The INFO messages ``caplog`` captured."""
+    return [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+
+
+# --- Helpers for tests that run a real child process ---
+
+
+def process_state(pid: int) -> str:
+    """The kernel's one-letter state of a process (``R``, ``S``, ``T`` for stopped, ``Z``...)."""
+    return pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split(" ", 1)[0]
+
+
+def read_count(path: pathlib.Path) -> int:
+    """The integer a child process keeps rewriting in ``path`` (0 before it has written one)."""
+    try:
+        return int(path.read_text() or 0)
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def poll_until(condition, *, within_s: float = 5.0) -> bool:
+    """Poll ``condition`` until it holds or ``within_s`` passes; returns whether it held."""
+    deadline = time.monotonic() + within_s
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return condition()
+
+
+def wait_for(predicate, timeout: float = 10.0, poll: float = 0.01) -> bool:
+    """Poll ``predicate`` every ``poll`` seconds until it is true or ``timeout`` passes; returns whether it was."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll)
+    return False
+
+
+class SettableClock:
+    """A callable clock a test moves by assigning ``.now``."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+# --- Inspector editor API builders (shared by test_api_markers_edit and test_api_markers_publish_fallback) ---
+
+EDITOR_DURATION_MS = 1_320_000
+EDITOR_PLEX_TOKEN = "plex-token-SECRET-1234"
+
+
+def editor_server(sid, stype, media, *, markers=True, extra_markers=None):
+    """A ``media_servers`` settings entry over ``media/tv``, with Intro & Credits on (or off with ``markers=False``)."""
+    block = {"enabled": markers, "library_ids": None, **(extra_markers or {})}
+    if stype == "plex":
+        block.setdefault("plex", {"db_write_confirmed_at": "2026-09-13T00:00:00+00:00", "on_plex_redetect": "restore"})
+    return {
+        "id": sid,
+        "type": stype,
+        "name": sid.upper(),
+        "enabled": True,
+        "url": "http://127.0.0.1:9",
+        "auth": {"token": EDITOR_PLEX_TOKEN} if stype == "plex" else {"api_key": "key"},
+        "libraries": [{"id": "1", "name": "TV Shows", "remote_paths": [str(media / "tv")]}],
+        "markers": block,
+    }
+
+
+def publish_row(server_id, server_type, status, message=""):
+    """One per-server row as ``publish_now`` returns it."""
+    return {
+        "server_id": server_id,
+        "server_name": server_id.upper(),
+        "server_type": server_type,
+        "adapter_name": "markers",
+        "status": status,
+        "message": message,
+        "canonical_path": "",
+        "frame_source": "",
+        "output_paths": [],
+    }
+
+
+def save_markers(client, episode, markers, **extra):
+    """POST the editor's save request."""
+    from tests.markers.conftest import api_headers
+
+    return client.post(
+        "/api/markers/item/markers", headers=api_headers(), json={"path": episode, "markers": markers, **extra}
+    )

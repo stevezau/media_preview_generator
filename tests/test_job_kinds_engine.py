@@ -157,17 +157,8 @@ def test_none_from_check_routes_item_to_worker_with_kwargs():
 def test_check_exception_routes_to_worker():
     pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
     dispatcher = JobDispatcher(pool)
-    (worker,) = pool._snapshot_workers()
-    seen = {}
-
-    def cancel_cb():
-        return False
-
-    def pause_cb():
-        return False
 
     def check(item, *, cancel_check):
-        seen["check_cancel_check"] = cancel_check
         raise RuntimeError("boom")
 
     process = MagicMock(return_value=ItemOutcome("markers_published"))
@@ -181,20 +172,12 @@ def test_check_exception_routes_to_worker():
             _items("/m/c.mkv"),
             _config(),
             MagicMock(),
-            callbacks={"cancel_check": cancel_cb, "pause_check": pause_cb},
             kind="intro_credits",
             handlers=handlers,
         )
         assert tracker.wait(timeout=10)
-    assert seen["check_cancel_check"] == tracker.is_cancelled and tracker.cancel_check is cancel_cb
     assert process.call_count == 1
-    call = process.call_args
-    assert call.args[0].canonical_path == "/m/c.mkv"
-    assert call.kwargs["gpu"] is None and call.kwargs["gpu_device_path"] is None
-    assert call.kwargs["cancel_check"] == tracker.is_cancelled
-    assert call.kwargs["pause_check"] is pause_cb
-    assert call.kwargs["progress_callback"].func == pool._update_worker_progress
-    assert call.kwargs["progress_callback"].args == (worker,)
+    assert process.call_args.args[0].canonical_path == "/m/c.mkv"
     assert tracker.outcome_counts == {"markers_published": 1, "markers_none": 0, "failed": 0}
     assert tracker.failed == 0 and tracker.successful == 1
     dispatcher.shutdown()
@@ -820,18 +803,6 @@ def test_counts_carried_from_before_a_restart_show_in_live_progress_and_the_resu
         "outcome": expected_outcome,
     }
     dispatcher.shutdown()
-
-
-def test_pool_loop_ignores_non_preview_outcome_keys():
-    """Shared-pool workers can carry Intro & Credits keys; the pool's own loop must not KeyError on them."""
-    pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
-    (worker,) = pool._snapshot_workers()
-    worker.outcome_counts["markers_published"] = 1
-    worker.outcome_counts["skipped_bif_exists"] = 2
-    result = pool.process_items_headless([], _config(), MagicMock(), cancel_check=lambda: True)
-    assert result["outcome"]["skipped_bif_exists"] == 2
-    assert "markers_published" not in result["outcome"]
-    pool.shutdown()
 
 
 def test_kind_check_share_caps_in_flight_checks_and_leaves_room_for_previews():

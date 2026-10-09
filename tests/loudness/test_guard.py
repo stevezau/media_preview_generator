@@ -274,7 +274,12 @@ def test_readback_accepts_native_silence_values(served):
     for key, value in (("loudness", "-inf"), ("peak", "-inf"), ("gainOffset", "inf")):
         audio.set(key, value)
         fields[f"ln:{key}"] = value
-    db.verify_streams([expected._replace(extra_data=encode_extra_data(fields))])
+    native = expected._replace(extra_data=encode_extra_data(fields))
+    db.verify_streams([native])
+
+    audio.set("loudness", "-23.0")
+    with pytest.raises(PublishError):
+        db.verify_streams([native])
 
 
 def test_readback_connection_failure_is_retryable_and_does_not_leak_tokens(served):

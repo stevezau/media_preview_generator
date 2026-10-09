@@ -9,7 +9,7 @@ legacy ``_run_plex_full_scan_phase``, whose enumerator picked the first
 Plex out of ``registry.configs()`` and ignored ``config.server_id_filter``.
 
 The fix routes multi-Plex installs through ``_run_full_scan_multi_server``
-which honors ``server_id_filter`` (orchestrator.py:1552). Single-Plex
+which honors ``server_id_filter``. Single-Plex
 installs keep their existing legacy path so the WorkerPool's
 ``worker_pool_callback`` / ``item_complete_callback`` wiring is preserved.
 """
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from media_preview_generator.jobs.orchestrator import (
     _should_use_multi_server_full_scan,
@@ -45,142 +47,76 @@ class TestShouldUseMultiServerFullScan:
     """Pin the gate function itself — the matrix that decides which
     dispatch path handles a full-library scan."""
 
-    def _with_servers(self, entries):
-        """Context manager-ish helper returning a patcher already started."""
-        patcher = patch("media_preview_generator.web.settings_manager.get_settings_manager")
-        mock_sm = patcher.start()
-        mock_sm.return_value.get.return_value = entries
-        return patcher
-
-    def test_single_plex_uses_legacy_path(self):
-        """One enabled Plex, no pin → legacy path (preserves current
-        single-Plex behaviour, including WorkerPool callbacks)."""
-        patcher = self._with_servers([{"id": "plex-a", "type": "plex", "enabled": True}])
-        try:
-            config = _full_scan_config(server_id_filter=None)
-            assert _should_use_multi_server_full_scan(config, pinned_type="") is False
-        finally:
-            patcher.stop()
-
-    def test_two_enabled_plex_servers_routes_through_multi_server(self):
-        """The #244 bug: two enabled Plex servers MUST route through the
-        multi-server path so ``server_id_filter`` is honoured. Without
-        this the legacy enumerator picks ``media_servers[0]`` regardless
-        of the pin and the second Plex is silently never scanned."""
-        patcher = self._with_servers(
-            [
-                {"id": "plex-a", "type": "plex", "enabled": True},
-                {"id": "plex-b", "type": "plex", "enabled": True},
-            ]
-        )
-        try:
-            config = _full_scan_config(server_id_filter="plex-b")
-            assert _should_use_multi_server_full_scan(config, pinned_type="plex") is True
-        finally:
-            patcher.stop()
-
-    def test_two_enabled_plex_no_pin_also_routes_multi_server(self):
-        """Even without a pin, two enabled Plex installs must use the
-        multi-server path — the legacy enumerator's first-Plex-wins
-        semantics would silently scan only one of them."""
-        patcher = self._with_servers(
-            [
-                {"id": "plex-a", "type": "plex", "enabled": True},
-                {"id": "plex-b", "type": "plex", "enabled": True},
-            ]
-        )
-        try:
-            config = _full_scan_config(server_id_filter=None)
-            assert _should_use_multi_server_full_scan(config, pinned_type="") is True
-        finally:
-            patcher.stop()
-
-    def test_disabled_second_plex_keeps_legacy_path(self):
-        """One enabled + one disabled Plex → still one effective Plex,
-        legacy path is fine. The ``enabled`` flag is the user's intent
-        and must be respected."""
-        patcher = self._with_servers(
-            [
-                {"id": "plex-a", "type": "plex", "enabled": True},
-                {"id": "plex-b", "type": "plex", "enabled": False},
-            ]
-        )
-        try:
-            config = _full_scan_config(server_id_filter=None)
-            assert _should_use_multi_server_full_scan(config, pinned_type="") is False
-        finally:
-            patcher.stop()
-
-    def test_mixed_install_still_routes_multi_server(self):
-        """Control: existing behaviour for Plex + Jellyfin must remain
-        unchanged — multi-server path."""
-        patcher = self._with_servers(
-            [
-                {"id": "plex-a", "type": "plex", "enabled": True},
-                {"id": "jf-1", "type": "jellyfin", "enabled": True},
-            ]
-        )
-        try:
-            config = _full_scan_config(server_id_filter=None)
-            assert _should_use_multi_server_full_scan(config, pinned_type="") is True
-        finally:
-            patcher.stop()
-
-    def test_three_enabled_plex_routes_multi_server(self):
-        """The ``>= 2`` predicate must hold for any larger N. A user
-        consolidating three Plex servers under one runner is an explicit
-        operator setup; legacy first-Plex-wins would silently hide two
-        of them."""
-        patcher = self._with_servers(
-            [
-                {"id": "plex-a", "type": "plex", "enabled": True},
-                {"id": "plex-b", "type": "plex", "enabled": True},
-                {"id": "plex-c", "type": "plex", "enabled": True},
-            ]
-        )
-        try:
-            config = _full_scan_config(server_id_filter=None)
-            assert _should_use_multi_server_full_scan(config, pinned_type="") is True
-        finally:
-            patcher.stop()
-
-    def test_pin_to_disabled_plex_in_single_enabled_install(self):
-        """Pin set to a Plex that exists but is disabled. With only one
-        enabled Plex (the *other* one), ``multi_plex`` is False and the
-        gate keeps the legacy path — the enumerator then picks the
-        enabled Plex (defence in depth at line 437) and the pin is
-        effectively ignored. This is a graceful fallback, not silent
-        wrong-server scanning — the user's effective Plex is the
-        enabled one regardless of pin."""
-        patcher = self._with_servers(
-            [
-                {"id": "plex-a", "type": "plex", "enabled": True},
-                {"id": "plex-b", "type": "plex", "enabled": False},
-            ]
-        )
-        try:
-            config = _full_scan_config(server_id_filter="plex-b")
-            assert _should_use_multi_server_full_scan(config, pinned_type="plex") is False
-        finally:
-            patcher.stop()
-
-    def test_pin_to_ghost_id_in_multi_plex(self):
-        """Pin set to a server-id that doesn't match any configured
-        Plex. With 2+ enabled Plex servers the gate routes to the
-        multi-server path regardless, where the no-candidates warning
-        (orchestrator.py:1555-1558) gives the operator a clean signal
-        instead of a silent first-Plex scan."""
-        patcher = self._with_servers(
-            [
-                {"id": "plex-a", "type": "plex", "enabled": True},
-                {"id": "plex-b", "type": "plex", "enabled": True},
-            ]
-        )
-        try:
-            config = _full_scan_config(server_id_filter="plex-ghost")
-            assert _should_use_multi_server_full_scan(config, pinned_type="") is True
-        finally:
-            patcher.stop()
+    @pytest.mark.parametrize(
+        ("servers", "pin", "pinned_type", "expected"),
+        [
+            pytest.param(
+                [("plex-a", "plex", True)],
+                None,
+                "",
+                False,
+                id="single-plex-keeps-legacy-path",
+            ),
+            # The #244 bug: the legacy enumerator picks media_servers[0] regardless of the pin.
+            pytest.param(
+                [("plex-a", "plex", True), ("plex-b", "plex", True)],
+                "plex-b",
+                "plex",
+                True,
+                id="two-plex-with-pin",
+            ),
+            pytest.param(
+                [("plex-a", "plex", True), ("plex-b", "plex", True)],
+                None,
+                "",
+                True,
+                id="two-plex-no-pin",
+            ),
+            pytest.param(
+                [("plex-a", "plex", True), ("plex-b", "plex", False)],
+                None,
+                "",
+                False,
+                id="disabled-second-plex-keeps-legacy-path",
+            ),
+            pytest.param(
+                [("plex-a", "plex", True), ("jf-1", "jellyfin", True)],
+                None,
+                "",
+                True,
+                id="plex-plus-jellyfin",
+            ),
+            pytest.param(
+                [("plex-a", "plex", True), ("plex-b", "plex", True), ("plex-c", "plex", True)],
+                None,
+                "",
+                True,
+                id="three-plex",
+            ),
+            # With one enabled Plex the pin to the disabled one is ignored: the enabled Plex is the effective one.
+            pytest.param(
+                [("plex-a", "plex", True), ("plex-b", "plex", False)],
+                "plex-b",
+                "plex",
+                False,
+                id="pin-to-disabled-plex",
+            ),
+            # The multi-server path warns on a pin that matches nothing, instead of silently scanning the first Plex.
+            pytest.param(
+                [("plex-a", "plex", True), ("plex-b", "plex", True)],
+                "plex-ghost",
+                "",
+                True,
+                id="pin-to-unknown-id",
+            ),
+        ],
+    )
+    def test_gate_matrix(self, servers, pin, pinned_type, expected):
+        entries = [{"id": sid, "type": stype, "enabled": enabled} for sid, stype, enabled in servers]
+        with patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm:
+            mock_sm.return_value.get.return_value = entries
+            config = _full_scan_config(server_id_filter=pin)
+            assert _should_use_multi_server_full_scan(config, pinned_type=pinned_type) is expected
 
 
 class TestRunProcessingRoutesMultiPlex:

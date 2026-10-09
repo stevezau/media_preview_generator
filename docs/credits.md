@@ -19,6 +19,10 @@ The player screenshots on this site were taken on test servers holding films rel
 
 Changes made: frames were extracted and scaled down to make preview thumbnails, and screenshots were taken of the players showing those thumbnails. The HDR comparison places a plain frame grab next to a tone-mapped one.
 
+## Dashboard screenshots
+
+- **Spring** (2019), directed by Andy Goralczyk. (CC) Blender Foundation \| Blender Studio, studio.blender.org. Licence: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). [Source](https://studio.blender.org/films/spring/). Its title appears in the dashboard screenshots; no frames are used.
+
 ## Everything else
 
 - Site design adapted from [Shortlist](https://shortlistapp.dev)'s docs theme (MIT, same author).

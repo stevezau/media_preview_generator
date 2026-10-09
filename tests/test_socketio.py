@@ -82,15 +82,11 @@ def authed_socketio_client(app):
     with flask_test_client.session_transaction() as sess:
         sess["authenticated"] = True
 
-    try:
-        sio_client = socketio.test_client(
-            app,
-            namespace="/jobs",
-            flask_test_client=flask_test_client,
-        )
-    except Exception:
-        pytest.skip("flask-socketio test client not available")
-        return
+    sio_client = socketio.test_client(
+        app,
+        namespace="/jobs",
+        flask_test_client=flask_test_client,
+    )
 
     yield sio_client
     if sio_client.is_connected(namespace="/jobs"):
@@ -102,22 +98,15 @@ def unauthed_socketio_client(app):
     """Create a SocketIO test client WITHOUT authentication."""
     flask_test_client = app.test_client()
     # Do NOT set session["authenticated"]
-    try:
-        sio_client = socketio.test_client(
-            app,
-            namespace="/jobs",
-            flask_test_client=flask_test_client,
-        )
-    except Exception:
-        pytest.skip("flask-socketio test client not available")
-        return
+    sio_client = socketio.test_client(
+        app,
+        namespace="/jobs",
+        flask_test_client=flask_test_client,
+    )
 
     yield sio_client
-    try:
-        if sio_client.is_connected(namespace="/jobs"):
-            sio_client.disconnect(namespace="/jobs")
-    except Exception:
-        pass
+    if sio_client.is_connected(namespace="/jobs"):
+        sio_client.disconnect(namespace="/jobs")
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +316,7 @@ class TestJobEvents:
 
 
 # ---------------------------------------------------------------------------
-# TEST_AUDIT P0.6 — SocketIO server config pin (incident: 1873a23)
+# SocketIO server config pin
 # ---------------------------------------------------------------------------
 
 

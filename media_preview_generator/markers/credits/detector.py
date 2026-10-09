@@ -1,11 +1,11 @@
-"""The credit text detector (spec §5.4): keyframes of the tail → rule J → one frame a second just before its start (and
-around its end when a scene follows the roll, Q3) → one credits candidate from ``credits_text``. The pipeline registers
-it as a local detector that runs on a worker whenever it decodes (:func:`credits_text_needs_worker`).
+"""The credit text detector: keyframes of the tail → rule J → one frame a second just before its start (and around its
+end when a scene follows the roll) → one credits candidate from ``credits_text``. The pipeline registers it as a local
+detector that runs on a worker whenever it decodes (:func:`credits_text_needs_worker`).
 
-The rows the result carries are the ones that were decoded. Rule J version 3 reads the chosen run without the text
-that sits in one place right across the story (``rule_j.overlay_boxes``, spec §13 item 15), and the 1 fps refine and
-end rows the same way -- which is also what keeps its band steps (``rule_j.same_roll``, ``rule_j.reach_back``, §13
-item 14) from walking a start back over story keyframes whose only box is a channel bug.
+The rows the result carries are the ones that were decoded. Rule J reads the chosen run without the text that sits in
+one place right across the story (``rule_j.overlay_boxes``), and the 1 fps refine and end rows the same way -- which is
+also what keeps its band steps (``rule_j.same_roll``, ``rule_j.reach_back``) from walking a start back over story
+keyframes whose only box is a channel bug.
 """
 
 from __future__ import annotations
@@ -34,43 +34,27 @@ if TYPE_CHECKING:
     from ..store import FileRecord
 
 # Stored with every answer. Bump it when rule J, the tail lengths, the frame format or the model change: stored answers
-# of another version are asked again, even for decided types (spec §14 2026-09-14 "Local detectors").
-# 2: the anchor never steps over a gap the 24 s join can't bridge, the end steps back over scene text glued onto the
-# roll, text on screen all through the tail gives no answer, and a roll the tail opens on is read from 120 s before the
-# tail (spec §13 items 13 and 14, phase3-harness.md "Rule J version 2").
-# 3: rule J reads where a frame's text is. Text that sits in one place right across the story -- a channel or score
-# bug, a ticker, a burnt-in timecode -- doesn't count as text inside the credit run; and a roll the 24 s join split is
-# put back together from the band its text keeps to, an earlier run in that band whose text never stops being the same
-# roll and a keyframe before the start in it, at the run's own cadence, being more of it. Starts move both ways under
-# the first and earlier only under the second, and no end moved on either set or decode path (spec §13 items 14
-# and 15, phase3-harness.md and
-# broadcast-tv.md "Rule J version 3"). Stored answers of version 2 are asked again because these starts differ.
-# Reading on before the tail step by step while the run still starts too close to the first row read (2026-09-23) is
-# not a version: no answer that was found moves. A "nothing found" stored before it is asked again once instead, and
-# only where a step after the first can be read (:func:`credits_text_due`).
-# 4: every decode path scales frames the same way -- the whole decoded frame, downloaded from the GPU when it was
-# decoded there, to 320x180 by the nearest pixel (``frames._scale_filter``) -- where each vendor's own scaler blurred
-# text a few pixels tall differently, so credits found on NVIDIA were lost on Intel and the CPU; and a tail with no
-# answer at 320x180 is read again at 640x360 (``RETRY_SCALE``). Any stored answer, found or not, can move.
-# 5: the 640x360 reading of the rest of a file after an answer that ends in a scene reads a keyframe whole when it
-# holds text only that frame boxes (a roll the 320x180 reading half boxed), and a roll read at 640x360 starts on dense
-# text or the text it runs into without a break (``rule_j.start_on_dense_text``: small print on story before it is not
-# its start). Answers read at 640x360 can move; one found at 320x180 that runs to the end of the file can't.
-# 6: the 1 fps refine walks back over a roll's first cards that read one or two boxes on a lit frame, in the roll's
-# band, and never starts from a caption cut off from the coarse start (``rule_j.refine_start``); and a file with a
-# credits chapter is read against it, its answer moving the chapter only where the frames show the chapter off the
-# roll (``rule_j.chapter_moves_to``, ``decide.chapter_hint``). Found starts can move; "nothing found" can't.
-# 7: the anchor keeps a card on black that only black separates from the next card (``rule_j._anchored``), a 1 fps walk
-# over the roll's own frames that reaches its window's floor reads one 24 s join further back
-# (``rule_j.refine_reaches_floor``), and a credits chapter on the story moves to the first text after it
-# (``rule_j.chapter_moves_to``, the label naming where). Any stored answer can move: a start kept earlier can also bring
-# a roll a tail opened on into its join.
-# 8: the card the start lands on is read, and a start on prose cards on black (an epilogue's sentences) moves on to the
-# first card after them that isn't prose (``cards``, :func:`_past_prose`); a credits chapter on those cards moves with
-# it (:func:`chapter_origin`). Only starts on such cards move, later only.
-# 9: a run whose story carries text on most keyframes and that holds more than one join of text-free lit keyframes is
-# the story's captions, not a roll (``rule_j.captions_all_through``: a variety show's burned-in captions chained into
-# runs minutes long). Found answers can go, and a file that loses its 320x180 answer is read at 640x360.
+# of another version are asked again, even for decided types. What the current rules do that older ones didn't:
+# - rule J reads where a frame's text is, so text fixed in one place across the story (a channel or score bug, a
+#   ticker, a burnt-in timecode) doesn't count as text inside the credit run, and a roll the 24 s join split is put
+#   back together from the band its text keeps to;
+# - every decode path scales frames the same way (the whole decoded frame, downloaded from the GPU when it was decoded
+#   there, to 320x180 by the nearest pixel, ``frames._scale_filter``), because each vendor's own scaler blurred text a
+#   few pixels tall differently; a tail with no answer at 320x180 is read again at 640x360 (``RETRY_SCALE``);
+# - at 640x360 a keyframe is read whole when it holds text only that frame boxes, and a roll starts on dense text or
+#   the text it runs into without a break (``rule_j.start_on_dense_text``);
+# - the 1 fps refine walks back over a roll's first cards that read one or two boxes on a lit frame, in the roll's
+#   band, and never starts from a caption cut off from the coarse start (``rule_j.refine_start``); a file with a
+#   credits chapter is read against it (``rule_j.chapter_moves_to``, ``decide.chapter_hint``);
+# - the anchor keeps a card on black that only black separates from the next card (``rule_j._anchored``), and a 1 fps
+#   walk that reaches its window's floor reads one 24 s join further back (``rule_j.refine_reaches_floor``);
+# - the card the start lands on is read, and a start on prose cards on black (an epilogue's sentences) moves on to the
+#   first card after them that isn't prose (``cards``, :func:`_past_prose`, :func:`chapter_origin`);
+# - a run whose story carries text on most keyframes and that holds more than one join of text-free lit keyframes is
+#   the story's captions, not a roll (``rule_j.captions_all_through``).
+# Reading on before the tail step by step while the run still starts too close to the first row read is not a version:
+# no answer that was found moves. A "nothing found" stored before it is asked again once instead, and only where a
+# step after the first can be read (:func:`credits_text_due`).
 CREDITS_TEXT_VERSION = 9
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
@@ -83,12 +67,12 @@ LOOK_BACK_BASIS = "steps back to the earliest kept start"
 # The first step before the tail keeps the one decode's time limit it always had, counted from its start, and every
 # later step gets what is left of it, so a reading's worst case stays what it was (a file with no answer at 320x180
 # has two readings, :func:`find_credits`). Every later step that would start past
-# it, or runs past it, is a timeout like any decode's (T-R7): the file is asked again the next day. Time paused
+# it, or runs past it, is a timeout like any decode's: the file is asked again the next day. Time paused
 # (:class:`..freeze.Freeze`) doesn't count, as it doesn't for one decode's own limit.
 LOOK_BACK_TIMEOUT_S = frames.DECODE_TIMEOUT_S
 # A tail whose 320x180 frames give no answer is read once more at this many times the size, 640x360. Small credit
-# cards can box nothing at 320x180 (Accused (2020): "PRODUCER / DIRECTOR", "COLORIST" at 4-11 boxes a frame at 640x360,
-# none at 320x180), and the roll is then no run at all, or story captions become the last run and are refused. So
+# cards can box nothing at 320x180 ("PRODUCER / DIRECTOR", "COLORIST" read as 4-11 boxes a frame at 640x360, none at
+# 320x180), and the roll is then no run at all, or story captions become the last run and are refused. So
 # does the rest of the file after a 320x180 answer that ends in a scene (a roll invisible at 320x180 may follow it);
 # an answer that runs to the end of the file is never read again and stays exactly as it was.
 RETRY_SCALE = 2
@@ -97,13 +81,12 @@ RETRY_SCALE = 2
 # boxes 4-11 px tall there (2,054 of the 2,084 boxes only the larger frame found on 18 real rolls; 20 more are 12-15
 # px), while at 640x360 the model also boxes dark footage -- blobs up to the frame's height -- which on a dark frame
 # (one box makes a credit frame) join into runs. Measured on the files the larger reading answered: 11 px loses a real
-# roll (Lisa Ann Walter: It Was an Accident), 19 px lets a making-of's blobs back in as a run 336 s before its credits
-# (Frankenstein: The Anatomy Lesson), 15 px has neither (small-text-retry.md).
+# roll, 19 px lets a making-of's blobs back in as a run 336 s before its credits, 15 px has neither.
 SMALL_TEXT_MAX_HEIGHT_PX = 15
 # ... and whose roll starts on a frame this dense (``rule_j.start_on_dense_text``): a dark credit frame, or a lit one
-# with this many boxes, twice the 3 a lit credit frame needs. Swept at 4, 5, 6 and 8 on the 80, the 205, Accused and
-# I Survived a Serial Killer: 4 and 5 leave S01E14 starting on court footage whose small print boxes four and five a
-# frame, 68 s early; 6 and 8 give every file the same verdict, but 8 starts Animal (2023) 241 s later.
+# with this many boxes, twice the 3 a lit credit frame needs. Swept at 4, 5, 6 and 8 over a set of real rolls: 4 and 5
+# leave a start on court footage whose small print boxes four and five a frame, 68 s early; 6 and 8 give every file the
+# same verdict, but 8 starts one 241 s later.
 DENSE_BOXES = rule_j.RULE_J.dense * RETRY_SCALE
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
@@ -114,11 +97,11 @@ READING_CARD_PHASE = "Reading the card the credits start on…"
 LANDS_ON_S = 2.0
 # Shown while the CPU reads again a tail the GPU read no frames from (and how the job log tells that reading apart).
 CPU_RECHECK_PHASE = "The GPU read no frames there; reading the credits on the CPU…"
-# A file whose decode timed out isn't decoded again for this long unless it changes or the run is forced (I1).
+# A file whose decode timed out isn't decoded again for this long unless it changes or the run is forced.
 TIMEOUT_RETRY = timedelta(days=1)
 _GIVES_UP = "credits_text_gives_up"
 # Why a file's credit text can't be read when its tail gave no frame on the CPU because its video stops before the tail
-# (a download or copy cut short: Legends of Tomorrow S03E01, 105 MB of a 42-minute remux). Kept as the file's detector
+# (a download or copy cut short: 105 MB of a 42-minute remux). Kept as the file's detector
 # failure: it isn't read again until it changes (a new download) or a forced re-detect (:func:`_gives_up`).
 CUT_SHORT = "the file ends before its stated length"
 # ... when its video stops at least this long before its stated length; less is the container's own slack.
@@ -132,7 +115,7 @@ class CreditsTextResult:
     Attributes:
         start_s: The credits start, or None when the tail holds no credit run or its text is on screen all through the
             tail (``rule_j.text_all_through``).
-        end_s: Where the skip ends (Q3), or None: it runs to the end of the file.
+        end_s: Where the skip ends, or None: it runs to the end of the file.
         key_rows: The tail's keyframe rows, each ``(pts, box count, luma, boxes)`` (the harness keeps them).
         fine_rows: The 1 fps rows before the coarse start (empty without an answer).
         end_rows: The 1 fps rows from 1 s before ``rule_j.end_keyframe_s`` to 20 s past the run's latest credit keyframe
@@ -187,7 +170,7 @@ def find_credits(
 
     The app and the harness run exactly this. The container's start time is probed here, once, and handed to every
     decode: the pipeline's own probe is None on the re-run path, and a stale or defaulted start time would put a
-    recording's answers tens of thousands of seconds out (Task 6).
+    recording's answers tens of thousands of seconds out.
 
     An intra-only stream (every frame a keyframe: ProRes, DNxHD, MJPEG, an all-I H.264) has its keyframe pass thinned
     before the decoder to one frame per ``frames.INTRA_ONLY_SPACING_S``, the keyframe spacing rule J was measured at;
@@ -207,7 +190,7 @@ def find_credits(
     that runs past it is a timeout, as any decode's is. A run still too close to the first row when the steps stop has
     no answer, as one that began too early always had. A step whose window holds no keyframe isn't empty: ffmpeg gives
     the first keyframe after the window (exit 0, on the GPU and the CPU alike), which is the first row already read,
-    and the join drops it, so the step adds nothing (``evidence/credits/empty-window-decode.md``).
+    and the join drops it, so the step adds nothing.
 
     All of that reads 320x180 frames. When it gives no answer and decoded any frame at all, it is done once more at
     ``RETRY_SCALE`` times the size, 640x360 -- the tail, its steps and its refine windows, through the same keyframe
@@ -243,7 +226,7 @@ def find_credits(
     Args:
         path: The media file (read only).
         duration_ms: Its duration.
-        is_episode: Picks the default tail when ``tail_s`` is None: the last 450 s instead of 900 s (T-R4).
+        is_episode: Picks the default tail when ``tail_s`` is None: the last 450 s instead of 900 s.
         tail_s: The length of the tail to read, overriding both (the user's window in Settings); None = by kind.
         ffmpeg: ffmpeg binary.
         detect_boxes: Text boxes per chunk of luma planes.
@@ -331,7 +314,7 @@ def _the_roll(path: str, read: Callable[..., CreditsTextResult]) -> CreditsTextR
                            "failed: {}", os.path.basename(path), exc)  # fmt: skip
             return found
         if isinstance(exc, frames.DecodeTimeoutError):
-            # A tail with no answer times out like one at 320x180 (T-R7), the look-back's shared deadline included: a
+            # A tail with no answer times out like one at 320x180, the look-back's shared deadline included: a
             # mount that stalled between the readings, or a larger reading slow on this host, is no answer, and the
             # file is asked again in a day rather than kept as "nothing found" for good.
             raise
@@ -387,7 +370,7 @@ def _read_credits(
     # whose text it boxed all of -- an epilogue card on black after the answer's end -- still has none, or the 24 s
     # join glues the card onto the roll (Accused (2020) S04E05, S07E02: 25.5 and 17.5 s early read whole). A tail
     # without an answer keeps the rule it was measured with: read whole there too, no wrong answer is fixed and five
-    # move, one from no answer to 20 s before its chapter (small-text-retry.md).
+    # move, one from no answer to 20 s before its chapter.
     read_whole = from_s is not None
 
     def decode_rows(*, keyframes_only: bool, **window: Any) -> list[rule_j.Row]:
@@ -419,7 +402,7 @@ def _read_credits(
         key_rows = [*rows_before, *(row for row in keyframes(seek_s, None) if row[0] >= from_s)]
     # Text that never moves off one spot across the story is a channel or score bug, a ticker or a timecode, not
     # credits, so everything that reads a frame's own text reads the rows without it: which of the run's frames are
-    # credit frames, the anchor's spacing, and the band steps' own bands and cadences (spec §13 items 14 and 15).
+    # credit frames, the anchor's spacing, and the band steps' own bands and cadences.
     # Which run is the last one is still read from the rows with their overlays, and so is the share
     # text_all_through counts: that step is what catches a file whose overlay this one doesn't find, and counting the
     # overlay out would take its answer away. The larger reading finds its runs as well as a frame's own text without
@@ -452,7 +435,7 @@ def _read_credits(
         deadline = freeze.clock() + LOOK_BACK_TIMEOUT_S
         # The first step reads what it always has, even where the whole of it lies before the earliest start the
         # decision keeps (a movie on Automatic): narrowed to that bound, or to 30 s before it, it turns stored answers
-        # into none -- ones the decision refuses anyway, but answers that were found (spec §14 2026-09-23).
+        # into none -- ones the decision refuses anyway, but answers that were found.
         before_start = max(0.0, tail_start - rule_j.READ_BEFORE_TAIL_S)
         before_rows = keyframes(before_start, tail_start - before_start)
         joins = (
@@ -523,7 +506,7 @@ def _past_prose(
     read_text: Callable[[np.ndarray], list[list[str]]],
     show: Callable[[str], None],
 ) -> CreditsTextResult:
-    """The answer with its start moved past the prose cards it lands on (spec §5.4, "Prose cards").
+    """The answer with its start moved past the prose cards it lands on.
 
     Only a start on a card on black is read: the first text at or after it, in the rows already read, has to be dark.
     The card itself comes from 1 fps rows from the start (``cards.FIRST_CARD_WINDOW_S``, overlays left out:
@@ -697,7 +680,7 @@ def _next_step_start(read_from_s: float, earliest_start_s: float | None) -> floa
     left over after the first step is not read. What that saves is a decode of its own -- an ffmpeg start, a seek and
     a hardware decoder brought up -- for a sliver that holds a keyframe or two at most, and often none: a keyframe pass
     over a window without one gives the first keyframe after it (exit 0, on the GPU and the CPU alike), which is the
-    first row already read, so :func:`rule_j.rows_before` drops it (``evidence/credits/empty-window-decode.md``).
+    first row already read, so :func:`rule_j.rows_before` drops it.
     None (no bound given) reads no step after the first.
     """
     if earliest_start_s is None:
@@ -726,7 +709,7 @@ def _step_rows(
         frames.DecodeCancelledError: The job was cancelled. Asked first, so a cancel that lands once the time has also
             run out is recorded as a cancel, not as a timeout that keeps the file back for a day.
         frames.DecodeTimeoutError: The look-back's time ran out before or during the decode. It is a timeout like any
-            decode's, so a stalled mount leaves the file for a day (T-R7) rather than storing "nothing found" --
+            decode's, so a stalled mount leaves the file for a day rather than storing "nothing found" --
             in either reading of a tail without an answer; after an answer, :func:`find_credits` keeps that answer.
     """
     if cancel_check and cancel_check():
@@ -801,7 +784,7 @@ def credits_text_failed_here(rec: FileRecord, ctx: PipelineContext) -> bool:
     """Whether reading this file's credit text failed as the file is now: a decode error (``detector_failures``,
     dropped when the file's identity changes) or a timeout (``credits_text_timeouts``, keyed by the identity).
 
-    A credits chapter that rule 3 holds for credit text then decides as it did before rule 3 (spec §5.5): the file
+    A credits chapter that rule 3 holds for credit text then decides as it did before rule 3: the file
     would otherwise wait for an answer that may never come. Text detection being unavailable says
     nothing about the file and isn't recorded.
 
@@ -849,7 +832,7 @@ def detect_credits_text(
 ) -> DetectorAnswer:
     """The local detector: a credits candidate from the file's on-screen credit roll.
 
-    A job paused on its own doesn't block the worker here (T-R9): one file's decode is bounded, and the job pauses
+    A job paused on its own doesn't block the worker here: one file's decode is bounded, and the job pauses
     between files. Everything paused (``pause_check``) freezes the running decode where it is, as previews' FFmpeg.
 
     The file is decoded on the worker's GPU, whatever its codec, with the worker's own ``ffmpeg_threads``. Text
@@ -878,7 +861,7 @@ def detect_credits_text(
             helper of its own instead of one of the CPU workers' (``TextDetectorPool.detect_boxes``).
 
     Returns:
-        One candidate (its end None when the roll runs to the end of the file, Q3), or none when the tail holds no
+        One candidate (its end None when the roll runs to the end of the file), or none when the tail holds no
         credit roll ("nothing found"); either way based on :data:`LOOK_BACK_BASIS`.
 
     Raises:
@@ -897,7 +880,7 @@ def detect_credits_text(
     reason = _gives_up(rec, ctx)
     if reason is not None:
         raise DetectorUnavailableError(reason, this_file=True)
-    # The process's one pool (spec §6.4 item 7): never closed here, since closing it ends it for every later file.
+    # The process's one pool: never closed here, since closing it ends it for every later file.
     pool = get_textdet_pool()
     name = os.path.basename(rec.canonical_path)
     ffmpeg = getattr(ctx.config, "ffmpeg_path", None) or "ffmpeg"
@@ -1117,7 +1100,7 @@ def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
 def credits_text_spec() -> LocalDetectorSpec:
     """The detector as the pipeline registers it: credits only, on a worker whenever it decodes, answers kept per file
     identity. It reads files whose credits a chapter decided too (``checks_chapters``): a release's "Credits" chapter
-    is often off the first card, and the decision rules move its start to the roll the frames show (spec §5.5 rule 3).
+    is often off the first card, and the decision rules move its start to the roll the frames show.
 
     Returns:
         Its spec.

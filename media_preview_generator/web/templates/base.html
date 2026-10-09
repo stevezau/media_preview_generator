@@ -47,10 +47,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/worker_groups.css') }}">
 </head>
 <body>
-    {% if request.endpoint != 'main.login' %}
     <a class="skip-link" href="#main-content">Skip to main content</a>
-    {% endif %}
-    {% if request.endpoint != 'main.login' %}
     <!-- Navigation -->
     <nav class="navbar navbar-expand-xl border-bottom sticky-top">
         <div class="page-shell">
@@ -322,17 +319,14 @@
             </div>{# /#navbarNav #}
         </div>
     </nav>
-    {% endif %}
 
-    {% if request.endpoint != 'main.login' %}
     <!-- Config-health banner (issue #278): rendered by checkConfigHealth()
          in app.js when /config isn't writable, mounted :ro, or a media
          mount is missing. Hidden until a problem is detected. -->
     <div id="configHealthBanner" class="page-shell pt-3 d-none"></div>
-    {% endif %}
 
     <!-- Main Content -->
-    <main id="main-content" tabindex="-1" class="{% if request.endpoint != 'main.login' %}container-fluid page-shell py-4{% endif %}">
+    <main id="main-content" tabindex="-1" class="container-fluid page-shell py-4">
         {% block content %}{% endblock %}
     </main>
 
@@ -446,10 +440,10 @@
     <!-- Socket.IO -->
     <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js" integrity="sha256-g99KvH7slB8dKa4lToC6wLuC05j74ujuTqKn78jnBPE=" crossorigin="anonymous"></script>
     <!-- Custom JS -->
-    <!-- app.js MUST load first: notifications.js and job_modal.js depend on
+    <!-- app.js must load before notifications.js and job_modal.js: they depend on
          its global escapeHtml / sanitizeNotificationHtml / showToast /
          copyVulkanDiagnosticBundle / apiGet / copyToClipboard / jobs /
-         _renderPublishersBlock definitions. -->
+         _renderPublishersBlock definitions. scan_filters.js has no such dependency. -->
     <script src="{{ url_for('static', filename='js/scan_filters.js') }}"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
     <script src="{{ url_for('static', filename='js/notifications.js') }}"></script>

@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 
 from loguru import logger
 
@@ -43,12 +43,11 @@ from ..web.routes.job_runner import (
 )
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
-from .carry_over import is_carried_over
 from .credits import decode_check
-from .decide import DecisionStatus
-from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL, season_of, start_line
-from .missing import MISSING_LINE, mark_missing_files
+from .job_log import start_line
+from .missing import MISSING_LINE
 from .models import Source
+from .models import utcnow as _utcnow
 from .outcomes import (
     FILE_BUSY,
     NOT_IN_LIBRARY,
@@ -68,15 +67,12 @@ from .pipeline import (
     build_context,
     cached_capability,
     kind_handlers,
-    online_recheck_files,
     run_detector_checks,
 )
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
 from .source_counts import DecidedByTally, stored_groups
-from .sources.ratelimit import RESET_TIME_LABEL
 from .store import MarkerStore
-from .versions import BATCH_FILES, next_batch, record_taken
 
 _POLL_S = 1.0
 # Polls a PENDING preview job may go without a thread before its follow-up stops waiting for it. Covers the moment
@@ -88,32 +84,10 @@ MAX_RETRY_FILES = 500
 # A replaced file is checked again this long after its publish at the least (servers rescan it after the job).
 MIN_VERIFY_DELAY_S = 600
 VERIFY_DELAY_FACTOR = 3
-_FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 # Job sources where the user chose the files (API/Start job dialog, Inspector re-detect, Season view Publish).
 _USER_PICKED_SOURCES = frozenset({"manual", "inspector", "inspector_season"})
-# Legacy source retained for queued jobs and history.
-SEASON_SOURCE = "season"
 # The follow-up of a scheduled Recently Added scan (``jobs.orchestrator._queue_intro_credits_follow_ups``).
 RECENTLY_ADDED_SOURCE = "recently_added"
-# Legacy source retained for existing queued jobs and history.
-BUDGET_RECHECK_SOURCE = "theintrodb_recheck"
-# Legacy job that decides files again after an upgrade changed the rules: its
-# source, and the config key that lists those files when it runs (``_items_to_decide_again``).
-DECIDE_AGAIN_SOURCE = "decide_again"
-DECIDE_AGAIN = "decide_again"
-# Legacy online re-check jobs still list their due files when resumed after a restart.
-ONLINE_RECHECK_SOURCE = "online_recheck"
-ONLINE_RECHECK = "online_recheck"
-# A legacy batch of files whose answers rest on an older detector version: its source,
-# the config key that takes the batch when it runs (``versions.next_batch``), and the key holding the batch taken, with
-# the versions each file was taken for, so a run revived after a restart runs the same files (taken off the job when
-# it ends, like the Check servers listing).
-VERSION_RERUN_SOURCE = "version_rerun"
-VERSION_RERUN = "version_rerun"
-VERSION_RERUN_FILES = "version_rerun_files"
-# Where a batch stands in the whole re-check, for its name: ``{"total", "batch", "batch_size"}``, the total being the
-# files listed when the first batch was queued. Retained for existing jobs and history.
-VERSION_RERUN_COUNTS = "version_rerun_counts"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
 # Serialises webhook episodes joining a waiting follow-up with its runner reading them.
@@ -125,17 +99,8 @@ _JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED)
 # Recently Added scan's follow-up lists what servers had already indexed, like a library listing.
 _NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {
     RECENTLY_ADDED_SOURCE,
-    SEASON_SOURCE,
     RECONCILE_SOURCE,
-    BUDGET_RECHECK_SOURCE,
-    DECIDE_AGAIN_SOURCE,
-    ONLINE_RECHECK_SOURCE,
-    VERSION_RERUN_SOURCE,
 }
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def server_pin(config: object) -> str | None:
@@ -152,8 +117,8 @@ def server_pin(config: object) -> str | None:
 
 
 def _pinned_to(config: object) -> dict[str, str]:
-    """``create_intro_credits_job``'s ``server_id`` for a job this job queues for its own files (a retry, a verify
-    job, a TheIntroDB recheck): they publish only where it does. Empty for an unpinned job."""
+    """``create_intro_credits_job``'s ``server_id`` for a job this job queues for its own files (a retry or a verify
+    job): they publish only where it does. Empty for an unpinned job."""
     pin = server_pin(config)
     return {"server_id": pin} if pin else {}
 
@@ -330,7 +295,8 @@ def _queue_retry(
     jm = get_job_manager()
     waiting_paths = {path for files in waiting.values() for path in files}
     first = _sent_paths(waiting_paths & set(promised), sender_paths)
-    paths = [*first, *(path for path in _sent_paths(waiting_paths, sender_paths) if path not in set(first))]
+    seen = set(first)
+    paths = [*first, *(path for path in _sent_paths(waiting_paths, sender_paths) if path not in seen)]
     reason = _retry_reason(waiting)
     # Check servers leaves the items of a file it doesn't retry to be read back again; any other job's file is only
     # tried again by a job that lists it (a retry chain started by Check servers included: its items are gone).
@@ -493,13 +459,6 @@ _SENDER_WORDS = {
 }
 
 
-def _season_words(paths: list[str]) -> str:
-    seasons = sorted({season_of(str(path))[0] for path in paths})
-    if len(seasons) == 1:
-        return f"Season job for {seasons[0]}"
-    return f"Season job for {len(seasons)} seasons" if seasons else "Season job"
-
-
 def trigger_words(job, cfg: dict) -> str:
     """What started an Intro & Credits job, in plain words, for its first log line (``job_log.start_line``).
 
@@ -508,8 +467,7 @@ def trigger_words(job, cfg: dict) -> str:
         cfg: Its config.
 
     Returns:
-        E.g. ``follow-up to preview job c7ca6327 (Radarr import)``, ``Season job for Accused (2023) S04``,
-        ``re-checking files after an update``, ``scheduled "Nightly"`` or ``manual Re-detect``.
+        E.g. ``follow-up to preview job c7ca6327 (Radarr import)``, ``scheduled "Nightly"`` or ``manual Re-detect``.
     """
     source = str(cfg.get("source") or "")
     if cfg.get("retry_attempt"):
@@ -521,16 +479,6 @@ def trigger_words(job, cfg: dict) -> str:
         return "checking again files published just after they were replaced"
     if cfg.get("reconcile"):
         return "Check servers"
-    if cfg.get(DECIDE_AGAIN):
-        return "deciding files again after the update"
-    if cfg.get(ONLINE_RECHECK):
-        return "weekly online re-check"
-    if cfg.get(VERSION_RERUN):
-        return "re-checking files after an update"
-    if source == SEASON_SOURCE:
-        return _season_words(list(cfg.get("file_paths") or []))
-    if source == BUDGET_RECHECK_SOURCE:
-        return "checking files again after TheIntroDB's daily limit reset"
     if cfg.get("follows_job_id"):
         sender = _SENDER_WORDS.get(source, source or "webhook")
         return f"follow-up to preview job {str(cfg['follows_job_id'])[:8]} ({sender})"
@@ -546,41 +494,15 @@ def trigger_words(job, cfg: dict) -> str:
     return _SENDER_WORDS.get(source, source or "manual run")
 
 
-def _still_undecided(store: MarkerStore, path: str) -> bool:
-    """Whether a file has a type left undecided (True when the store knows no decisions for it), a marker carried
-    over from a replaced file counting as undecided (spec §5.5 rule 15)."""
-    rec = store.get_file(path)
-    decisions = store.get_decisions(rec.id) if rec is not None else {}
-    return (
-        not decisions
-        or any(row.status is DecisionStatus.NO_EVIDENCE for row in decisions.values())
-        or any(is_carried_over(marker) for marker in store.get_markers(rec.id).values())
-    )
-
-
-def _budget_recheck_items(job_id: str, ctx, items: list[ProcessableItem]) -> list[ProcessableItem]:
-    """A recheck job's files that are still worth TheIntroDB's answer: none once TheIntroDB is off, and only files
-    another job hasn't decided since."""
-    jm = get_job_manager()
-    if not ctx.settings.source_enabled(Source.THEINTRODB.value):
-        jm.add_log(job_id, "INFO - TheIntroDB is turned off now, so these files aren't checked again")
-        return []
-    still = [item for item in items if _still_undecided(ctx.store, item.canonical_path)]
-    if len(still) < len(items):
-        jm.add_log(job_id, f"INFO - {len(items) - len(still)} file(s) were decided since; they aren't checked again")
-    return still
-
-
 def _seal_files(jm, job_id: str, job, cfg: dict) -> dict:
     """The config whose files the job lists now: re-read and sealed when other requests may have added files to it.
 
-    Webhook episodes can join until the runner seals its files under the same lock. Legacy Season and TheIntroDB
-    jobs still seal their saved lists when resumed, but no new requests are added to them.
+    Webhook episodes can join until the runner seals its files under the same lock.
 
     Returns:
         The config to list the files of.
     """
-    if not (cfg.get("follows_job_id") or cfg.get("source") in (SEASON_SOURCE, BUDGET_RECHECK_SOURCE)):
+    if not cfg.get("follows_job_id"):
         return cfg
     with FOLLOW_UP_LOCK:
         # Only the seal is written (under the job manager's lock): a key another thread set meanwhile stays.
@@ -617,12 +539,6 @@ def wait_for_retry_time(
         waiting_for = (
             f"Check starting in {remaining}s — servers often rescan a replaced file after its markers are sent"
         )
-    elif cfg.get("source") == BUDGET_RECHECK_SOURCE:
-        waiting_for = f"Check starting in {remaining}s — after TheIntroDB's daily limit resets at {RESET_TIME_LABEL}"
-    elif cfg.get(VERSION_RERUN):
-        waiting_for = (
-            f"Next batch starting in {remaining}s — re-checking files after an update, {BATCH_FILES} at a time"
-        )
     else:
         waiting_for = f"Retry starting in {remaining}s — waiting for these files to appear on disk or on a server"
     update_wait(
@@ -654,76 +570,13 @@ def wait_for_retry_time(
     return True
 
 
-def _stored_file_items(paths: set[str]) -> list[ProcessableItem]:
-    """Items for files the markers store listed, sorted by season folder then path, as ``build_items`` lists a job's
-    files (no item id hints: each is looked up again)."""
-    ordered = sorted(paths, key=lambda p: (os.path.dirname(p), p))
-    return [
-        ProcessableItem(canonical_path=p, server_id="", item_id_by_server={}, title=os.path.basename(p))
-        for p in ordered
-    ]
-
-
-def _files_to_decide_again(store: MarkerStore) -> set[str]:
-    return {
-        *store.files_with_legacy_review_decisions(),
-        *store.files_waiting_for_other_versions(),
-        *store.files_with_season_audio_intro(),
-        *store.files_decided_by_online_and_server_markers(),
-    }
-
-
-def _items_to_decide_again(store: MarkerStore, configs: Sequence[ServerConfig] = ()) -> list[ProcessableItem]:
-    """The files still stored under the removed "Needs review" status (``store.LEGACY_NEEDS_REVIEW``, settings v20),
-    those whose last publish waits for their item's other versions, those whose
-    unlocked intro was decided with a season audio answer (settings v17: season audio's guards changed its answers), and
-    those whose unlocked intro or credits rests on an online answer and a server's own marker alone (settings v18:
-    online times on the file's clock).
-
-    Given the servers' configs, those files that are missing from disk are marked first (``missing``), so a series
-    deleted since isn't listed; any the check had no time for are marked when their run finds them missing.
-    """
-    if configs:
-        mark_missing_files(store, sorted(_files_to_decide_again(store)), configs)
-    return _stored_file_items(_files_to_decide_again(store))
-
-
-def _batch_to_read_again(
-    jm, job_id: str, cfg: dict, ctx: PipelineContext, configs: Sequence[ServerConfig]
-) -> dict[str, dict[str, int]]:
-    """The batch of files to re-check after an update (``versions.next_batch``), with the versions each is read
-    for, held on the job so a run revived after a restart runs the same files. Nothing is recorded here: each file is
-    recorded as it finishes (``versions.record_taken``), so a file the batch never reaches (a cancel, a restart the job
-    isn't revived after) is taken by a later batch. With Intro & Credits off on every server (turned off during the gap
-    between batches) nothing is taken: those files would only end without an owner.
-    """
-    held = cfg.get(VERSION_RERUN_FILES)
-    if isinstance(held, dict):
-        return {str(path): dict(taken) for path, taken in held.items()}
-    from .triggers import markers_enabled_anywhere
-
-    if not markers_enabled_anywhere():
-        return {}
-    batch = next_batch(ctx.store, ctx.settings, configs)
-    if batch:
-        jm.merge_job_config(job_id, {VERSION_RERUN_FILES: batch})
-    return batch
-
-
-def _items_for_online_recheck(ctx: PipelineContext, cancel_check: Callable[[], bool]) -> list[ProcessableItem]:
-    """The files whose "no entry" from an enabled online source is due again and whose decision it could still change
-    (``online_recheck_files``: a disk check per file). A cancel stops the listing; the caller then cancels the job."""
-    paths: set[str] = set()
-    for path in online_recheck_files(ctx.store, ctx.settings, ctx.now()):
-        if cancel_check():
-            break
-        paths.add(path)
-    return _stored_file_items(paths)
-
-
 def _all_libraries_listed(cfg: ServerConfig) -> ServerConfig:
     # Vendor enumeration skips libraries with previews turned off; markers have their own library selection.
     return dataclasses.replace(cfg, libraries=[dataclasses.replace(lib, enabled=True) for lib in cfg.libraries])
+
+
+# Config keys of job types removed from the app; a job saved by an older build must not fall through to a full scan.
+RETIRED_JOB_CONFIG_KEYS = frozenset({"decide_again", "online_recheck", "version_rerun"})
 
 
 def build_items(
@@ -783,6 +636,8 @@ def build_items(
                 title=os.path.basename(canonical),
             )
         items = list(by_path.values())
+    elif RETIRED_JOB_CONFIG_KEYS & job_config.keys():
+        warnings.append("This job type was retired; nothing to do")
     else:
         requested: dict[str, list[str]] = {}
         for entry in job_config.get("libraries") or []:
@@ -903,6 +758,8 @@ def wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_check
     """
     if not follows_job_id:
         return True
+    from ..jobs.admission import preceding_job_ready
+
     jm = get_job_manager()
     announced = False
     polls_without_thread = 0
@@ -910,8 +767,6 @@ def wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_check
         if cancel_check():
             return False
         preceding = jm.get_job(follows_job_id)
-        from ..jobs.admission import preceding_job_ready
-
         if preceding_job_ready(preceding):
             return True
         if (
@@ -1037,9 +892,9 @@ def _start_fingerprint_sweep(cfg: dict, store: MarkerStore, configs: Sequence[Se
     the marks of those back) and clearing the cached fingerprints of files gone, so markers.db doesn't grow with every
     renamed or deleted episode (``start_fingerprint_sweep``: its own thread, at most one an hour).
 
-    Season, retry and verify jobs don't: they follow a job that did. Never raises.
+    Retry and verify jobs don't: they follow a job that did. Never raises.
     """
-    if cfg.get("source") == SEASON_SOURCE or cfg.get("retry_attempt") or cfg.get("verify"):
+    if cfg.get("retry_attempt") or cfg.get("verify"):
         return
     try:
         start_fingerprint_sweep(store, configs=configs)
@@ -1059,8 +914,7 @@ def _retries_missing_files(cfg: dict) -> bool:
 
     Webhook paths (and their retries) can arrive before the file is visible here (an import still copying over NFS);
     the preview job retries those too. A file the user picked, or a library listing, that isn't on disk won't appear by
-    waiting; a verify job's file was there already, and a Season job's files were on disk when the season step saw
-    them.
+    waiting; a verify job's file was there already.
     """
     return _sends_files(cfg) and not cfg.get("verify")
 
@@ -1091,7 +945,7 @@ def _log_missing(ctx: PipelineContext) -> None:
 
 
 def _log_summary(jm, job_id: str, outcome: dict[str, int], ctx: PipelineContext) -> None:
-    """End the job's log with a Season job's one line per season and the totals line. Never raises."""
+    """End the job's log with the totals line. Never raises."""
     try:
         logger.complete()  # the files' lines, still queued for the job's log, come before these
         for line in ctx.summary_lines(outcome):
@@ -1142,24 +996,6 @@ def finish_job(
         return
     parts = ([f"{failed} file(s) failed"] if failed else []) + warnings
     jm.complete_job(job_id, warning=" | ".join(parts) or None)
-
-
-def _settle_decide_again(jm, job_id: str, cfg: dict) -> None:
-    """Once the decide-again job has completed, clear the upgrade's request for it (``upgrade.DECIDE_AGAIN_KEY``).
-
-    Only a completed legacy job clears it. The flag no longer creates jobs on startup. Never raises.
-    """
-    if not cfg.get(DECIDE_AGAIN):
-        return
-    try:
-        finished = jm.get_job(job_id)
-        if finished is None or finished.status is not JobStatus.COMPLETED:
-            return
-        from ..upgrade import DECIDE_AGAIN_KEY
-
-        get_settings_manager().delete(DECIDE_AGAIN_KEY)
-    except Exception as exc:
-        logger.warning("Couldn't record that the legacy decide-again job finished: {}", exc)
 
 
 def wait_for_tracker(
@@ -1323,9 +1159,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
     # While the config holds the Check servers listing (a revived job's from the start): only a revive needs it, so the
     # teardown takes it off the ended job (the config ships in every job payload).
     listing_on_job = LISTING_CONFIG_KEY in cfg
-    # A batch of files to re-check after an update, with the versions each is read for: each file is recorded as it
-    # finishes (``versions.record_taken``). Empty for any other job.
-    rerun_batch: dict[str, dict[str, int]] = {}
     parked = False
 
     def cancel_check() -> bool:
@@ -1387,7 +1220,7 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     release_slot(slot, get_job_gate())
                 # The job's own start line (start_line) follows once its files are listed.
                 with logger.contextualize(**{JOB_LOG_SKIP: True}):
-                    if cfg.get("parked_checkpoint") or job.config.get("resource_wait"):
+                    if cfg.get("parked_checkpoint") or (job.config or {}).get("resource_wait"):
                         jm.resume_parked_job(job_id)
                     else:
                         jm.start_job(job_id)
@@ -1427,13 +1260,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     priority=live_priority,
                     force=bool(cfg.get("force")),
                     recheck_empty_server_markers=bool(cfg.get("reconcile")),
-                    # A TheIntroDB recheck mostly finds nothing new either: one line per season, as a Season job.
-                    season_recheck=cfg.get("source") in (SEASON_SOURCE, BUDGET_RECHECK_SOURCE),
-                    recheck_label=(
-                        BUDGET_RECHECK_LABEL if cfg.get("source") == BUDGET_RECHECK_SOURCE else SEASON_RECHECK_LABEL
-                    ),
-                    decide_again=bool(cfg.get(DECIDE_AGAIN)),
-                    online_recheck=bool(cfg.get(ONLINE_RECHECK)),
                 )
                 ctx.busy_writes_retried = _retry_follows(cfg)
                 ctx.retry_file_cap = MAX_RETRY_FILES
@@ -1456,7 +1282,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     listing = (
                         CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY)) if cfg.get("reconcile") else None
                     )
-                    rerun_batch = saved.get("rerun_batch", {})
                 elif cfg.get("reconcile"):
                     from .reconcile import check_servers_listing
 
@@ -1485,20 +1310,11 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                         ):
                             listing_on_job = True
                     items, warnings, sender_paths = listing.items, listing.warnings, {}
-                elif cfg.get(DECIDE_AGAIN):
-                    items, warnings, sender_paths = _items_to_decide_again(ctx.store, sweep_configs), [], {}
-                elif cfg.get(ONLINE_RECHECK):
-                    items, warnings, sender_paths = _items_for_online_recheck(ctx, cancel_check), [], {}
-                elif cfg.get(VERSION_RERUN):
-                    rerun_batch = _batch_to_read_again(jm, job_id, cfg, ctx, sweep_configs)
-                    items, warnings, sender_paths = _stored_file_items(set(rerun_batch)), [], {}
                 else:
                     items, warnings, sender_paths = build_items(
                         cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
                     )
                     cfg = _with_merged_sender_hints(cfg, items, sender_paths)
-                    if cfg.get("source") == BUDGET_RECHECK_SOURCE:
-                        items = _budget_recheck_items(job_id, ctx, items)
                 if cancel_check():
                     jm.cancel_job(job_id)
                     return
@@ -1514,16 +1330,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     if listing is not None:
                         jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
                         jm.complete_job(job_id, warning=" | ".join(warnings) or None)
-                    elif cfg.get(DECIDE_AGAIN):
-                        jm.add_log(job_id, "INFO - No file is left to decide again")
-                        jm.complete_job(job_id)
-                        _settle_decide_again(jm, job_id, cfg)
-                    elif cfg.get(ONLINE_RECHECK):
-                        jm.add_log(job_id, "INFO - No file is due to be asked again online")
-                        jm.complete_job(job_id)
-                    elif cfg.get(VERSION_RERUN):
-                        jm.add_log(job_id, "INFO - No file on disk is left to read again after an update")
-                        jm.complete_job(job_id)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     sweep_store = ctx.store
@@ -1541,10 +1347,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     items, carried, replaced_before_restart, carried_outcomes = _skip_finished_before_restart(
                         jm, chain_head or job_id, items, ctx.store
                     )
-                carried_reruns = {path: rerun_batch[path] for path in carried_outcomes if path in rerun_batch}
-                if carried_reruns:
-                    # Finished before a restart: its row was kept, but the restart may have come before its record.
-                    record_taken(ctx.store, carried_reruns)
                 if carried_outcomes:
                     # The pipeline never decides for a file without an owner; the store may still hold an old run's.
                     for path, outcome in sorted(carried_outcomes.items()):
@@ -1554,7 +1356,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                 if not items:
                     jm.set_job_outcome(job_id, carried)
                     finish_job(jm, job_id, carried, warnings, ctx)
-                    _settle_decide_again(jm, job_id, cfg)
                     if chain_head:
                         # A retry revived after a restart that had settled all its files: nothing is left to wait.
                         _recount_chain_head(jm, chain_head, ctx.store)
@@ -1594,10 +1395,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     jm.record_file_result(
                         chain_head or job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
                     )
-                    # After its row: a restart in between carries the file and records it then (above). Whatever the
-                    # outcome, the file ran; one that stopped part way on a cancel is left to a later batch.
-                    if file_path in rerun_batch and not cancel_check():
-                        record_taken(ctx.store, {file_path: rerun_batch[file_path]})
                     # The pipeline counted the file before handing its result here (``PipelineContext.decided_by``).
                     jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
                     if listing is not None and (gone := _confirmed_gone_items(listing, registry, file_path, servers)):
@@ -1664,7 +1461,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                             "context": snapshot_context(ctx),
                             "warnings": warnings,
                             "sender_paths": sender_paths,
-                            "rerun_batch": rerun_batch,
                             "waiting": {key: sorted(values) for key, values in waiting.items()},
                             "replaced": sorted(replaced),
                             "unchecked": {key: sorted(values) for key, values in unchecked.items()},
@@ -1704,7 +1500,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                     ctx,
                     retried=bool(retried),
                 )
-                _settle_decide_again(jm, job_id, cfg)
                 if chain_head and not retried:
                     _end_chain(jm, cfg, waiting)
                 if replaced and checks_replaced_later:
@@ -1746,11 +1541,6 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
                 jm.merge_job_config(job_id, {}, remove=(LISTING_CONFIG_KEY,))
             except Exception as exc:
                 logger.debug("Could not drop the Check servers listing of {}: {}", job_id, exc)
-        if rerun_batch and not parked:
-            try:
-                jm.merge_job_config(job_id, {}, remove=(VERSION_RERUN_FILES,))
-            except Exception as exc:
-                logger.debug("Could not drop the batch of files read again from {}: {}", job_id, exc)
         try:
             if not jm.get_running_jobs():
                 jm.clear_worker_statuses()

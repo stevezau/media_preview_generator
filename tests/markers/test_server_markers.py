@@ -1,4 +1,4 @@
-"""read_server_markers: markers already on Plex/Jellyfin/Emby as agreement evidence (spec §5.5 item 7)."""
+"""read_server_markers: markers already on Plex/Jellyfin/Emby as agreement evidence."""
 
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ class TestPlexLibraryHidingMarkers:
 class TestItemWideMarkersOfOtherVersions:
     """Plex serves one marker set per item: with ``duration_ms`` (evidence), an item holding another cut of the file
     gives no evidence (None), since its markers may describe that cut. Emby keeps each version's markers on its own
-    item (spec §3.3), so its markers always describe the item's own cut and it has no version check."""
+    item, so its markers always describe the item's own cut and it has no version check."""
 
     INTRO = [{"type": "intro", "start_ms": 24_500, "end_ms": 113_900, "final": False}]
     EMBY_INTRO = [
@@ -377,7 +377,7 @@ def _emby(rows, stored=NOTHING_STORED, bridge=BRIDGE_INSTALLED):
     return server
 
 
-# Rick and Morty S01E04 on the lab Emby after the scale run (2026-09-19): the Bridge plugin's store and the chapter rows
+# An Emby episode after a large scan: the Bridge plugin's store and the chapter rows
 # it wrote from it.
 LAB_STORED = {
     **NOTHING_STORED,
@@ -446,7 +446,7 @@ class TestEmby:
 
 class TestEmbyOurOwnRows:
     """The Bridge plugin only shows what it stores, so its store (on the Emby server, whatever markers.db knows) says
-    which chapter rows are ours; those are never a second opinion (scale run 2026-09-19, finding 2)."""
+    which chapter rows are ours; those are never a second opinion."""
 
     @pytest.mark.parametrize(
         ("stored", "expected"),

@@ -195,7 +195,7 @@ class TestLiveJobLifecycle:
         # to "No active jobs" when the panel is empty.
         # Allow a few SocketIO ticks for the DOM update to propagate.
         try:
-            expect(backend_real_page.locator(f'[data-job-id="{job_id}"]')).to_have_count(0, timeout=5000)
+            expect(backend_real_page.locator(f"#active-job-{job_id}")).to_have_count(0, timeout=5000)
         except AssertionError:
             # Surface the captured DOM state so we can diagnose.
             html = backend_real_page.locator("#activeJobsContainer").inner_html()

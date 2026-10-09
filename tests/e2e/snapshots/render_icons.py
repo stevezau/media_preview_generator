@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Render the logo and the favicon to the PNG sizes the site, the app and Unraid use.
 
-    /home/data/.venv/bin/python tests/e2e/snapshots/render_icons.py
+    python tests/e2e/snapshots/render_icons.py
 
 Chromium draws the SVGs (the engine that shows them in a browser tab), so the PNGs match what people
-see. Also writes docs/design/logo/favicon-check.png: both marks at 16, 32 and 64 px on dark and light,
+see. Also writes favicon-check.png (to $FAVICON_CHECK_OUT, default: the system temp dir): both marks at 16, 32 and 64 px on dark and light,
 at 1x, for judging the favicon at the sizes it is actually shown.
 """
 
 from __future__ import annotations
 
 import base64
+import os
+import tempfile
 from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
@@ -26,7 +28,7 @@ RENDERS = [
     (LOGO, 512, APP_IMAGES / "icon.png"),
     (FAVICON, 32, APP_IMAGES / "favicon-32.png"),
 ]
-CHECK_SHEET = REPO_ROOT / "docs/design/logo/favicon-check.png"
+CHECK_SHEET = Path(os.environ.get("FAVICON_CHECK_OUT", Path(tempfile.gettempdir()) / "favicon-check.png"))
 CELL = 96
 
 
@@ -58,7 +60,7 @@ def _check_sheet(page: Page) -> None:
     )
     page.wait_for_function("() => [...document.images].every((i) => i.complete && i.naturalWidth > 0)")
     page.screenshot(path=str(CHECK_SHEET))
-    print(f"wrote {CHECK_SHEET.relative_to(REPO_ROOT)}")
+    print(f"wrote {CHECK_SHEET}")
 
 
 def main() -> None:

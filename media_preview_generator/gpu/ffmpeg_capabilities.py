@@ -19,6 +19,13 @@ from loguru import logger
 MIN_FFMPEG_VERSION = (7, 0, 0)
 
 
+def ffmpeg_binary() -> str:
+    """Return the FFmpeg binary jobs run (jellyfin-ffmpeg when installed), so probes test the same build."""
+    from ..config import _resolve_ffmpeg_path
+
+    return _resolve_ffmpeg_path() or "ffmpeg"
+
+
 def _get_ffmpeg_version() -> tuple[int, int, int] | None:
     """Get FFmpeg version as a tuple of integers.
 
@@ -29,7 +36,7 @@ def _get_ffmpeg_version() -> tuple[int, int, int] | None:
     """
     try:
         result = subprocess.run(
-            ["ffmpeg", "-version"],
+            [ffmpeg_binary(), "-version"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -148,7 +155,7 @@ def _get_ffmpeg_hwaccels() -> list[str]:
     """
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hwaccels"],
+            [ffmpeg_binary(), "-hwaccels"],
             capture_output=True,
             text=True,
             encoding="utf-8",

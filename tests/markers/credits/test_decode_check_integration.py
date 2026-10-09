@@ -10,7 +10,7 @@ import time
 import pytest
 
 from media_preview_generator.markers.credits import decode_check, frames
-from tests.markers.credits.test_frames_integration import vaapi_node
+from tests.markers.credits.helpers import vaapi_node
 
 pytestmark = pytest.mark.integration
 
@@ -61,7 +61,7 @@ def test_this_hosts_nvidia_gpu_passes_the_check(ffmpeg, loguru_caplog):
 def test_this_hosts_vaapi_gpu_passes_the_check(ffmpeg, loguru_caplog):
     node = vaapi_node()
     if node is None:
-        pytest.skip("no Intel or AMD render node here (storage's only GPU is NVIDIA); runs in the lab image")
+        pytest.skip("no Intel or AMD render node here (an NVIDIA-only host skips this)")
     device, vendor = node
     answer, lines, _ = _check(vendor, device, ffmpeg, loguru_caplog)
     assert answer is True, lines

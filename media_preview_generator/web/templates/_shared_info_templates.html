@@ -109,17 +109,16 @@
     media server. The right choice depends on your server type, whether
     you have UI access, and how long-lived you want the credential to be.</p>
 
-    <p><strong>For Plex:</strong> OAuth is the only option. Click
-    <em>Connect with Plex</em> and the app redirects to plex.tv for a
-    one-time authorization. The returned token is long-lived — no
-    password is ever stored.</p>
+    <p><strong>For Plex:</strong> Click <em>Sign in with Plex</em> and
+    authorize at plex.tv. The returned token is long-lived — no
+    password is ever stored. You can also paste a Plex token manually.</p>
 
     <p><strong>For Emby:</strong></p>
     <ul>
-        <li><strong>API Key</strong> (recommended) — create one in Emby
+        <li><strong>API Key</strong> — create one in Emby
             Dashboard → Advanced → API Keys. Copy-paste it here. Long-
             lived, revocable, doesn't require your password.</li>
-        <li><strong>Username + Password</strong> — sent ONCE to get a
+        <li><strong>Username + Password</strong> (default) — sent ONCE to get a
             session token; only the token is persisted. Useful for
             headless setups where you can't open the Emby UI to make
             an API key.</li>

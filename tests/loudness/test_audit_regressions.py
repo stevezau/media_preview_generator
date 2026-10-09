@@ -9,10 +9,10 @@ import pytest
 from media_preview_generator.loudness import job
 from media_preview_generator.web.jobs import JobStatus
 
-from .test_job_lifecycle import Lifecycle, lifecycle  # noqa: F401
+from .conftest import Lifecycle
 
 
-def test_unreadable_retry_input_preserves_full_parent_totals(lifecycle: Lifecycle) -> None:  # noqa: F811
+def test_unreadable_retry_input_preserves_full_parent_totals(lifecycle: Lifecycle) -> None:
     manager = lifecycle.manager
     head = manager.create_job(kind="loudness", config={"is_retry_chain": True})
     totals = {job.WRITTEN: 10000, job.WAITING: 501}
@@ -44,7 +44,7 @@ def test_unreadable_retry_input_preserves_full_parent_totals(lifecycle: Lifecycl
     assert lifecycle.analyses == []
 
 
-def test_restart_keeps_publishers_for_files_finished_before_interruption(lifecycle: Lifecycle) -> None:  # noqa: F811
+def test_restart_keeps_publishers_for_files_finished_before_interruption(lifecycle: Lifecycle) -> None:
     lifecycle.api_ready = True
     first = lifecycle.add_file("first.mkv")
     second = lifecycle.add_file("second.mkv")
@@ -64,7 +64,7 @@ def test_restart_keeps_publishers_for_files_finished_before_interruption(lifecyc
     assert lifecycle.analyses == [(first, 1), (second, 1), (second, 1)]
 
 
-def test_restart_rechecks_a_finished_path_replaced_before_resume(lifecycle: Lifecycle) -> None:  # noqa: F811
+def test_restart_rechecks_a_finished_path_replaced_before_resume(lifecycle: Lifecycle) -> None:
     lifecycle.api_ready = True
     path = lifecycle.add_file("replaced.mkv")
     parent = lifecycle.start([path])
@@ -81,7 +81,7 @@ def test_restart_rechecks_a_finished_path_replaced_before_resume(lifecycle: Life
     assert lifecycle.children(parent)
 
 
-def test_restart_after_last_file_does_not_wait_forever_on_an_empty_tracker(lifecycle: Lifecycle) -> None:  # noqa: F811
+def test_restart_after_last_file_does_not_wait_forever_on_an_empty_tracker(lifecycle: Lifecycle) -> None:
     lifecycle.api_ready = True
     path = lifecycle.add_file("finished.mkv")
     parent = lifecycle.start([path])
@@ -108,7 +108,7 @@ def test_restart_after_last_file_does_not_wait_forever_on_an_empty_tracker(lifec
 
 @pytest.mark.parametrize("native_complete", [False, True], ids=["new-analysis", "existing-native"])
 def test_source_replaced_during_api_verification_is_not_reported_complete(
-    lifecycle: Lifecycle,  # noqa: F811
+    lifecycle: Lifecycle,
     monkeypatch: pytest.MonkeyPatch,
     native_complete: bool,
 ) -> None:

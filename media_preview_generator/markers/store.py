@@ -1,4 +1,4 @@
-"""SQLite store for Intro & Credits (spec §6.1).
+"""SQLite store for Intro & Credits.
 
 One connection shared by the web threads, checking threads and workers: every call takes a lock, multi-statement
 changes run in ``BEGIN IMMEDIATE`` transactions. Reads queue up behind writes just like everything else here,
@@ -51,6 +51,30 @@ REPLACED_LENGTH_TOLERANCE_MS = 1_000
 # The fingerprint window whose points ``season_pair_runs`` runs are matched from: ``audio.fingerprint.WINDOW`` (which
 # imports this module, so it can't be imported here; test_store_audio pins the two together).
 SEASON_PAIR_WINDOW = "intro"
+
+_IDENTITY_FAILURE_TABLES = (
+    "member_probe_failures",
+    "member_fingerprint_failures",
+    "credits_text_timeouts",
+    "end_picture_failures",
+)
+
+
+def _identity_failures_table(table: str) -> str:
+    """The CREATE TABLE statement of one of the ``_IDENTITY_FAILURE_TABLES``.
+
+    Args:
+        table: One of the table names.
+
+    Returns:
+        The statement.
+    """
+    return f"""CREATE TABLE IF NOT EXISTS {table} (
+        canonical_path TEXT PRIMARY KEY,
+        size INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        failed_at TEXT NOT NULL)"""
+
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -168,7 +192,7 @@ _SCHEMA = (
         kind TEXT NOT NULL,
         confirmed_at TEXT NOT NULL)""",
     # Runs the v3 matcher found between two fingerprinted files. file_a is the matcher's first argument: the matcher
-    # isn't symmetric, and the season step always pairs two files the same way round (Task 7). One row per version:
+    # isn't symmetric, and the season step always pairs two files the same way round. One row per version:
     # the version names the speed each side was matched at, and a file at another frame rate than most of its season
     # is matched at both to tell which one its audio plays at. The cache before this one kept one row per pair
     # (``season_pairs``); it is only a cache, so it is dropped.
@@ -248,40 +272,11 @@ _SCHEMA = (
         seen_at TEXT NOT NULL,
         versions TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY (file_id, type))""",
-    # A file another episode's season step couldn't probe, with the identity it had then: it isn't probed again (up to
-    # a 60 s ffprobe on a checking thread) until that identity changes or the entry is old. Not tied to a file row: an
-    # unreadable file never gets one.
-    """CREATE TABLE IF NOT EXISTS member_probe_failures (
-        canonical_path TEXT PRIMARY KEY,
-        size INTEGER NOT NULL,
-        mtime_ns INTEGER NOT NULL,
-        failed_at TEXT NOT NULL)""",
-    # A file whose fingerprint failed, with the identity it had then: other episodes' season steps don't run ffmpeg on
-    # it again (up to 300 s on a worker, per sibling) until that identity changes or the entry is old. Its own run and a
-    # forced re-detect still try. Kept apart from probe failures, which also stop a member's chapters being read.
-    """CREATE TABLE IF NOT EXISTS member_fingerprint_failures (
-        canonical_path TEXT PRIMARY KEY,
-        size INTEGER NOT NULL,
-        mtime_ns INTEGER NOT NULL,
-        failed_at TEXT NOT NULL)""",
-    # A file whose credit text decode timed out (a stalled read, spec §5.4), with the identity it had then: its credit
-    # text isn't decoded again (up to 600 s per decode on a worker, three decodes at worst) until that identity changes,
-    # the entry is a day old, a forced re-detect, or a credit text answer is stored for it. Not tied to a file row, like
-    # the member failures above.
-    """CREATE TABLE IF NOT EXISTS credits_text_timeouts (
-        canonical_path TEXT PRIMARY KEY,
-        size INTEGER NOT NULL,
-        mtime_ns INTEGER NOT NULL,
-        failed_at TEXT NOT NULL)""",
-    # A file season audio's end-picture check couldn't read (ffprobe failed, ffmpeg exited with an error or timed out),
-    # with the identity it had then: it isn't read for the check again (up to 150 s on a worker per episode that meets
-    # it) until that identity changes, the entry is a day old, or a forced re-detect. Meanwhile it has no share: never a
-    # pass. Not tied to a file row, like the member failures above.
-    """CREATE TABLE IF NOT EXISTS end_picture_failures (
-        canonical_path TEXT PRIMARY KEY,
-        size INTEGER NOT NULL,
-        mtime_ns INTEGER NOT NULL,
-        failed_at TEXT NOT NULL)""",
+    # Files a step couldn't read, with the identity they had then, so the step isn't repeated until that identity
+    # changes or the entry is old. Not tied to a file row: an unreadable file never gets one. Four tables of one shape:
+    # a season member's ffprobe, a file's fingerprint (kept apart from probe failures, which also stop a member's
+    # chapters being read), a credit text decode that timed out, and season audio's end-picture read.
+    *(_identity_failures_table(table) for table in _IDENTITY_FAILURE_TABLES),
     # A server's empty (or unusable) answer for a file, asked again by Check servers: how many times it was read again
     # without markers (the backoff step; gone once the answer has markers or the file changes), when the last re-read
     # that couldn't replace the answer happened (the backoff counts from it), and when Check servers last took the
@@ -347,14 +342,6 @@ _SCHEMA = (
         PRIMARY KEY (file_id, detector))""",
 )
 
-# Tables an older build of the same schema (from before ``season_pair_runs``) neither reads nor clears, emptied when one
-# has opened markers.db meanwhile (``MarkerStore._forget_what_an_older_build_left_stale``): the pair cache would hand a
-# file it replaced its old fingerprint's runs, a replaced file's decisions kept aside may be from a file before the one
-# it replaced, and the version re-run's records predate what it read and decided with its older detectors and rules
-# (emptied, the start check lists those files again). No schema bump: that would make the older build refuse
-# markers.db, and a rollback would have to put back a copy from before the upgrade.
-_STALE_AFTER_AN_OLDER_BUILD = ("season_pair_runs", "replaced_decisions", "replaced_versions", "version_reruns")
-
 # Ordered migrations: _MIGRATIONS[v] holds the statements that take an existing database from schema
 # version v to v+1. `_SCHEMA` is CREATE TABLE IF NOT EXISTS only, so a column added there alone never
 # reaches an existing install -- every new column needs its ALTER TABLE here too. A future bump appends
@@ -372,7 +359,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 LOCKED_BY_USER = "locked by user"
 # The reason a just-unlocked type carries until the next detection run decides it again (`unlock_markers`).
 UNLOCKED_PENDING = "unlocked; the next run decides this type again"
-# The status the rules before 2026-10-02 stored for a type they couldn't settle ("Needs review"). Nothing writes it any
+# The status older rules stored for a type they couldn't settle ("Needs review"). Nothing writes it any
 # more: a stored row reads as no evidence (``_status``) until the file is decided again (``upgrade._migrate_to_v20``
 # queues that for the files on disk), and a decided marker it never pulled stays as it is.
 LEGACY_NEEDS_REVIEW = "needs_review"
@@ -436,13 +423,10 @@ class DecisionRow:
     settings_fingerprint: str
     decided_at: str
     decided_by: tuple[str, ...] = ()
-    # Stored under the removed ``needs_review`` status: ``status`` reads as no evidence, but the row must be rewritten
-    # by the next decision even when nothing else differs, or ``files_with_legacy_review_decisions`` lists it forever.
-    legacy: bool = False
 
 
 def _same_identity_on_disk(path: str, size: int, mtime_ns: int) -> bool:
-    """Whether the file on disk is still the one a record describes (path + size + mtime, spec §6.1)."""
+    """Whether the file on disk is still the one a record describes (path + size + mtime)."""
     try:
         st = os.stat(path)
     except OSError:
@@ -620,38 +604,11 @@ class MarkerStore:
                 for stmt in _MIGRATIONS.get(current, ()):
                     conn.execute(stmt)
                 current += 1
-            self._forget_what_an_older_build_left_stale(conn)
             for stmt in _SCHEMA:
                 conn.execute(stmt)
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(current),),
-            )
-
-    @staticmethod
-    def _forget_what_an_older_build_left_stale(conn: sqlite3.Connection) -> None:
-        """Empty the tables an older build left out of step (``_STALE_AFTER_AN_OLDER_BUILD``), when one has opened
-        markers.db since this build last did.
-
-        Such a build (schema 3 from before ``season_pair_runs``: a rollback to 40311c3 or 98bed80) opens it and works,
-        but it never reads or clears these tables when it replaces or reads a file again. It recreates
-        ``season_pairs``, which ``_SCHEMA`` drops on every open, so that table being there is the sign; on the first
-        upgrade the tables aren't there yet and nothing is emptied.
-
-        Args:
-            conn: The connection, inside the open's transaction.
-        """
-        existing = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "season_pairs" not in existing:
-            return
-        emptied = [table for table in _STALE_AFTER_AN_OLDER_BUILD if table in existing]
-        for table in emptied:
-            conn.execute(f"DELETE FROM {table}")
-        if emptied:
-            logger.info(
-                "markers.db was opened by an older version of the app since this one last ran; emptied what it couldn't "
-                "keep up to date: {}",
-                ", ".join(emptied),
             )
 
     def _backup_before_migrating(self) -> None:
@@ -852,12 +809,6 @@ class MarkerStore:
             row = self._conn.execute("SELECT * FROM files WHERE canonical_path=?", (canonical_path,)).fetchone()
         return self._file(row) if row else None
 
-    def get_file_by_id(self, file_id: int) -> FileRecord | None:
-        """Look a file up by id."""
-        with self._lock:
-            row = self._conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
-        return self._file(row) if row else None
-
     @staticmethod
     def _judged(conn: sqlite3.Connection, file_id: int) -> list[tuple[str, tuple[int, int] | None, tuple[str, ...]]]:
         """A file's decisions of ours per type: its decided marker's times and sources, or None and no sources
@@ -1012,18 +963,6 @@ class MarkerStore:
                 (season_key,),
             ).fetchall()
         return [self._file(r) for r in rows]
-
-    def files_with_legacy_review_decisions(self) -> list[str]:
-        """Canonical paths of the files with a marker type still stored under the removed "Needs review" status
-        (:data:`LEGACY_NEEDS_REVIEW`), sorted: the decide-again job decides them under today's rules. Files missing
-        from disk (``mark_missing``) are left out until they come back."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT DISTINCT f.canonical_path FROM decisions d JOIN files f ON f.id = d.file_id "
-                "WHERE d.status=? AND f.missing_since IS NULL ORDER BY f.canonical_path",
-                (LEGACY_NEEDS_REVIEW,),
-            ).fetchall()
-        return [r["canonical_path"] for r in rows]
 
     def files_waiting_for_other_versions(self, detector: str | None = None, version: int = 0) -> list[str]:
         """Canonical paths of the files whose last publish to a server waits for its item's other versions to agree
@@ -1192,10 +1131,6 @@ class MarkerStore:
         The item's one file has to be this file, by name: a file another one replaced keeps its record of the item,
         which then shows the new file's times. An item's files are the server's own paths, under another folder than
         this app's wherever the server has a path mapping, so only the names are compared.
-
-        Until 2026-09-25 such an item kept its earlier times when a decision moved by under 2 s
-        (``publishers.base.agreed_across_versions``); the pipeline sends it the decided times on the file's next run
-        (``pipeline._one_version_shows_other_times``).
 
         Args:
             detector: The name its re-runs are recorded under.
@@ -1634,7 +1569,7 @@ class MarkerStore:
     ) -> dict[MarkerType, Marker]:
         """Lock the user's own markers and record each type as decided by them, in one transaction.
 
-        The whole save lands or none of it does, and it lands before any server is contacted (plan ruling P-R1), so a
+        The whole save lands or none of it does, and it lands before any server is contacted so a
         publish that fails can never lose the edit. The decision row is rewritten to
         :data:`LOCKED_BY_USER` so the Inspector and the Season view show the lock straight away, with the
         same words the next detection run writes for a locked type. The proposal the lock replaces is dropped for the
@@ -1717,7 +1652,6 @@ class MarkerStore:
                 r["settings_fingerprint"],
                 r["decided_at"],
                 tuple(json.loads(r["decided_by"] or "[]")),
-                legacy=r["status"] == LEGACY_NEEDS_REVIEW,
             )
             for r in rows
         }
@@ -2241,122 +2175,97 @@ class MarkerStore:
                 (file_id, limit_ms, self._now()),
             )
 
+    def _record_identity_failure(
+        self, table: str, identity: FileIdentity, failed_at: datetime, forget_before: datetime
+    ) -> None:
+        """Remember a failure for a file with this identity (replaces the path's older entry).
+
+        Entries that no longer hold a file back are forgotten in the same write: the tables aren't tied to file rows,
+        and a path gone from disk is never tried or recorded again, so its entry would otherwise stay.
+        """
+        if table not in _IDENTITY_FAILURE_TABLES:
+            raise ValueError(table)
+        with self._tx() as conn:
+            conn.execute(f"DELETE FROM {table} WHERE failed_at < ?", (forget_before.isoformat(),))  # noqa: S608
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table} (canonical_path, size, mtime_ns, failed_at) VALUES (?,?,?,?)",  # noqa: S608
+                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
+            )
+
+    def _identity_failed_at(self, table: str, identity: FileIdentity) -> datetime | None:
+        """When a failure with exactly this identity was last recorded, or None (never, or another identity)."""
+        if table not in _IDENTITY_FAILURE_TABLES:
+            raise ValueError(table)
+        with self._lock:
+            r = self._conn.execute(
+                f"SELECT failed_at FROM {table} WHERE canonical_path=? AND size=? AND mtime_ns=?",  # noqa: S608
+                (identity.canonical_path, identity.size, identity.mtime_ns),
+            ).fetchone()
+        return datetime.fromisoformat(r["failed_at"]) if r else None
+
     def record_member_probe_failure(
         self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
     ) -> None:
-        """Remember that a season member with this identity couldn't be probed (replaces the path's older entry).
-
-        Entries that no longer keep a member from being probed are forgotten in the same write: the table isn't tied to
-        file rows, and a path gone from disk is never probed or recorded again, so its entry would otherwise stay.
+        """Remember that a season member with this identity couldn't be probed.
 
         Args:
             identity: The file as it was when probing failed.
             failed_at: When (the job's clock).
             forget_before: Entries of any path that failed before this are removed.
         """
-        with self._tx() as conn:
-            conn.execute("DELETE FROM member_probe_failures WHERE failed_at < ?", (forget_before.isoformat(),))
-            conn.execute(
-                "INSERT OR REPLACE INTO member_probe_failures (canonical_path, size, mtime_ns, failed_at) "
-                "VALUES (?,?,?,?)",
-                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
-            )
+        self._record_identity_failure("member_probe_failures", identity, failed_at, forget_before)
 
     def member_probe_failed_at(self, identity: FileIdentity) -> datetime | None:
         """When probing a season member with exactly this identity last failed, or None (never, or another identity)."""
-        with self._lock:
-            r = self._conn.execute(
-                "SELECT failed_at FROM member_probe_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
-                (identity.canonical_path, identity.size, identity.mtime_ns),
-            ).fetchone()
-        return datetime.fromisoformat(r["failed_at"]) if r else None
+        return self._identity_failed_at("member_probe_failures", identity)
 
     def record_member_fingerprint_failure(
         self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
     ) -> None:
-        """Remember that a file with this identity couldn't be fingerprinted (replaces the path's older entry).
-
-        Entries that no longer keep a file from being fingerprinted are forgotten in the same write, as for probe
-        failures.
+        """Remember that a file with this identity couldn't be fingerprinted.
 
         Args:
             identity: The file as it was when ffmpeg failed.
             failed_at: When (the job's clock).
             forget_before: Entries of any path that failed before this are removed.
         """
-        with self._tx() as conn:
-            conn.execute("DELETE FROM member_fingerprint_failures WHERE failed_at < ?", (forget_before.isoformat(),))
-            conn.execute(
-                "INSERT OR REPLACE INTO member_fingerprint_failures (canonical_path, size, mtime_ns, failed_at) "
-                "VALUES (?,?,?,?)",
-                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
-            )
+        self._record_identity_failure("member_fingerprint_failures", identity, failed_at, forget_before)
 
     def member_fingerprint_failed_at(self, identity: FileIdentity) -> datetime | None:
         """When fingerprinting a file with exactly this identity last failed, or None (never, or another identity)."""
-        with self._lock:
-            r = self._conn.execute(
-                "SELECT failed_at FROM member_fingerprint_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
-                (identity.canonical_path, identity.size, identity.mtime_ns),
-            ).fetchone()
-        return datetime.fromisoformat(r["failed_at"]) if r else None
+        return self._identity_failed_at("member_fingerprint_failures", identity)
 
     def record_end_picture_failure(
         self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
     ) -> None:
-        """Remember that season audio's end-picture check couldn't read a file with this identity (replaces the path's
-        older entry). Entries that no longer hold a file back are forgotten in the same write, as for member failures.
+        """Remember that season audio's end-picture check couldn't read a file with this identity.
 
         Args:
             identity: The file as it was when the read failed.
             failed_at: When (the job's clock).
             forget_before: Entries of any path that failed before this are removed.
         """
-        with self._tx() as conn:
-            conn.execute("DELETE FROM end_picture_failures WHERE failed_at < ?", (forget_before.isoformat(),))
-            conn.execute(
-                "INSERT OR REPLACE INTO end_picture_failures (canonical_path, size, mtime_ns, failed_at) "
-                "VALUES (?,?,?,?)",
-                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
-            )
+        self._record_identity_failure("end_picture_failures", identity, failed_at, forget_before)
 
     def end_picture_failed_at(self, identity: FileIdentity) -> datetime | None:
         """When the end-picture check last failed to read a file with exactly this identity, or None."""
-        with self._lock:
-            r = self._conn.execute(
-                "SELECT failed_at FROM end_picture_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
-                (identity.canonical_path, identity.size, identity.mtime_ns),
-            ).fetchone()
-        return datetime.fromisoformat(r["failed_at"]) if r else None
+        return self._identity_failed_at("end_picture_failures", identity)
 
     def record_credits_text_timeout(
         self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
     ) -> None:
-        """Remember that a file with this identity timed out decoding its credit text (replaces the path's older entry).
-
-        Entries that no longer hold a file back are forgotten in the same write, as for member failures.
+        """Remember that a file with this identity timed out decoding its credit text.
 
         Args:
             identity: The file as it was when the decode timed out.
             failed_at: When (the job's clock).
             forget_before: Entries of any path that timed out before this are removed.
         """
-        with self._tx() as conn:
-            conn.execute("DELETE FROM credits_text_timeouts WHERE failed_at < ?", (forget_before.isoformat(),))
-            conn.execute(
-                "INSERT OR REPLACE INTO credits_text_timeouts (canonical_path, size, mtime_ns, failed_at) "
-                "VALUES (?,?,?,?)",
-                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
-            )
+        self._record_identity_failure("credits_text_timeouts", identity, failed_at, forget_before)
 
     def credits_text_timed_out_at(self, identity: FileIdentity) -> datetime | None:
         """When decoding this identity's credit text last timed out, or None (never, or another identity)."""
-        with self._lock:
-            r = self._conn.execute(
-                "SELECT failed_at FROM credits_text_timeouts WHERE canonical_path=? AND size=? AND mtime_ns=?",
-                (identity.canonical_path, identity.size, identity.mtime_ns),
-            ).fetchone()
-        return datetime.fromisoformat(r["failed_at"]) if r else None
+        return self._identity_failed_at("credits_text_timeouts", identity)
 
     def get_item_publish_state(self, server_id: str, item_id: str) -> ItemPublishStateRow | None:
         """What this app last left on a server item, or None when it never published there."""
@@ -2640,7 +2549,7 @@ class MarkerStore:
         marks what it took once the file ran (``mark_server_rechecks_taken``), so a run that ends first leaves it due.
 
         A file qualifies for a server when its credits or preview are decided (the types a server's own markers can
-        shorten, spec §5.5 rule 7), nothing of ours is on the server item it last published to, and that server's
+        shorten), nothing of ours is on the server item it last published to, and that server's
         stored answer for it is empty (or unusable) and old enough: at least ``after[n]`` old after ``n`` re-reads
         without markers (counted from the last re-read that failed, when that is later), never once it was read again
         ``len(after)`` times. A file taken for a server in the last day

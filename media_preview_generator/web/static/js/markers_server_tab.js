@@ -28,17 +28,6 @@
         pendingConfirmation: null,
     };
 
-    function esc(value) {
-        const shared = window.MPGShared && window.MPGShared.escapeHtml;
-        const text = value == null ? '' : String(value);
-        if (shared) return shared(text);
-        return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    }
-
-    function csrfHeaders() {
-        return { 'X-CSRFToken': typeof getCsrfToken === 'function' ? getCsrfToken() : '' };
-    }
-
     function vendorOf(server) {
         return String((server && server.type) || '').toLowerCase();
     }
@@ -74,8 +63,8 @@
     // `detailHtml` (authored literal HTML) makes a click open it in the info modal; _initBootstrapTooltips (below, on
     // render) adds "Click for more." and the pointer, as for every other ⓘ.
     function infoIcon(title, detailHtml) {
-        const detail = detailHtml ? ` data-explain-html="${esc(detailHtml)}"` : '';
-        return `<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${esc(title)}"${detail}><i class="bi bi-info-circle"></i></button>`;
+        const detail = detailHtml ? ` data-explain-html="${escapeHtml(detailHtml)}"` : '';
+        return `<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtml(title)}"${detail}><i class="bi bi-info-circle"></i></button>`;
     }
 
     function badge(tone, text, extraClass) {
@@ -85,11 +74,11 @@
             bad: 'bg-danger-subtle text-danger-emphasis border border-danger-subtle',
             off: 'bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle',
         };
-        return `<span class="badge ${tones[tone]}${extraClass ? ` ${extraClass}` : ''}">${esc(text)}</span>`;
+        return `<span class="badge ${tones[tone]}${extraClass ? ` ${extraClass}` : ''}">${escapeHtml(text)}</span>`;
     }
 
     function kvRow(label, valueHtml) {
-        return `<div class="markers-kv-label">${esc(label)}</div><div>${valueHtml}</div>`;
+        return `<div class="markers-kv-label">${escapeHtml(label)}</div><div>${valueHtml}</div>`;
     }
 
     function kvGrid(rows) {
@@ -104,8 +93,8 @@
         const rawHint = (capability.details || {}).hint;
         const hint = rawHint && !SAME_HOST_ADVICE_RE.test(capability.message) ? rawHint : '';
         return `<div class="alert alert-warning small text-break py-2 mb-0 mt-3" role="status">
-            <i class="bi bi-exclamation-triangle me-1"></i>${esc(capability.message)}
-            ${hint ? `<div class="mt-1">${esc(hint)}</div>` : ''}
+            <i class="bi bi-exclamation-triangle me-1"></i>${escapeHtml(capability.message)}
+            ${hint ? `<div class="mt-1">${escapeHtml(hint)}</div>` : ''}
         </div>`;
     }
 
@@ -181,7 +170,7 @@
                 : '<p>Markers are written straight into this database, so it has to be on a local disk of the machine Plex runs on: a database on a network share can\'t be written safely.</p>';
             rows.push(kvRow(
                 agent ? 'Database location (on the Plex machine)' : 'Database location',
-                `<span class="font-monospace text-break me-1">${esc(dirname(details.db_path))}</span>${disk}${infoIcon(whereTip, whereDetail)}`,
+                `<span class="font-monospace text-break me-1">${escapeHtml(dirname(details.db_path))}</span>${disk}${infoIcon(whereTip, whereDetail)}`,
             ));
         }
         const detectionOn = plexDetectionOn(details.detection);
@@ -196,7 +185,7 @@
             const outcome = keepsPlex ? "it can replace ours; Plex's are kept" : 'it can replace ours; we put them back';
             rows.push(kvRow(
                 "Plex's own detection",
-                `${badge('warn', 'On', 'markers-detection')} <span class="text-muted">${esc(outcome)}</span>${detectionTip}`,
+                `${badge('warn', 'On', 'markers-detection')} <span class="text-muted">${escapeHtml(outcome)}</span>${detectionTip}`,
             ));
         } else if (detectionOn === false) {
             rows.push(kvRow("Plex's own detection", badge('off', 'Off', 'markers-detection') + detectionTip));
@@ -209,7 +198,7 @@
     }
 
     function installButton(label) {
-        return `<button type="button" class="btn btn-sm btn-primary ms-2 py-0" id="markersInstallPluginBtn">${esc(label)}</button>
+        return `<button type="button" class="btn btn-sm btn-primary ms-2 py-0" id="markersInstallPluginBtn">${escapeHtml(label)}</button>
             <span id="markersInstallResult" class="small ms-2"></span>`;
     }
 
@@ -217,7 +206,7 @@
     // the installed version and nothing it would have to invent.
     function outdatedPluginRow(details) {
         const installed = details.plugin_version ? `installed ${details.plugin_version}` : 'installed version unknown';
-        return kvRow('Plugin', `${badge('warn', 'Update needed')} <span class="text-muted markers-plugin-installed">— ${esc(installed)}</span>`
+        return kvRow('Plugin', `${badge('warn', 'Update needed')} <span class="text-muted markers-plugin-installed">— ${escapeHtml(installed)}</span>`
             + infoIcon('This version of the plugin can\'t take intro and credits markers. Update installs the newest version.')
             + installButton('Update'));
     }
@@ -234,7 +223,7 @@
         } else if (capability.state === 'needs_plugin') {
             rows.push(kvRow('Plugin', badge('bad', 'Not installed') + installButton('Install')));
         }
-        rows.push(kvRow('Can show', esc(canShowText(status.can_show))));
+        rows.push(kvRow('Can show', escapeHtml(canShowText(status.can_show))));
         return kvGrid(rows) + (pluginStates.includes(capability.state) ? '' : warningLine(capability));
     }
 
@@ -279,11 +268,11 @@
             return;
         }
         const [tone, text] = AGENT_BADGES[agent.state] || AGENT_BADGES.unreachable;
-        const version = agent.version ? ` <span class="text-muted">version ${esc(agent.version)}</span>` : '';
+        const version = agent.version ? ` <span class="text-muted">version ${escapeHtml(agent.version)}</span>` : '';
         const note = agent.state === 'unreachable'
             ? '<div class="text-muted mt-1">Markers wait here until the agent answers again. Nothing is lost.</div>'
             : '';
-        line.innerHTML = `${badge(tone, text)} <span class="font-monospace text-break">${esc(agent.url || '')}</span>${version}${check}${note}`;
+        line.innerHTML = `${badge(tone, text)} <span class="font-monospace text-break">${escapeHtml(agent.url || '')}</span>${version}${check}${note}`;
     }
 
     function renderStatus(server, status) {
@@ -338,13 +327,12 @@
         const result = $('#markersInstallResult');
         const label = button.textContent;
         button.disabled = true;
-        button.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${esc(label)}`;
+        button.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${escapeHtml(label)}`;
         let data = null;
         let httpStatus = 0;
         try {
             const r = await fetch(`/api/servers/${encodeURIComponent(server.id)}/install-plugin`, {
                 method: 'POST',
-                headers: csrfHeaders(),
             });
             httpStatus = r.status;
             data = await r.json();
@@ -361,7 +349,7 @@
                 if (data && data.manual) {
                     // Catalog doesn't list the plugin: point at the same manual-install guide the "Not installed"
                     // row links to.
-                    result.innerHTML = `${esc(primary)}`
+                    result.innerHTML = `${escapeHtml(primary)}`
                         + ` · <a class="markers-manual-install" href="${EMBY_MANUAL_GUIDE_URL}" target="_blank" rel="noopener">Install by hand</a>`;
                 } else {
                     result.textContent = primary;
@@ -372,7 +360,7 @@
         if (result) {
             const restarting = RESTARTING[vendorOf(server)] || 'The server';
             result.className = 'small ms-2 text-muted';
-            result.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${esc(restarting)} is restarting — checking again in 20 s…`;
+            result.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${escapeHtml(restarting)} is restarting — checking again in 20 s…`;
         }
         setTimeout(() => {
             if (seq === tab.loadSeq && tab.server) fetchStatus(tab.server);
@@ -415,7 +403,7 @@
                 : (chosen === null ? byDefault : chosen.includes(id));
             const label = `Intro & Credits for ${row.dataset.libName || id}`;
             cell.innerHTML = `<div class="form-check form-switch edit-lib-switch">`
-                + `<input type="checkbox" role="switch" class="form-check-input markers-lib-toggle" id="${esc(libraryDomId(id))}" data-id="${esc(id)}" data-default="${byDefault ? '1' : '0'}" aria-label="${esc(label)}"${checked ? ' checked' : ''}>`
+                + `<input type="checkbox" role="switch" class="form-check-input markers-lib-toggle" id="${escapeHtml(libraryDomId(id))}" data-id="${escapeHtml(id)}" data-default="${byDefault ? '1' : '0'}" aria-label="${escapeHtml(label)}"${checked ? ' checked' : ''}>`
                 + '</div>';
         });
         syncLibraryColumn();

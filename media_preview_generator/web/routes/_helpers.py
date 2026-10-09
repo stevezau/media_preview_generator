@@ -50,6 +50,19 @@ def _param_to_bool(value, default: bool) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
+def resolve_plex_credentials(url: str | None, token: str | None, settings) -> tuple[str | None, str | None]:
+    """Fill in a missing Plex URL or token from the saved settings.
+
+    The saved token is only used for the saved URL. A caller-chosen URL must come with its own token, otherwise the
+    saved token would be sent to a host of the caller's choosing.
+    """
+    stored_url = settings.plex_url
+    url = url or stored_url
+    if not token and url and stored_url and url.strip().rstrip("/") == stored_url.strip().rstrip("/"):
+        token = settings.plex_token
+    return url, token
+
+
 def _is_within_base(base_path: str, candidate_path: str) -> bool:
     """Return True if candidate_path is inside (or equal to) base_path.
 

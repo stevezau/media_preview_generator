@@ -1,4 +1,4 @@
-"""Tests for media_preview_generator.markers.external_ids (spec §5.2)."""
+"""Tests for media_preview_generator.markers.external_ids."""
 
 from __future__ import annotations
 
@@ -21,12 +21,12 @@ from media_preview_generator.markers.models import MediaIds
     ("path", "expected"),
     [
         (
-            "/data_16tb2/TV Shows/Rick and Morty (2013) {tvdb-275274}/Season 01/"
+            "/media/tv/Rick and Morty (2013) {tvdb-275274}/Season 01/"
             "Rick and Morty (2013) - S01E01 - Pilot [WEBDL-1080p].mkv",
             MediaIds("episode", tvdb="275274", season=1, episode=1),
         ),
         (
-            "/data_16tb/Movies/Toy Story (1995) {tmdb-862}/Toy Story (1995) {imdb-tt0114709} - [Bluray-2160p].mkv",
+            "/media/movies/Toy Story (1995) {tmdb-862}/Toy Story (1995) {imdb-tt0114709} - [Bluray-2160p].mkv",
             MediaIds("movie", tmdb="862", imdb="tt0114709"),
         ),
         (
@@ -100,9 +100,8 @@ class TestIdsFromPathEdgeCases:
         assert result.tvdb == "1"
 
     def test_episode_ignores_ids_above_the_immediate_show_folder(self):
-        # RULING (fix round 1, HIGH/MED review): a franchise-level folder
-        # above a spin-off's own show folder must never leak its id down —
-        # every online source wants THIS show's id, not an ancestor's.
+        # A franchise-level folder above a spin-off's own show folder must never leak its id down: every online
+        # source wants THIS show's id, not an ancestor's.
         path = "/m/TV/Franchise {tvdb-1}/Spin-off/Season 01/Spin-off - S01E01.mkv"
         result = ids_from_path(path)
         assert result.tvdb is None
@@ -119,7 +118,7 @@ class TestIdsFromPathEdgeCases:
         assert result.tmdb == "2"
 
     def test_four_digit_season_supported_for_daily_dated_numbering(self):
-        # RULING (fix round 1): season/episode widened to \d{1,4} so
+        # season/episode widened to \d{1,4} so
         # date-numbered shows like Doctor Who's "S2005E01" parse correctly.
         path = "/m/TV/Doctor Who {tvdb-78804}/Doctor Who - S2005E01.mkv"
         assert ids_from_path(path) == MediaIds("episode", tvdb="78804", season=2005, episode=1)
@@ -165,7 +164,7 @@ class TestIdsFromPathEdgeCases:
 
     def test_absolute_numbered_anime_style_not_parsed_as_season_episode(self):
         # "- 012 -" absolute numbering (e.g. One Piece) has no SxxEyy token.
-        # RULING (fix round 1, MED-2): a tvdb token nearby means this is
+        # a tvdb token nearby means this is
         # almost certainly TV data whose episode number we can't parse —
         # refuse to guess "movie" from the folder's id; return MediaIds()
         # in full, not just "season/episode unknown".
@@ -217,7 +216,7 @@ class TestMergeIds:
         assert result.episode == 0
 
     def test_primary_wins_every_field_when_both_sides_set(self):
-        # Fix round 1, LOW: pin merge order for every field at once — every
+        # Pin merge order for every field at once — every
         # value differs between primary/fallback, so swapping any single
         # `x or y` to `y or x` (or any season/episode fallback) fails this.
         primary = MediaIds("movie", tmdb="1", imdb="tt1", tvdb="10", season=1, episode=1)
@@ -226,8 +225,8 @@ class TestMergeIds:
         assert result == MediaIds("movie", tmdb="1", imdb="tt1", tvdb="10", season=1, episode=1)
 
 
-class TestMovieClassificationRuling:
-    """Fix round 1, MED-2: "movie" only when tmdb/imdb is present AND no tvdb is present anywhere
+class TestMovieClassification:
+    """ "movie" only when tmdb/imdb is present AND no tvdb is present anywhere
     in the considered folders; otherwise MediaIds() and let the server decide."""
 
     def test_date_based_daily_show_episode_returns_unknown(self):
@@ -248,7 +247,7 @@ class TestMovieClassificationRuling:
         assert ids_from_path("/m/Movies/X {tmdb-1}/X.mkv").tvdb is None
 
     def test_movie_ignores_a_collection_id_above_its_own_folder(self):
-        # RULING (fix round 2, LOW/pin): a collection-level id sits at the
+        # a collection-level id sits at the
         # grandparent of the movie file; movies only ever read the filename
         # and immediate parent folder, so the collection's tmdb must never
         # leak down to a title that has no id of its own.
@@ -257,7 +256,7 @@ class TestMovieClassificationRuling:
 
 
 class TestIdFormatValidation:
-    """Fix round 1, LOW: tmdb/tvdb are bare digits, imdb requires "tt"; a mismatched shape is
+    """tmdb/tvdb are bare digits, imdb requires "tt"; a mismatched shape is
     ignored rather than accepted, and Emby-style "=" delimiters are supported."""
 
     def test_tmdb_with_tt_prefix_is_invalid_and_ignored(self):
@@ -275,107 +274,13 @@ class TestIdFormatValidation:
         assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=1)
 
     def test_zero_ids_are_rejected_like_server_results(self):
-        # RULING (fix round 2, LOW): a "0" id in a path must be rejected the
+        # a "0" id in a path must be rejected the
         # same way ids_from_server_dict already rejects a "0" server value.
         assert ids_from_path("/m/Movies/X {tmdb-0}/X.mkv") == MediaIds()
         assert ids_from_path("/m/Movies/X {imdb-tt0}/X.mkv") == MediaIds()
         assert ids_from_path("/m/Movies/X {tmdb-00}/X.mkv") == MediaIds()  # padded zero also rejected
         path = "/m/TV/Show {tvdb-0}/Season 01/Show - S01E01.mkv"
         assert ids_from_path(path) == MediaIds("episode", season=1, episode=1)
-
-
-class TestExtrasExcluded:
-    """Fix round 1, MED-4: Plex extra suffixes and extras folders never get ids."""
-
-    def test_plex_trailer_suffix_returns_unknown(self):
-        path = "/m/Movies/Toy Story (1995) {tmdb-862}/Toy Story (1995)-trailer.mkv"
-        assert ids_from_path(path) == MediaIds()
-
-    def test_all_plex_extra_suffixes_excluded(self):
-        suffixes = (
-            "trailer",
-            "featurette",
-            "behindthescenes",
-            "deleted",
-            "interview",
-            "scene",
-            "short",
-            "other",
-            "sample",
-        )
-        for suffix in suffixes:
-            path = f"/m/Movies/X (2020) {{tmdb-1}}/X (2020)-{suffix}.mkv"
-            assert ids_from_path(path) == MediaIds(), suffix
-            assert ids_from_path(path.upper()) == MediaIds(), suffix  # case-insensitive
-
-    def test_extras_folder_excludes_even_a_valid_looking_episode_file(self):
-        path = "/m/TV/Show {tvdb-1}/Season 01/Extras/Show - S01E01 - Making Of.mkv"
-        assert ids_from_path(path) == MediaIds()
-
-    def test_all_extras_folder_names_excluded(self):
-        # Uses an episode-shaped path (SxxEyy present) rather than a
-        # movie-shaped one: a movie-branch id one folder above an extras
-        # folder is unreachable either way (single-parent-folder rule), so
-        # that shape can't tell "detected as extra" apart from "not
-        # detected" for a single dropped folder name. Here, if the extras
-        # folder isn't recognised, ids_from_path falls through to the
-        # episode branch and reports season/episode anyway — an observable
-        # difference from the fully-empty MediaIds() we expect.
-        folders = (
-            "Trailers",
-            "Featurettes",
-            "Extras",
-            "Behind The Scenes",
-            "Deleted Scenes",
-            "Interviews",
-            "Scenes",
-            "Shorts",
-            "Other",
-            "Samples",
-        )
-        for folder in folders:
-            path = f"/m/TV/Show {{tvdb-1}}/Season 01/{folder}/Show - S01E01.mkv"
-            assert ids_from_path(path) == MediaIds(), folder
-
-    def test_title_containing_trailer_word_not_treated_as_extra(self):
-        # "Trailer Park" is a title, not the Plex "-trailer" suffix or an
-        # exact "Trailers" folder match — must not be excluded.
-        path = "/m/TV/Trailer Park Boys {tvdb-1}/Season 01/Trailer Park Boys - S01E01.mkv"
-        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=1)
-
-    def test_extras_named_ancestor_above_the_id_folder_is_not_flagged(self):
-        # RULING (fix round 2, LOW): only the immediate PARENT folder is
-        # checked for an extras name — ids themselves only ever come from
-        # the parent or the grandparent above a season folder, so an
-        # ancestor further up sharing a name with a real-world library
-        # category ("Other", "Shorts", ...) must never suppress a real
-        # movie's ids. This was a real bug in the round-1 "any depth" check.
-        path = "/media/Other/Movies/Movie (2020) {tmdb-1}/Movie (2020).mkv"
-        assert ids_from_path(path) == MediaIds("movie", tmdb="1")
-        path = "/data/Shorts/Movie (2020) {tmdb-1}/Movie (2020).mkv"
-        assert ids_from_path(path) == MediaIds("movie", tmdb="1")
-
-    def test_episode_title_containing_the_trailer_word_not_treated_as_extra(self):
-        # RULING (fix round 2, LOW/pin): "S01E05 - The Trailer" is a real
-        # episode title — the suffix check requires a hyphen immediately
-        # before the keyword at the very end of the filename; "- The
-        # Trailer" has a space there, not a hyphen.
-        path = "/m/TV/Show {tvdb-1}/Season 01/Show - S01E05 - The Trailer.mkv"
-        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=5)
-
-    def test_episode_title_containing_the_deleted_word_not_treated_as_extra(self):
-        # RULING (fix round 2, LOW/pin): "Pre-Deleted World" has a hyphen
-        # before "Deleted", but "Deleted" is not at the very end of the
-        # filename — the suffix check is anchored there, so this must not match.
-        path = "/m/TV/Show {tvdb-1}/Season 01/Show - S01E05 - Pre-Deleted World.mkv"
-        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=5)
-
-    def test_show_title_containing_scenes_word_not_treated_as_extra(self):
-        # RULING (fix round 2, LOW/pin): the show folder's own title
-        # contains the word "Scenes" — the extras-folder check is an exact
-        # match against the whole folder name, not a substring/contains check.
-        path = "/m/TV/Scenes from a Marriage (1973) {tvdb-1}/Season 01/Scenes from a Marriage - S01E01.mkv"
-        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=1)
 
 
 EXTRA_SUFFIXES = (
@@ -401,6 +306,77 @@ EXTRAS_FOLDERS = (
     "Other",
     "Samples",
 )
+
+
+class TestExtrasExcluded:
+    """Plex extra suffixes and extras folders never get ids."""
+
+    def test_plex_trailer_suffix_returns_unknown(self):
+        path = "/m/Movies/Toy Story (1995) {tmdb-862}/Toy Story (1995)-trailer.mkv"
+        assert ids_from_path(path) == MediaIds()
+
+    def test_all_plex_extra_suffixes_excluded(self):
+        for suffix in EXTRA_SUFFIXES:
+            path = f"/m/Movies/X (2020) {{tmdb-1}}/X (2020)-{suffix}.mkv"
+            assert ids_from_path(path) == MediaIds(), suffix
+            assert ids_from_path(path.upper()) == MediaIds(), suffix  # case-insensitive
+
+    def test_extras_folder_excludes_even_a_valid_looking_episode_file(self):
+        path = "/m/TV/Show {tvdb-1}/Season 01/Extras/Show - S01E01 - Making Of.mkv"
+        assert ids_from_path(path) == MediaIds()
+
+    def test_all_extras_folder_names_excluded(self):
+        # Uses an episode-shaped path (SxxEyy present) rather than a
+        # movie-shaped one: a movie-branch id one folder above an extras
+        # folder is unreachable either way (single-parent-folder rule), so
+        # that shape can't tell "detected as extra" apart from "not
+        # detected" for a single dropped folder name. Here, if the extras
+        # folder isn't recognised, ids_from_path falls through to the
+        # episode branch and reports season/episode anyway — an observable
+        # difference from the fully-empty MediaIds() we expect.
+        for folder in EXTRAS_FOLDERS:
+            path = f"/m/TV/Show {{tvdb-1}}/Season 01/{folder}/Show - S01E01.mkv"
+            assert ids_from_path(path) == MediaIds(), folder
+
+    def test_title_containing_trailer_word_not_treated_as_extra(self):
+        # "Trailer Park" is a title, not the Plex "-trailer" suffix or an
+        # exact "Trailers" folder match — must not be excluded.
+        path = "/m/TV/Trailer Park Boys {tvdb-1}/Season 01/Trailer Park Boys - S01E01.mkv"
+        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=1)
+
+    def test_extras_named_ancestor_above_the_id_folder_is_not_flagged(self):
+        # only the immediate PARENT folder is
+        # checked for an extras name — ids themselves only ever come from
+        # the parent or the grandparent above a season folder, so an
+        # ancestor further up sharing a name with a real-world library
+        # category ("Other", "Shorts", ...) must never suppress a real
+        # movie's ids. This was a real bug in the round-1 "any depth" check.
+        path = "/media/Other/Movies/Movie (2020) {tmdb-1}/Movie (2020).mkv"
+        assert ids_from_path(path) == MediaIds("movie", tmdb="1")
+        path = "/data/Shorts/Movie (2020) {tmdb-1}/Movie (2020).mkv"
+        assert ids_from_path(path) == MediaIds("movie", tmdb="1")
+
+    def test_episode_title_containing_the_trailer_word_not_treated_as_extra(self):
+        # "S01E05 - The Trailer" is a real
+        # episode title — the suffix check requires a hyphen immediately
+        # before the keyword at the very end of the filename; "- The
+        # Trailer" has a space there, not a hyphen.
+        path = "/m/TV/Show {tvdb-1}/Season 01/Show - S01E05 - The Trailer.mkv"
+        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=5)
+
+    def test_episode_title_containing_the_deleted_word_not_treated_as_extra(self):
+        # "Pre-Deleted World" has a hyphen
+        # before "Deleted", but "Deleted" is not at the very end of the
+        # filename — the suffix check is anchored there, so this must not match.
+        path = "/m/TV/Show {tvdb-1}/Season 01/Show - S01E05 - Pre-Deleted World.mkv"
+        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=5)
+
+    def test_show_title_containing_scenes_word_not_treated_as_extra(self):
+        # the show folder's own title
+        # contains the word "Scenes" — the extras-folder check is an exact
+        # match against the whole folder name, not a substring/contains check.
+        path = "/m/TV/Scenes from a Marriage (1973) {tvdb-1}/Season 01/Scenes from a Marriage - S01E01.mkv"
+        assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=1)
 
 
 class TestIsExtra:
@@ -552,7 +528,7 @@ class TestIdsFromServerDict:
         assert result.episode is None
 
     def test_zero_and_whitespace_values_treated_as_missing_and_trimmed(self):
-        # Fix round 1, LOW: rejects "0"/empty and trims whitespace.
+        # rejects "0"/empty and trims whitespace.
         raw = {"kind": "movie", "tmdb": "0", "imdb": "  ", "tvdb": "  862  "}
         result = ids_from_server_dict(raw)
         assert result.tmdb is None
@@ -560,7 +536,7 @@ class TestIdsFromServerDict:
         assert result.tvdb == "862"
 
     def test_unrecognised_kind_drops_all_fields_not_just_kind(self):
-        # Fix round 1, MED-3: an unrecognised kind returns a fully empty
+        # an unrecognised kind returns a fully empty
         # MediaIds — a partial dict with kind="unknown" but stray ids would
         # still be wrong, since nothing downstream should trust those ids.
         raw = {"kind": "show", "tmdb": "1", "imdb": "tt1", "tvdb": "1", "season": 1, "episode": 1}

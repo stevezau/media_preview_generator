@@ -415,12 +415,13 @@ class TestMigrateSchema:
 
     def test_noop_when_already_at_current_version(self, settings_manager):
         """Migration is skipped when _schema_version is current."""
-        from media_preview_generator.upgrade import _migrate_schema
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, _migrate_schema
 
-        settings_manager.set("_schema_version", 2)
+        settings_manager.set("_schema_version", _CURRENT_SCHEMA_VERSION)
         settings_manager.set("gpu_threads", 4)
         _migrate_schema(settings_manager)
         assert settings_manager.get("gpu_threads") == 4
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
 
     def test_refuses_when_disk_schema_is_newer_than_binary(self, settings_manager):
         """J3: a settings.json from a newer release must refuse to start.
@@ -1134,22 +1135,6 @@ class TestMigrateToV7:
         assert settings_manager.get("plex_url") == "http://plex:32400"
         assert settings_manager.get("plex_token") == "t"
 
-    def test_run_migrations_includes_v7(self, settings_manager, monkeypatch):
-        """End-to-end check: run_migrations bumps schema_version to 7."""
-        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, run_migrations
-
-        monkeypatch.setenv("PLEX_URL", "http://plex:32400")
-        monkeypatch.setenv("PLEX_TOKEN", "t")
-
-        run_migrations(settings_manager)
-
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
-        assert _CURRENT_SCHEMA_VERSION >= 7
-        servers = settings_manager.get("media_servers")
-        assert servers is not None
-        assert len(servers) == 1
-        assert servers[0]["url"] == "http://plex:32400"
-
 
 class TestMigrateToV8:
     """Tests for the v8 schema migration: move global path_mappings/exclude_paths into media_servers[0]."""
@@ -1339,9 +1324,9 @@ class TestMigrateToV9:
         from media_preview_generator.upgrade import _migrate_to_v9
 
         rows = [
-            {"plex_prefix": "/data_16tb", "local_prefix": "/data_16tb", "webhook_prefixes": []},
-            {"plex_prefix": "/data_16tb2", "local_prefix": "/data_16tb2", "webhook_prefixes": []},
-            {"plex_prefix": "/data_16tb3", "local_prefix": "/data_16tb3", "webhook_prefixes": []},
+            {"plex_prefix": "/disk", "local_prefix": "/disk", "webhook_prefixes": []},
+            {"plex_prefix": "/disk2", "local_prefix": "/disk2", "webhook_prefixes": []},
+            {"plex_prefix": "/disk3", "local_prefix": "/disk3", "webhook_prefixes": []},
         ]
         settings_manager.apply_changes(
             updates={
@@ -1380,22 +1365,22 @@ class TestMigrateToV9:
         [
             pytest.param(
                 [
-                    {"remote_prefix": "/data_16tb", "local_prefix": "/data", "webhook_prefixes": []},
-                    {"remote_prefix": "/data_16tb2", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"remote_prefix": "/disk", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"remote_prefix": "/disk2", "local_prefix": "/data", "webhook_prefixes": []},
                 ],
                 id="remote_prefix_only",
             ),
             pytest.param(
                 [
-                    {"plex_prefix": "/data_16tb", "local_prefix": "/data", "webhook_prefixes": []},
-                    {"plex_prefix": "/data_16tb2", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"plex_prefix": "/disk", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"plex_prefix": "/disk2", "local_prefix": "/data", "webhook_prefixes": []},
                 ],
                 id="plex_prefix_only",
             ),
             pytest.param(
                 [
-                    {"remote_prefix": "/data_16tb", "plex_prefix": "/old", "local_prefix": "/data"},
-                    {"remote_prefix": "/data_16tb2", "plex_prefix": "/old", "local_prefix": "/data"},
+                    {"remote_prefix": "/disk", "plex_prefix": "/old", "local_prefix": "/data"},
+                    {"remote_prefix": "/disk2", "plex_prefix": "/old", "local_prefix": "/data"},
                 ],
                 id="both_remote_wins",
             ),
@@ -2915,8 +2900,7 @@ class TestMigrateToV15:
 
 
 class TestMigrateToV16:
-    """The "Publish when" High/Medium choice was removed (owner, 2026-09-24): its key goes, and the next start decides
-    the files in Needs review again (``DECIDE_AGAIN_KEY``)."""
+    """The "Publish when" High/Medium choice was removed: its key goes, and nothing writes ``DECIDE_AGAIN_KEY``."""
 
     BLOCK = {
         "detect": {"intro": True, "credits": True, "recap": False},
@@ -2940,18 +2924,17 @@ class TestMigrateToV16:
         settings_manager.apply_changes(updates={"markers": {**self.BLOCK, "publish_when": stored}})
         assert _migrate_to_v16(settings_manager) == notes
         assert settings_manager.get("markers") == self.BLOCK
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
 
     @pytest.mark.parametrize("markers", [None, BLOCK], ids=["no-block", "block-without-the-key"])
-    def test_nothing_to_drop_still_asks_for_the_files_in_review_once(self, settings_manager, markers):
-        # Deciding again also brings the Needs review wording of files already at Medium up to date.
+    def test_nothing_to_drop_changes_nothing(self, settings_manager, markers):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v16
 
         if markers is not None:
             settings_manager.apply_changes(updates={"markers": dict(markers)})
         assert _migrate_to_v16(settings_manager) == []
         assert settings_manager.get("markers") == markers
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
 
     def test_the_schema_step_runs_once_and_tells_a_high_install_why(self, settings_manager):
         from media_preview_generator.upgrade import (
@@ -2965,33 +2948,30 @@ class TestMigrateToV16:
             updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
         assert settings_manager.get("markers") == self.BLOCK
         assert settings_manager.get("_pending_migration_notice")["notes"] == [
             _USER_FACING_NOTES[16],
             _USER_FACING_NOTES[21],
         ]
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
 
-        # The app clears the request once it queued the job; a later start doesn't ask again (the version gate).
-        settings_manager.delete(DECIDE_AGAIN_KEY)
+        # A later start at the current version doesn't run the step again (the version gate).
         settings_manager.apply_changes(updates={"markers": {**self.BLOCK, "publish_when": "high"}})
         _migrate_schema(settings_manager)
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
         assert settings_manager.get("markers")["publish_when"] == "high"  # untouched now; validate_global ignores it
 
 
 class TestMigrateToV17:
-    """Season audio's guards against idents and cold-open music (owner, 2026-09-24): the next start decides the files
-    whose intro rests on season audio again (``DECIDE_AGAIN_KEY``), so an intro that was only an ident comes off now."""
+    """Season audio's guards against idents and cold-open music need nothing from the settings."""
 
-    def test_it_asks_for_the_decide_again_job_and_changes_nothing_else(self, settings_manager):
+    def test_it_changes_nothing(self, settings_manager):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v17
 
         block = {"detect": {"intro": True, "credits": True, "recap": False}}
         settings_manager.apply_changes(updates={"markers": dict(block)})
         assert _migrate_to_v17(settings_manager) == []
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
         assert settings_manager.get("markers") == block
 
     @pytest.mark.parametrize("start", [15, 16], ids=["from-v15", "from-v16"])
@@ -3004,60 +2984,43 @@ class TestMigrateToV17:
 
         settings_manager.apply_changes(updates={"_schema_version": start})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[21]]
 
-        # The completed job clears the request; a later start at the current version doesn't ask again.
-        settings_manager.delete(DECIDE_AGAIN_KEY)
+    def test_the_latest_step_removes_a_flag_an_earlier_dev_build_left(self, settings_manager):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 17, DECIDE_AGAIN_KEY: True})
         _migrate_schema(settings_manager)
         assert settings_manager.get(DECIDE_AGAIN_KEY) is None
 
 
 class TestMigrateToV18:
-    """Season audio matches 25 fps and film-rate releases of one season at one speed, and IntroDB/TheIntroDB times are
-    read on a 25 fps or film-rate file's own clock (owner, 2026-09-24: Bones seasons 5-8 sat in Needs review): the next
-    start decides the files in Needs review and those whose intro rests on season audio again."""
+    """Season audio and online-time rule changes need nothing from the settings."""
 
-    def test_it_asks_for_the_decide_again_job_and_changes_nothing_else(self, settings_manager):
+    def test_it_changes_nothing(self, settings_manager):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v18
 
         block = {"detect": {"intro": True, "credits": True, "recap": False}}
         settings_manager.apply_changes(updates={"markers": dict(block)})
         assert _migrate_to_v18(settings_manager) == []
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
-        assert settings_manager.get("markers") == block
-
-    def test_a_start_after_v17_s_job_completed_asks_again_once(self, settings_manager):
-        from media_preview_generator.upgrade import (
-            _CURRENT_SCHEMA_VERSION,
-            DECIDE_AGAIN_KEY,
-            _migrate_schema,
-        )
-
-        settings_manager.apply_changes(updates={"_schema_version": 17})
-        _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
-        assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[21]]
-        settings_manager.delete(DECIDE_AGAIN_KEY)
-        _migrate_schema(settings_manager)
         assert settings_manager.get(DECIDE_AGAIN_KEY) is None
+        assert settings_manager.get("markers") == block
 
 
 class TestMigrateToV20:
-    """Needs review is gone (owner, 2026-10-02): every type ends decided or with nothing found, so the next start
-    decides the files still stored under the old status again (``DECIDE_AGAIN_KEY``)."""
+    """Needs review is gone: every type ends decided or with nothing found; the settings only carry a note."""
 
     PLEX_WITH_MARKERS_ON = {"id": "p1", "type": "plex", "name": "P", "markers": {"enabled": True, "library_ids": None}}
 
-    def test_it_asks_for_the_decide_again_job_and_changes_nothing_else(self, settings_manager):
+    def test_it_changes_nothing_but_the_note(self, settings_manager):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v20
 
         block = {"detect": {"intro": True, "credits": True, "recap": False}}
         settings_manager.apply_changes(updates={"markers": dict(block), "media_servers": [self.PLEX_WITH_MARKERS_ON]})
         assert len(_migrate_to_v20(settings_manager)) == 1
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
         assert settings_manager.get("markers") == block
         assert settings_manager.get("media_servers") == [self.PLEX_WITH_MARKERS_ON]
 
@@ -3073,7 +3036,7 @@ class TestMigrateToV20:
         ],
         ids=["no-servers-key", "no-servers", "server-without-markers", "markers-off"],
     )
-    def test_an_install_without_intro_credits_gets_the_job_but_no_note(self, settings_manager, servers):
+    def test_an_install_without_intro_credits_gets_no_note(self, settings_manager, servers):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v20
 
         updates = {"markers": {"detect": {"intro": True, "credits": True, "recap": False}}}
@@ -3081,10 +3044,9 @@ class TestMigrateToV20:
             updates["media_servers"] = servers
         settings_manager.apply_changes(updates=updates)
         assert _migrate_to_v20(settings_manager) == []
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
 
     def test_the_schema_step_runs_once_and_tells_the_user_where_needs_review_went(self, settings_manager):
-        from media_preview_generator.markers.triggers import DECIDE_AGAIN_JOB_NAME
         from media_preview_generator.upgrade import (
             _CURRENT_SCHEMA_VERSION,
             _USER_FACING_NOTES,
@@ -3094,19 +3056,12 @@ class TestMigrateToV20:
 
         settings_manager.apply_changes(updates={"_schema_version": 19, "media_servers": [self.PLEX_WITH_MARKERS_ON]})
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
         assert settings_manager.get("_pending_migration_notice")["notes"] == [
             _USER_FACING_NOTES[20],
             _USER_FACING_NOTES[21],
         ]
-        # The job this queues is named for what it does now; the status it clears up is gone.
-        assert "Needs review" not in DECIDE_AGAIN_JOB_NAME
-
-        # The completed job clears the request; a later start at the current version doesn't ask again.
-        settings_manager.delete(DECIDE_AGAIN_KEY)
-        _migrate_schema(settings_manager)
-        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
 
 
 _GPU_NO_WORKERS = [{"device": "cuda:0", "name": "GPU", "enabled": True, "workers": 0, "ffmpeg_threads": 2}]
@@ -3220,7 +3175,7 @@ class TestMigrateToV19:
             }
         )
         _migrate_schema(settings_manager)
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
         assert settings_manager.processing_auto_paused is False
         assert settings_manager.processing_pause_reasons == ["manual"]
 
@@ -3257,7 +3212,7 @@ class TestMigrateToV23:
 
         _migrate_schema(settings_manager)
 
-        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 23
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
         assert settings_manager.get("max_concurrent_jobs") is None
         assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[23]]
 

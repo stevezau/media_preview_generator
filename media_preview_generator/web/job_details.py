@@ -90,6 +90,7 @@ def job_library_names(
     Args:
         job: The job.
         configs: The saved server configs.
+        requested_paths: The job's file paths when the caller already loaded them; read from the job when ``None``.
 
     Returns:
         Distinct library names in the order found; empty when the job names neither libraries nor files (a whole-

@@ -34,21 +34,6 @@ def flask_app(tmp_path, mock_auth_config):
     return app
 
 
-@pytest.fixture
-def client(flask_app):
-    """Create Flask test client."""
-    return flask_app.test_client()
-
-
-@pytest.fixture
-def auth_headers():
-    """Generate valid auth headers with token."""
-    from media_preview_generator.web.auth import get_auth_token
-
-    token = get_auth_token()
-    return {"X-Auth-Token": token}
-
-
 class TestSetupNotComplete:
     """Tests for unauthenticated access when setup is not complete."""
 
@@ -71,9 +56,7 @@ class TestSetupNotComplete:
             data=json.dumps(data),
             content_type="application/json",
         )
-        # Audit fix — original asserted only the status code. A regression
-        # where the endpoint accepted the call but silently DIDN'T set the
-        # token (returned 200 with success=False) would have passed.
+        # A 200 with success=False (token silently not set) must fail too.
         assert response.status_code == 200
         body = response.get_json() or {}
         assert body.get("success") is True, f"set-token must report success=True on success, got {body!r}"

@@ -1,4 +1,4 @@
-"""Markers already on a server: agreement evidence (spec §5.5 item 7: never a sole source, never the checked edge, may
+"""Markers already on a server: agreement evidence (never a sole source, never the checked edge, may
 shorten a skip), or what clients currently see (``include_ours=True``, for the Inspector)."""
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from ..publishers.jellyfin import bridge_key, core_key, segment_times
 if TYPE_CHECKING:
     from ...servers.base import ServerConfig
 
-# Bump when reading a server changes what a stored answer would hold, so servers are read again (spec §6.2).
+# Bump when reading a server changes what a stored answer would hold, so servers are read again.
 # 2: an importer-plugin row names every importer plugin, not just the first (its copy's database is read from them).
 # 3: an Emby item that isn't the file's own version gives no evidence (its markers describe another cut).
 # 4: Emby's markers leave out the chapter rows our Bridge plugin wrote (its store says which), as Jellyfin's do.
@@ -33,7 +33,7 @@ READER_VERSION = 5
 # now. Raise it with READER_VERSION only when what a Plex answer holds changes.
 PLEX_CHECKED_SINCE = 5
 # Plex markers are one set per item: another version of the item further apart than this is another cut. Emby and
-# Jellyfin keep each version's markers on its own item (spec §3.3); Emby's reader checks instead that the item is this
+# Jellyfin keep each version's markers on its own item; Emby's reader checks instead that the item is this
 # file's own version.
 SAME_CUT_MS = 2_000
 _PLEX_TYPES = {"intro": MarkerType.INTRO, "credits": MarkerType.CREDITS}
@@ -213,7 +213,7 @@ def _from_emby(
     intro_start, intro_end, credits_start = (starts.get(k, []) for k in ("IntroStart", "IntroEnd", "CreditsStart"))
     out = []
     # Emby keeps one intro and one credits start per item; anything else can't be paired without guessing. Each version
-    # is its own item with its own chapter rows (spec §3.3), so no duration check.
+    # is its own item with its own chapter rows, so no duration check.
     if len(intro_start) == 1 and len(intro_end) == 1:
         out.append(_candidate(MarkerType.INTRO, intro_start[0], intro_end[0], origin))
     if len(credits_start) == 1:

@@ -66,8 +66,8 @@ class TestFolderPicker:
 
         path_input = wizard_page.locator("#folderPickerPathInput")
         path_input.fill("/data")
-        path_input.press("Enter")
-        wizard_page.wait_for_timeout(300)
+        with wizard_page.expect_request(lambda r: "/api/system/browse" in r.url and "path=%2Fdata" in r.url):
+            path_input.press("Enter")
         expect(path_input).to_have_value("/data")
 
     def test_up_button_disabled_at_root(self, wizard_page: Page, app_url_wizard: str) -> None:
@@ -77,8 +77,8 @@ class TestFolderPicker:
 
         path_input = wizard_page.locator("#folderPickerPathInput")
         path_input.fill("/")
-        path_input.press("Enter")
-        wizard_page.wait_for_timeout(300)
+        with wizard_page.expect_response("**/api/system/browse**"):
+            path_input.press("Enter")
         expect(wizard_page.locator("#folderPickerUpBtn")).to_be_disabled()
 
     def test_clicking_folder_row_drills_in(self, wizard_page: Page, app_url_wizard: str) -> None:
@@ -89,9 +89,9 @@ class TestFolderPicker:
 
         wizard_page.locator("#folderPickerPathInput").fill("/")
         wizard_page.locator("#folderPickerPathInput").press("Enter")
-        wizard_page.wait_for_timeout(300)
-        wizard_page.locator("#folderPickerList button").first.click()
-        wizard_page.wait_for_timeout(300)
+        first_folder = wizard_page.locator("#folderPickerList button").first
+        expect(first_folder).to_be_visible()
+        first_folder.click()
         expect(wizard_page.locator("#folderPickerPathInput")).not_to_have_value("/")
 
     def test_pick_button_closes_modal_and_populates_input(self, wizard_page: Page, app_url_wizard: str) -> None:

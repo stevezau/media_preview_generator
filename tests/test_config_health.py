@@ -22,13 +22,17 @@ from media_preview_generator.web.config_health import probe_config_health
 def app(tmp_path):
     config_dir = str(tmp_path / "cfg")
     os.makedirs(config_dir, exist_ok=True)
-    with patch.dict(
-        os.environ,
-        {
-            "CONFIG_DIR": config_dir,
-            "WEB_AUTH_TOKEN": "test-token-12345678",
-            "WEB_PORT": "8099",
-        },
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "CONFIG_DIR": config_dir,
+                "WEB_AUTH_TOKEN": "test-token-12345678",
+                "WEB_PORT": "8099",
+            },
+        ),
+        # create_app starts APScheduler threads that nothing here stops.
+        patch("media_preview_generator.web.app.get_schedule_manager"),
     ):
         flask_app = create_app(config_dir=config_dir)
         flask_app.config["TESTING"] = True

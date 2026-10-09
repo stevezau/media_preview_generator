@@ -6,14 +6,9 @@ from typing import Any
 
 from loguru import logger
 
-from .base import MediaServer, ServerConfig
+from .base import NATIVE_MODES, MediaServer, ServerConfig
 
 CHAPTER_PREF = "GenerateChapterThumbBehavior"
-NATIVE_MODES = {
-    "never": "Never",
-    "scheduled": "As a scheduled task",
-    "asap": "As a scheduled task and when media is added",
-}
 
 
 def chapter_readiness_section(

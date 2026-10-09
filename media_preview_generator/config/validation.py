@@ -288,6 +288,57 @@ def _validate_thread_config(
     return False, ""
 
 
+def get_setting(ui_settings: dict[str, Any], settings_key: str, env_key: str, default: Any, value_type: type = str):
+    """Read a setting from ``settings.json``, falling back to the env var, then ``default``.
+
+    Args:
+        ui_settings: Settings dict (e.g. merged ``settings.json`` content).
+        settings_key: Key in ``ui_settings``.
+        env_key: Environment variable consulted when the key is missing or empty.
+        default: Value when neither source has a usable value.
+        value_type: ``str``, ``int`` or ``bool``.
+
+    Returns:
+        The value converted to ``value_type``, or ``default`` when it cannot be converted.
+    """
+    if settings_key in ui_settings and ui_settings[settings_key] not in (None, ""):
+        val = ui_settings[settings_key]
+        if value_type is bool:
+            return bool(val)
+        if value_type is int:
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return default
+        return str(val) if val else default
+
+    env_value = os.environ.get(env_key, "")
+    if env_value:
+        if value_type is bool:
+            return env_value.strip().lower() in ("true", "1", "yes")
+        if value_type is int:
+            try:
+                return int(env_value)
+            except (ValueError, TypeError):
+                return default
+        return env_value
+
+    return default
+
+
+def usable_gpu_config(ui_settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the per-GPU config entries that name a device (anything else is dropped)."""
+    gpu_config = ui_settings.get("gpu_config", [])
+    if not isinstance(gpu_config, list):
+        return []
+    return [entry for entry in gpu_config if isinstance(entry, dict) and entry.get("device")]
+
+
+def gpu_worker_total(gpu_config: list[dict[str, Any]]) -> int:
+    """Sum the workers of the enabled GPUs in ``gpu_config``."""
+    return sum(entry.get("workers", 0) for entry in gpu_config if entry.get("enabled", True))
+
+
 def thread_totals_from_ui_settings(ui_settings: dict[str, Any]) -> tuple[int, int]:
     """Compute ``gpu_threads`` and ``cpu_threads`` like ``load_config``.
 
@@ -300,49 +351,18 @@ def thread_totals_from_ui_settings(ui_settings: dict[str, Any]) -> tuple[int, in
         Tuple of ``(gpu_threads, cpu_threads)``.
 
     """
-
     if "worker_groups" in ui_settings:
         from ..worker_groups import configured_group_totals, validate_worker_groups
 
         return configured_group_totals(validate_worker_groups(ui_settings["worker_groups"]))
 
-    def get_value(settings_key, env_key, default, value_type=str):
-        if settings_key in ui_settings and ui_settings[settings_key] not in (None, ""):
-            val = ui_settings[settings_key]
-            if value_type is bool:
-                return bool(val)
-            if value_type is int:
-                try:
-                    return int(val)
-                except (ValueError, TypeError):
-                    return default
-            return str(val) if val else default
-
-        env_value = os.environ.get(env_key, "")
-        if env_value:
-            if value_type is bool:
-                return env_value.strip().lower() in ("true", "1", "yes")
-            if value_type is int:
-                try:
-                    return int(env_value)
-                except (ValueError, TypeError):
-                    return default
-            return env_value
-
-        return default
-
-    gpu_config = ui_settings.get("gpu_config", [])
-    if isinstance(gpu_config, list):
-        gpu_config = [entry for entry in gpu_config if isinstance(entry, dict) and entry.get("device")]
-    else:
-        gpu_config = []
-
+    gpu_config = usable_gpu_config(ui_settings)
     if gpu_config:
-        gpu_threads = sum(entry.get("workers", 0) for entry in gpu_config if entry.get("enabled", True))
+        gpu_threads = gpu_worker_total(gpu_config)
     else:
-        gpu_threads = get_value("gpu_threads", "GPU_THREADS", 1, int)
+        gpu_threads = get_setting(ui_settings, "gpu_threads", "GPU_THREADS", 1, int)
 
-    cpu_threads = get_value("cpu_threads", "CPU_THREADS", 1, int)
+    cpu_threads = get_setting(ui_settings, "cpu_threads", "CPU_THREADS", 1, int)
     return gpu_threads, cpu_threads
 
 

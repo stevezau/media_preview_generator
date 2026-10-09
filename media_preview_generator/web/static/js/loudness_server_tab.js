@@ -17,13 +17,6 @@
         libraryChoices: new Map(),
     };
 
-    function esc(value) {
-        const shared = window.MPGShared && window.MPGShared.escapeHtml;
-        const text = value == null ? '' : String(value);
-        if (shared) return shared(text);
-        return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    }
-
     function isPlex(server) {
         return String((server && server.type) || '').toLowerCase() === 'plex';
     }
@@ -74,7 +67,7 @@
                 : (chosen === null ? byDefault : chosen.includes(id));
             const label = `Loudness for ${row.dataset.libName || id}`;
             cell.innerHTML = '<div class="form-check form-switch edit-lib-switch">'
-                + `<input type="checkbox" role="switch" class="form-check-input loudness-lib-toggle" id="${esc(libraryDomId(id))}" data-id="${esc(id)}" data-default="${byDefault ? '1' : '0'}" aria-label="${esc(label)}"${checked ? ' checked' : ''}>`
+                + `<input type="checkbox" role="switch" class="form-check-input loudness-lib-toggle" id="${escapeHtml(libraryDomId(id))}" data-id="${escapeHtml(id)}" data-default="${byDefault ? '1' : '0'}" aria-label="${escapeHtml(label)}"${checked ? ' checked' : ''}>`
                 + '</div>';
         });
         syncLibraryColumn();

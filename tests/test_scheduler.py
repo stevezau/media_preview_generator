@@ -179,6 +179,23 @@ class TestScheduleCRUD:
         assert updated["name"] == "New Name"
         assert updated["library_id"] == "123"
 
+    @pytest.mark.parametrize(
+        "bad", [{"cron_expression": "not a cron"}, {"interval_minutes": 0}, {"stop_time": "99:99"}]
+    )
+    def test_update_with_invalid_trigger_changes_nothing(self, scheduler_manager, bad):
+        schedule = scheduler_manager.create_schedule(
+            name="Keep", library_id="1", library_name="Movies", cron_expression="0 2 * * *"
+        )
+        sid = schedule["id"]
+
+        with pytest.raises(ValueError):
+            scheduler_manager.update_schedule(sid, name="Changed", **bad)
+
+        stored = scheduler_manager.get_schedule(sid)
+        assert stored["name"] == "Keep"
+        assert stored["trigger_value"] == "0 2 * * *"
+        assert scheduler_manager.scheduler.get_job(sid) is not None
+
     def test_update_schedule_trigger_cron_to_interval(self, scheduler_manager):
         """Test changing a schedule from cron to interval trigger."""
         schedule = scheduler_manager.create_schedule(
@@ -447,63 +464,31 @@ class TestScheduleStopTime:
 class TestQuietHours:
     """D21 — global queue pause/resume schedule."""
 
-    def test_is_in_quiet_window_equal_times_disables(self):
-        from media_preview_generator.web.scheduler import is_in_quiet_window
-
-        assert is_in_quiet_window((10, 0), (8, 0), (8, 0)) is False
-        assert is_in_quiet_window((0, 0), (0, 0), (0, 0)) is False
-
-    def test_is_in_quiet_window_same_day_window(self):
-        from media_preview_generator.web.scheduler import is_in_quiet_window
-
-        # Window is 09:00–17:00. start inclusive, end exclusive.
-        assert is_in_quiet_window((9, 0), (9, 0), (17, 0)) is True
-        assert is_in_quiet_window((10, 30), (9, 0), (17, 0)) is True
-        assert is_in_quiet_window((17, 0), (9, 0), (17, 0)) is False
-        assert is_in_quiet_window((8, 59), (9, 0), (17, 0)) is False
-        assert is_in_quiet_window((22, 0), (9, 0), (17, 0)) is False
-
-    def test_is_in_quiet_window_cross_midnight(self):
-        from media_preview_generator.web.scheduler import is_in_quiet_window
-
-        # Window is 22:00–06:00 (overnight). Pause = 22:00, resume = 06:00.
-        assert is_in_quiet_window((22, 0), (22, 0), (6, 0)) is True
-        assert is_in_quiet_window((23, 30), (22, 0), (6, 0)) is True
-        assert is_in_quiet_window((0, 0), (22, 0), (6, 0)) is True
-        assert is_in_quiet_window((5, 59), (22, 0), (6, 0)) is True
-        assert is_in_quiet_window((6, 0), (22, 0), (6, 0)) is False
-        assert is_in_quiet_window((12, 0), (22, 0), (6, 0)) is False
-
-    def test_apply_quiet_hours_enabled_registers_both_crons(self, scheduler_manager):
-        # D21 legacy single-window body — accepted via normalise_quiet_hours
-        # and persisted as window #0; registered IDs use the D26 per-window
-        # prefix.
+    def test_apply_quiet_hours_enabled_registers_only_the_recheck_job(self, scheduler_manager):
         scheduler_manager.apply_quiet_hours({"enabled": True, "start": "08:00", "end": "01:00"})
-        ids = {j.id for j in scheduler_manager.scheduler.get_jobs()}
-        assert "__qh_pause_0" in ids
-        assert "__qh_resume_0" in ids
+        ids = {j.id for j in scheduler_manager.scheduler.get_jobs() if j.id.startswith("__qh_")}
+        assert ids == {"__qh_recheck"}
+
+    @pytest.mark.parametrize("name", ["_quiet_hours_pause", "_quiet_hours_resume"])
+    def test_jobs_stored_by_older_releases_still_resolve_and_recompute(self, name):
+        from media_preview_generator.web import scheduler
+
+        with patch.object(scheduler, "_quiet_hours_recompute_and_apply") as recompute:
+            getattr(scheduler, name)()
+        recompute.assert_called_once_with()
 
     def test_apply_quiet_hours_disabled_removes_both_crons(self, scheduler_manager):
         scheduler_manager.apply_quiet_hours({"enabled": True, "start": "08:00", "end": "01:00"})
         scheduler_manager.apply_quiet_hours({"enabled": False, "start": "08:00", "end": "01:00"})
         ids = {j.id for j in scheduler_manager.scheduler.get_jobs()}
-        assert not any(jid.startswith("__qh_pause_") for jid in ids)
-        assert not any(jid.startswith("__qh_resume_") for jid in ids)
+        assert "__qh_recheck" not in ids
         assert "__quiet_hours_pause" not in ids
         assert "__quiet_hours_resume" not in ids
 
-    def test_apply_quiet_hours_equal_times_treated_as_disabled(self, scheduler_manager):
-        scheduler_manager.apply_quiet_hours({"enabled": True, "start": "08:00", "end": "08:00"})
-        ids = {j.id for j in scheduler_manager.scheduler.get_jobs()}
-        assert not any(jid.startswith("__qh_pause_") for jid in ids)
-        assert not any(jid.startswith("__qh_resume_") for jid in ids)
-
-    def test_apply_quiet_hours_malformed_times_skipped(self, scheduler_manager):
-        # Malformed times should NOT raise; just skip cron registration.
+    def test_apply_quiet_hours_malformed_times_do_not_raise(self, scheduler_manager):
         scheduler_manager.apply_quiet_hours({"enabled": True, "start": "25:00", "end": "01:00"})
         ids = {j.id for j in scheduler_manager.scheduler.get_jobs()}
-        assert not any(jid.startswith("__qh_pause_") for jid in ids)
-        assert not any(jid.startswith("__qh_resume_") for jid in ids)
+        assert not any(jid.startswith(("__qh_pause_", "__qh_resume_")) for jid in ids)
 
     def test_execute_scheduled_job_skipped_when_processing_paused(self, scheduler_manager, monkeypatch):
         """D21 — when the global queue is paused (manual or quiet hours),
@@ -536,6 +521,22 @@ class TestQuietHours:
             None,
         )
         assert called == [], "callback fired despite processing_paused=True"
+
+    def test_run_now_bypasses_the_pause_gate(self, scheduler_manager, monkeypatch):
+        called = []
+        scheduler_manager.set_run_job_callback(lambda **kw: called.append(kw))
+        schedule = scheduler_manager.create_schedule(
+            name="Manual", library_id="1", library_name="Movies", cron_expression="0 2 * * *"
+        )
+        fake_sm = MagicMock()
+        fake_sm.processing_paused = True
+        monkeypatch.setattr(
+            "media_preview_generator.web.settings_manager.get_settings_manager",
+            lambda: fake_sm,
+        )
+
+        assert scheduler_manager.run_now(schedule["id"]) is True
+        assert called, "Run now did nothing while processing was paused"
 
 
 class TestQuietHoursMultiWindow:
@@ -632,61 +633,13 @@ class TestQuietHoursMultiWindow:
         }
         assert is_now_in_any_quiet_window(qh, _dt(2026, 5, 4, 12, 0)) is False
 
-    def test_apply_quiet_hours_two_windows_registers_two_pairs(self, scheduler_manager):
-        scheduler_manager.apply_quiet_hours(
-            {
-                "enabled": True,
-                "windows": [
-                    {"start": "08:00", "end": "17:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
-                    {"start": "22:00", "end": "06:00", "days": ["sat", "sun"]},
-                ],
-            }
-        )
-        ids = {j.id for j in scheduler_manager.scheduler.get_jobs()}
-        assert "__qh_pause_0" in ids
-        assert "__qh_resume_0" in ids
-        assert "__qh_pause_1" in ids
-        assert "__qh_resume_1" in ids
-
-    def test_apply_quiet_hours_rebuilds_cleanly_on_reapply(self, scheduler_manager):
-        # First apply: 3 windows
-        scheduler_manager.apply_quiet_hours(
-            {
-                "enabled": True,
-                "windows": [
-                    {"start": "08:00", "end": "10:00", "days": ["mon"]},
-                    {"start": "12:00", "end": "13:00", "days": ["tue"]},
-                    {"start": "15:00", "end": "16:00", "days": ["wed"]},
-                ],
-            }
-        )
-        # Reapply with 1 window — the other two pairs should be removed.
-        scheduler_manager.apply_quiet_hours(
-            {
-                "enabled": True,
-                "windows": [{"start": "08:00", "end": "17:00", "days": ["fri"]}],
-            }
-        )
-        ids = {j.id for j in scheduler_manager.scheduler.get_jobs()}
-        qh_ids = {jid for jid in ids if jid.startswith("__qh_")}
-        assert qh_ids == {"__qh_pause_0", "__qh_resume_0", "__qh_recheck"}
-
-    def test_apply_quiet_hours_window_with_no_valid_days_skipped(self, scheduler_manager):
-        scheduler_manager.apply_quiet_hours(
-            {
-                "enabled": True,
-                "windows": [
-                    {"start": "08:00", "end": "10:00", "days": ["BOGUS"]},
-                    {"start": "12:00", "end": "13:00", "days": ["tue"]},
-                ],
-            }
-        )
-        ids = {j.id for j in scheduler_manager.scheduler.get_jobs()}
-        # First window had no valid days → normalise_quiet_hours fell back to
-        # all 7, so it IS registered as window #0; second window is #1.
-        # Both pairs should land.
-        assert "__qh_pause_0" in ids
-        assert "__qh_pause_1" in ids
+    def test_apply_quiet_hours_reapply_leaves_a_single_recheck_job(self, scheduler_manager):
+        for end in ("10:00", "11:00"):
+            scheduler_manager.apply_quiet_hours(
+                {"enabled": True, "windows": [{"start": "08:00", "end": end, "days": ["mon"]}]}
+            )
+        qh_ids = [j.id for j in scheduler_manager.scheduler.get_jobs() if j.id.startswith("__qh_")]
+        assert qh_ids == ["__qh_recheck"]
 
 
 class TestExecuteScheduleStop:
@@ -1280,11 +1233,10 @@ class TestExecuteScheduledJobDispatch:
 
     def test_dispatches_recently_added_calls_multi_server_scan(self, scheduler_manager, monkeypatch):
         """A schedule with job_type='recently_added' dispatches via the
-        gated ``_start_recently_added_job_async`` helper (Phase E —
-        works for any vendor). Post-fix the scan is no longer inline:
+        gated ``_start_recently_added_job_async`` helper (works for
+        any vendor). The scan is not inline:
         the helper creates a Job row, queues at the JobGate, and runs
-        the scan only after admission, so the cap really means "at
-        most N concurrent dispatches/scans"."""
+        the scan only after admission."""
         from media_preview_generator.web import scheduler as sched_mod
 
         # Patch the gated helper directly — the underlying multi-server
@@ -1695,12 +1647,10 @@ class TestExecuteScheduledIntroCreditsJob:
             env["callback"].assert_not_called()
             return
         env["jm"].request_resume.assert_not_called()
-        if job_type == "intro_credits":
-            # Its own Find markers job, paused by hand, is still unfinished: nothing new either.
-            env["create"].assert_not_called()
-        else:
+        # An Intro & Credits schedule's own Find markers job, paused by hand, is still unfinished: nothing new.
+        env["create"].assert_not_called()
+        if job_type != "intro_credits":
             # A preview schedule starts its next scan beside the job paused by hand, as before.
-            env["create"].assert_not_called()
             env["callback"].assert_called_once_with(
                 library_id=None,
                 library_name="",

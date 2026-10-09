@@ -13,6 +13,7 @@ import copy
 import os
 import re
 import uuid
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -70,6 +71,54 @@ def _is_disabled(target: dict) -> bool:
     settings.json files predate the per-server enable toggle.
     """
     return not bool(target.get("enabled", True))
+
+
+def _find_server(server_id: str) -> dict | None:
+    """Return the saved ``media_servers`` entry with this id, or ``None``."""
+    return next((s for s in _get_media_servers() if isinstance(s, dict) and s.get("id") == server_id), None)
+
+
+def _enabled_target(server_id: str, *, readiness_envelope: bool = False) -> tuple[dict | None, Any, Any]:
+    """Look up a saved server that a probe-style endpoint may contact.
+
+    Returns:
+        ``(entry, config, None)`` for a saved, enabled server with a valid config, else ``(None, None, response)``
+        where ``response`` is the 404 / 409 (disabled) / 400 (invalid config) reply to return as-is.
+    """
+    target = _find_server(server_id)
+    if target is None:
+        msg = f"server {server_id!r} not found"
+        return None, None, (jsonify({"ok": False, "error": msg, "message": msg}), 404)
+    if _is_disabled(target):
+        return None, None, _disabled_response(target, include_readiness_envelope=readiness_envelope)
+    try:
+        cfg = server_config_from_dict(target)
+    except Exception as exc:
+        msg = f"invalid server config: {exc}"
+        return None, None, (jsonify({"ok": False, "error": msg, "message": msg}), 400)
+    return target, cfg, None
+
+
+def _update_server_entry(server_id: str, mutate: Callable[[dict], None]) -> dict | None:
+    """Apply ``mutate`` to the saved entry for ``server_id`` and persist it, all under the settings lock.
+
+    The entry is re-read inside the lock, so a slow network call made beforehand never overwrites a concurrent edit
+    with a stale copy.
+
+    Returns:
+        The updated entry, or ``None`` when the server no longer exists.
+    """
+    settings = get_settings_manager()
+    with settings.locked():
+        servers = _get_media_servers()
+        for i, entry in enumerate(servers):
+            if isinstance(entry, dict) and entry.get("id") == server_id:
+                updated = dict(entry)
+                mutate(updated)
+                servers[i] = updated
+                _save_media_servers(servers)
+                return updated
+    return None
 
 
 def _disabled_response(target: dict, *, include_readiness_envelope: bool = False) -> tuple[Any, int]:
@@ -398,6 +447,8 @@ def _validate_server_payload(
     path_mappings = data.get("path_mappings") if "path_mappings" in data else base.get("path_mappings", [])
     exclude_paths = data.get("exclude_paths") if "exclude_paths" in data else base.get("exclude_paths", [])
     output = data.get("output") if "output" in data else base.get("output", {})
+    if libraries is not None and not isinstance(libraries, list):
+        return None, "libraries must be a list"
 
     # When a client (or scripted deploy) creates / updates a server without
     # specifying ``output.frame_interval``, default it to the user's current
@@ -493,7 +544,10 @@ def _validate_server_payload(
 
     enabled = bool(data.get("enabled", base.get("enabled", True)))
     verify_ssl = bool(data.get("verify_ssl", base.get("verify_ssl", True)))
-    timeout = int(data.get("timeout") or base.get("timeout") or 30)
+    try:
+        timeout = int(data.get("timeout") or base.get("timeout") or 30)
+    except (TypeError, ValueError):
+        return None, "timeout must be a whole number of seconds"
 
     server_identity = data.get("server_identity", base.get("server_identity"))
     entry = {
@@ -665,29 +719,9 @@ def refresh_server_libraries(server_id: str):
     Unrecognised server types raise :class:`UnsupportedServerTypeError` and
     surface as a 400.
     """
-    settings = get_settings_manager()
-    raw_servers = settings.get("media_servers") or []
-    if not isinstance(raw_servers, list):
-        return jsonify({"error": "media_servers not configured"}), 404
-
-    target_index: int | None = None
-    target_entry: dict | None = None
-    for i, entry in enumerate(raw_servers):
-        if isinstance(entry, dict) and str(entry.get("id") or "") == server_id:
-            target_index = i
-            target_entry = entry
-            break
-
-    if target_entry is None or target_index is None:
-        return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target_entry):
-        return _disabled_response(target_entry)
-
-    try:
-        target_cfg = server_config_from_dict(target_entry)
-    except UnsupportedServerTypeError as exc:
-        return jsonify({"error": str(exc)}), 400
+    target_entry, target_cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     # Build the live server directly from the per-server ServerConfig
     # rather than going through the global registry + load_config(). This
@@ -725,45 +759,43 @@ def refresh_server_libraries(server_id: str):
         )
         return jsonify({"error": f"server query failed: {exc}"}), 502
 
-    # Preserve the user's per-library 'enabled' toggle for any library that
-    # also appears in the previous snapshot (matched by id).
-    existing_enabled: dict[str, bool] = {}
-    for raw_lib in target_entry.get("libraries", []) or []:
-        if isinstance(raw_lib, dict):
-            lib_id = str(raw_lib.get("id") or "")
-            if lib_id:
-                existing_enabled[lib_id] = bool(raw_lib.get("enabled", True))
+    # Identity is captured here too: list_libraries having succeeded means the connection works, which closes the gap
+    # for servers added while offline. Probed before taking the settings lock because it is a network call.
+    probed_identity = ""
+    if not target_entry.get("server_identity"):
+        try:
+            probe = server.test_connection()
+            if probe.ok and probe.server_id:
+                probed_identity = probe.server_id
+        except Exception as exc:
+            logger.debug("Refresh libraries: identity probe raised: {}", exc)
 
     serialised_libraries: list[dict] = []
-    for lib in new_libraries:
-        enabled = existing_enabled.get(lib.id, lib.enabled)
-        serialised_libraries.append(
+
+    def apply_refresh(entry: dict) -> None:
+        # Libraries that survive the refresh keep the user's per-library 'enabled' toggle (matched by id).
+        existing_enabled = {
+            str(lib.get("id")): bool(lib.get("enabled", True))
+            for lib in entry.get("libraries") or []
+            if isinstance(lib, dict) and lib.get("id")
+        }
+        serialised_libraries.clear()
+        serialised_libraries.extend(
             {
                 "id": lib.id,
                 "name": lib.name,
                 "remote_paths": list(lib.remote_paths),
-                "enabled": enabled,
+                "enabled": existing_enabled.get(lib.id, lib.enabled),
                 "kind": lib.kind,
             }
+            for lib in new_libraries
         )
+        entry["libraries"] = list(serialised_libraries)
+        if probed_identity and not entry.get("server_identity"):
+            entry["server_identity"] = probed_identity
 
-    # Write the updated entry back into media_servers preserving order.
-    updated_servers = list(raw_servers)
-    updated_entry = dict(target_entry)
-    updated_entry["libraries"] = serialised_libraries
-    # Refresh server_identity opportunistically — list_libraries having
-    # succeeded means the connection works; capturing the identity here
-    # closes the gap for users who added their server while it was
-    # offline (or pre-server_identity).
-    if not updated_entry.get("server_identity"):
-        try:
-            probe = server.test_connection()
-            if probe.ok and probe.server_id:
-                updated_entry["server_identity"] = probe.server_id
-        except Exception as exc:
-            logger.debug("Refresh libraries: identity probe raised: {}", exc)
-    updated_servers[target_index] = updated_entry
-    settings.set("media_servers", updated_servers)
+    if _update_server_entry(server_id, apply_refresh) is None:
+        return jsonify({"error": f"server {server_id!r} not found"}), 404
 
     return jsonify(
         {
@@ -803,10 +835,9 @@ def create_server():
     # Generate id when the client didn't supply one (typical), or keep
     # the supplied id (useful for migrations / scripted deploys) provided
     # it doesn't collide.
-    servers = _get_media_servers()
     if not entry["id"]:
         entry["id"] = uuid.uuid4().hex
-    if any(isinstance(s, dict) and s.get("id") == entry["id"] for s in servers):
+    if _find_server(entry["id"]) is not None:
         return jsonify({"error": f"server id {entry['id']!r} already exists"}), 409
 
     # Best-effort: probe the new server so the webhook router can match
@@ -817,8 +848,12 @@ def create_server():
         if identity:
             entry["server_identity"] = identity
 
-    servers.append(entry)
-    _save_media_servers(servers)
+    with get_settings_manager().locked():
+        servers = _get_media_servers()
+        if any(isinstance(s, dict) and s.get("id") == entry["id"] for s in servers):
+            return jsonify({"error": f"server id {entry['id']!r} already exists"}), 409
+        servers.append(entry)
+        _save_media_servers(servers)
     logger.info("Added media server {!r} (id={})", entry["name"], entry["id"])
 
     return (
@@ -846,34 +881,44 @@ def update_server(server_id: str):
     """
     payload = request.get_json(silent=True) or {}
 
-    servers = _get_media_servers()
-    for i, entry in enumerate(servers):
-        if isinstance(entry, dict) and entry.get("id") == server_id:
-            updated, error = _validate_server_payload(payload, is_update=True, existing=entry)
+    entry = _find_server(server_id)
+    if entry is None:
+        return jsonify({"error": f"server {server_id!r} not found"}), 404
+    updated, error = _validate_server_payload(payload, is_update=True, existing=entry)
+    if updated is None:
+        return jsonify({"error": error}), 400
+    updated["id"] = server_id  # never let id be changed via update
+
+    # Re-probe identity when URL or auth changed; otherwise keep the existing identity so we don't lose it if the
+    # probe is transiently flaky. Probed before taking the settings lock because it is a network call.
+    fresh_identity = None
+    if updated.get("url") != entry.get("url") or updated.get("auth") != entry.get("auth"):
+        fresh_identity = _probe_for_identity(updated)
+
+    settings = get_settings_manager()
+    with settings.locked():
+        servers = _get_media_servers()
+        index = next((i for i, s in enumerate(servers) if isinstance(s, dict) and s.get("id") == server_id), None)
+        if index is None:
+            return jsonify({"error": f"server {server_id!r} not found"}), 404
+        if servers[index] != entry:
+            # Edited while we were probing: apply this payload on top of the current entry instead.
+            updated, error = _validate_server_payload(payload, is_update=True, existing=servers[index])
             if updated is None:
                 return jsonify({"error": error}), 400
-            updated["id"] = server_id  # never let id be changed via update
-            # Re-probe identity when URL or auth changed; otherwise keep
-            # the existing identity so we don't lose it if the probe is
-            # transiently flaky.
-            url_changed = updated.get("url") != entry.get("url")
-            auth_changed = updated.get("auth") != entry.get("auth")
-            if url_changed or auth_changed:
-                fresh_identity = _probe_for_identity(updated)
-                if fresh_identity:
-                    updated["server_identity"] = fresh_identity
-            servers[i] = updated
-            _save_media_servers(servers)
-            logger.info("Updated media server {!r} (id={})", updated["name"], server_id)
-            return jsonify(
-                {
-                    **server_config_to_dict(server_config_from_dict(updated)),
-                    "auth": _redact_auth(updated),
-                    "markers": mask_server(updated.get("markers"), str(updated.get("type") or "")),
-                }
-            )
-
-    return jsonify({"error": f"server {server_id!r} not found"}), 404
+            updated["id"] = server_id
+        if fresh_identity:
+            updated["server_identity"] = fresh_identity
+        servers[index] = updated
+        _save_media_servers(servers)
+    logger.info("Updated media server {!r} (id={})", updated["name"], server_id)
+    return jsonify(
+        {
+            **server_config_to_dict(server_config_from_dict(updated)),
+            "auth": _redact_auth(updated),
+            "markers": mask_server(updated.get("markers"), str(updated.get("type") or "")),
+        }
+    )
 
 
 @api.route("/servers/<server_id>", methods=["DELETE"])
@@ -885,11 +930,9 @@ def delete_server(server_id: str):
     Returning the deleted entry's id lets the caller confirm what was
     removed; we don't return the auth body since the entry is gone.
     """
-    servers = _get_media_servers()
-    target = next((s for s in servers if isinstance(s, dict) and s.get("id") == server_id), None)
+    target = _find_server(server_id)
     if target is None:
         return jsonify({"error": f"server {server_id!r} not found"}), 404
-    new_servers = [s for s in servers if not (isinstance(s, dict) and s.get("id") == server_id)]
 
     # Best-effort: unregister this server's webhook from plex.tv before
     # we drop the entry. Otherwise Plex keeps POSTing to a URL that's no
@@ -918,7 +961,9 @@ def delete_server(server_id: str):
                 exc,
             )
 
-    _save_media_servers(new_servers)
+    with get_settings_manager().locked():
+        remaining = [s for s in _get_media_servers() if not (isinstance(s, dict) and s.get("id") == server_id)]
+        _save_media_servers(remaining)
     logger.info("Removed media server id={}", server_id)
     return jsonify({"deleted": server_id})
 
@@ -988,18 +1033,9 @@ def test_existing_server_connection(server_id: str):
     without having to wait for the next webhook to surface a failure.
     Returns the same shape as :func:`test_server_connection`.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"ok": False, "message": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"ok": False, "message": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     live = _instantiate_for_probe(cfg)
     if live is None:
@@ -1057,18 +1093,9 @@ def install_jellyfin_plugin(server_id: str):
     the plugin (the user installs the DLL by hand). Caller polls the server's
     status afterwards for the plugin badge to flip.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     if cfg.type not in (ServerType.JELLYFIN, ServerType.EMBY):
         return jsonify({"ok": False, "error": "plugin install is for Jellyfin and Emby servers"}), 400
@@ -1102,18 +1129,9 @@ def uninstall_jellyfin_plugin(server_id: str):
     ``{steps, ok, error}`` so the UI can render the step-list progress
     component identically.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     if cfg.type is not ServerType.JELLYFIN:
         return jsonify({"ok": False, "error": "plugin uninstall is Jellyfin-only"}), 400
@@ -1148,18 +1166,9 @@ def previews_readiness(server_id: str):
     contract; see the ``previews_readiness`` docstring in each
     vendor for the section set it emits.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target, include_readiness_envelope=True)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id, readiness_envelope=True)
+    if refused is not None:
+        return refused
 
     live = _instantiate_for_probe(cfg)
     if live is None:
@@ -1204,32 +1213,25 @@ def previews_readiness(server_id: str):
 def _toggle_health_dismissal(server_id: str, check_id: str, *, dismiss: bool) -> tuple[Any, int]:
     """Add or remove a check from the per-server health_dismissals list.
 
-    Returns a (response_body, status_code) tuple. Read-modify-write the
-    matching media_servers entry under the settings_manager lock via
-    ``_save_media_servers`` — same pattern as the libraries-refresh
-    route. Idempotent: re-dismissing an already-dismissed check or
+    Returns a (response_body, status_code) tuple. Read-modify-write of the
+    matching media_servers entry runs under the settings lock
+    (``_update_server_entry``). Idempotent: re-dismissing an already-dismissed check or
     un-dismissing an un-dismissed one is a 200 no-op.
     """
-    raw_servers = _get_media_servers()
-    target_index = next(
-        (i for i, s in enumerate(raw_servers) if isinstance(s, dict) and s.get("id") == server_id),
-        None,
-    )
-    if target_index is None:
+
+    def apply(entry: dict) -> None:
+        current = list(entry.get("health_dismissals") or [])
+        if dismiss:
+            if check_id not in current:
+                current.append(check_id)
+        else:
+            current = [c for c in current if c != check_id]
+        entry["health_dismissals"] = current
+
+    updated = _update_server_entry(server_id, apply)
+    if updated is None:
         return {"ok": False, "error": f"server {server_id!r} not found"}, 404
-
-    updated_entry = dict(raw_servers[target_index])
-    current = list(updated_entry.get("health_dismissals") or [])
-    if dismiss:
-        if check_id not in current:
-            current.append(check_id)
-    else:
-        current = [c for c in current if c != check_id]
-    updated_entry["health_dismissals"] = current
-
-    updated_servers = list(raw_servers)
-    updated_servers[target_index] = updated_entry
-    _save_media_servers(updated_servers)
+    current = updated["health_dismissals"]
     return {"ok": True, "health_dismissals": current}, 200
 
 
@@ -1276,43 +1278,6 @@ def undismiss_previews_readiness_check(server_id: str):
     return jsonify(payload), status
 
 
-@api.route("/servers/<server_id>/trickplay-readiness", methods=["GET"])
-@setup_or_auth_required
-def jellyfin_trickplay_readiness(server_id: str):
-    """Legacy alias for the unified readiness endpoint (Jellyfin only).
-
-    Kept for API compatibility with any external tool that already
-    points at this URL. New UI callers should use
-    ``/api/servers/<id>/previews-readiness`` which works for every
-    vendor.
-    """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
-
-    if cfg.type is not ServerType.JELLYFIN:
-        return jsonify({"ok": False, "error": "trickplay readiness is Jellyfin-only"}), 400
-
-    live = _instantiate_for_probe(cfg)
-    if live is None or not hasattr(live, "trickplay_readiness"):
-        return jsonify({"ok": False, "error": "this Jellyfin client doesn't support readiness probe"}), 400
-
-    try:
-        return jsonify(live.trickplay_readiness())
-    except Exception as exc:
-        logger.warning("Trickplay readiness probe on {!r} raised: {}", cfg.name or cfg.id, exc)
-        return jsonify({"ok": False, "error": str(exc)}), 200
-
-
 @api.route("/servers/<server_id>/trickplay-fix-all", methods=["POST"])
 @setup_or_auth_required
 def jellyfin_trickplay_fix_all(server_id: str):
@@ -1327,18 +1292,9 @@ def jellyfin_trickplay_fix_all(server_id: str):
     as ``install_plugin`` so the UI's step-list progress component can
     render both flows identically.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     if cfg.type is not ServerType.JELLYFIN:
         return jsonify({"ok": False, "error": "trickplay-fix-all is Jellyfin-only"}), 400
@@ -1371,20 +1327,9 @@ def set_server_enabled(server_id: str):
     if "enabled" not in payload or not isinstance(payload["enabled"], bool):
         return jsonify({"error": "body must be {enabled: bool}"}), 400
 
-    settings = get_settings_manager()
-    raw_servers = _get_media_servers()
-    target_index = next(
-        (i for i, s in enumerate(raw_servers) if isinstance(s, dict) and s.get("id") == server_id),
-        None,
-    )
-    if target_index is None:
+    entry = _update_server_entry(server_id, lambda e: e.__setitem__("enabled", payload["enabled"]))
+    if entry is None:
         return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    updated = list(raw_servers)
-    entry = dict(updated[target_index])
-    entry["enabled"] = payload["enabled"]
-    updated[target_index] = entry
-    settings.set("media_servers", updated)
     logger.info("Server {!r} enabled={}", entry.get("name") or server_id, payload["enabled"])
 
     return jsonify({"server_id": server_id, "enabled": payload["enabled"]})
@@ -1451,18 +1396,9 @@ def set_vendor_extraction(server_id: str):
             ), 400
         library_ids = raw_library_ids
 
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     live = _instantiate_for_probe(cfg)
     if live is None or not hasattr(live, "set_vendor_extraction"):
@@ -1530,16 +1466,9 @@ def _plex_marker_target(server_id: str) -> tuple[ServerConfig | None, Any]:
     Returns:
         ``(config, None)`` for a Plex server that exists and is enabled, else ``(None, response)``.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return None, (jsonify({"ok": False, "error": f"server {server_id!r} not found"}), 404)
-    if _is_disabled(target):
-        return None, _disabled_response(target)
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return None, (jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400)
+    _target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return None, refused
     if cfg.type is not ServerType.PLEX:
         return None, (jsonify({"ok": False, "error": "Plex's marker settings are Plex settings"}), 400)
     return cfg, None
@@ -1680,7 +1609,11 @@ def set_plex_loudness_analysis_never(server_id: str):
         ), 409
     if not report.ready:
         return jsonify({"ok": False, "error": redact_secrets(report.message)}), 409
-    error = live.set_loudness_analysis_never()
+    try:
+        error = live.set_loudness_analysis_never()
+    except Exception as exc:
+        logger.warning("Setting Plex's loudness analysis to Never on {!r} raised: {}", cfg.name or cfg.id, exc)
+        return jsonify({"ok": False, "error": str(exc)}), 200
     return jsonify({"ok": not error, "error": error or ""}), 200
 
 
@@ -1702,18 +1635,9 @@ def set_scheduled_trickplay(server_id: str):
     if "enabled" not in payload or not isinstance(payload["enabled"], bool):
         return jsonify({"error": "body must be {enabled: bool}"}), 400
 
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     live = _instantiate_for_probe(cfg)
     if live is None or not hasattr(live, "set_scheduled_trickplay_triggers"):
@@ -1742,18 +1666,9 @@ def get_vendor_extraction_status(server_id: str):
     (Disable when libraries are still generating; Re-enable when all are
     already stopped) instead of always showing both buttons.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     live = _instantiate_for_probe(cfg)
     if live is None:
@@ -1804,18 +1719,9 @@ def get_server_health_check(server_id: str):
     Vendors that don't yet implement ``check_settings_health`` return
     an empty list (the default in :class:`MediaServer`).
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     live = _instantiate_for_probe(cfg)
     if live is None:
@@ -1886,18 +1792,9 @@ def apply_server_health_fixes(server_id: str):
 
     Returns ``{"ok": bool, "results": {"<lib_id>:<flag>": "ok"|...}}``.
     """
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except Exception as exc:
-        return jsonify({"error": f"invalid server config: {exc}"}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     live = _instantiate_for_probe(cfg)
     if live is None:
@@ -2026,18 +1923,9 @@ def get_output_status(server_id: str):
         return jsonify({"error": "path query parameter required"}), 400
     canonical_path = sanitize_path(raw_path)
 
-    raw_servers = _get_media_servers()
-    target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
-    if target is None:
-        return jsonify({"error": f"server {server_id!r} not found"}), 404
-
-    if _is_disabled(target):
-        return _disabled_response(target)
-
-    try:
-        cfg = server_config_from_dict(target)
-    except UnsupportedServerTypeError as exc:
-        return jsonify({"error": str(exc)}), 400
+    target, cfg, refused = _enabled_target(server_id)
+    if refused is not None:
+        return refused
 
     adapter = _adapter_for_server(cfg)
     if adapter is None:

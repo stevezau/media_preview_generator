@@ -14,7 +14,6 @@ from media_preview_generator.config import (
     ConfigValidationError,
     derive_legacy_plex_view,
     expand_path_mapping_candidates,
-    get_config_value,
     get_path_mapping_pairs,
     is_path_excluded,
     load_config,
@@ -76,73 +75,6 @@ def _set_test_env(monkeypatch_or_patch_dict, args_ns):
             else:
                 env[env_key] = str(val)
     return env
-
-
-class TestGetConfigValue:
-    """Test config value precedence."""
-
-    def test_get_config_value_cli_precedence(self):
-        """Test that CLI args take precedence over env vars."""
-        cli_args = MagicMock()
-        cli_args.test_field = "cli_value"
-
-        with patch.dict("os.environ", {"TEST_FIELD": "env_value"}):
-            result = get_config_value(cli_args, "test_field", "TEST_FIELD", "default")
-            assert result == "cli_value"
-
-    def test_get_config_value_env_fallback(self):
-        """Test that env vars are used when CLI args are None."""
-        cli_args = MagicMock()
-        cli_args.test_field = None
-
-        with patch.dict("os.environ", {"TEST_FIELD": "env_value"}):
-            result = get_config_value(cli_args, "test_field", "TEST_FIELD", "default")
-            assert result == "env_value"
-
-    def test_get_config_value_default_fallback(self):
-        """Test that defaults are used when neither CLI nor env are set."""
-        cli_args = MagicMock()
-        cli_args.test_field = None
-
-        with patch.dict("os.environ", {}, clear=True):
-            result = get_config_value(cli_args, "test_field", "TEST_FIELD", "default")
-            assert result == "default"
-
-    def test_get_config_value_boolean_conversion(self):
-        """Test boolean value conversion."""
-        cli_args = MagicMock()
-        cli_args.bool_field = None
-
-        # Test true values
-        for value in ["true", "True", "1", "yes", "YES"]:
-            with patch.dict("os.environ", {"BOOL_FIELD": value}):
-                result = get_config_value(cli_args, "bool_field", "BOOL_FIELD", False, bool)
-                assert result is True
-
-        # Test false values
-        for value in ["false", "False", "0", "no", "NO"]:
-            with patch.dict("os.environ", {"BOOL_FIELD": value}):
-                result = get_config_value(cli_args, "bool_field", "BOOL_FIELD", True, bool)
-                assert result is False
-
-    def test_get_config_value_int_conversion(self):
-        """Test integer value conversion."""
-        cli_args = MagicMock()
-        cli_args.int_field = None
-
-        with patch.dict("os.environ", {"INT_FIELD": "42"}):
-            result = get_config_value(cli_args, "int_field", "INT_FIELD", 0, int)
-            assert result == 42
-
-    def test_get_config_value_handles_non_vars_cli_object(self):
-        """Fallback to env/default when vars(cli_args) is unsupported."""
-
-        class NoVarsObject:
-            __slots__ = ()
-
-        with patch.dict("os.environ", {"TEST_FIELD": "env_value"}, clear=True):
-            result = get_config_value(NoVarsObject(), "test_field", "TEST_FIELD", "default")
-            assert result == "env_value"
 
 
 class TestGetPathMappingPairs:
@@ -773,8 +705,7 @@ class TestLocalPathToWebhookAliases:
 class TestDeriveLegacyPlexView:
     """Test the helper that flattens media_servers[0] into legacy plex_* keys.
 
-    Phase 0 of the multi-server migration relies on this helper so that
-    every legacy reader (load_config, job_runner, recent_added_scanner,
+    Every legacy reader (load_config, job_runner, recent_added_scanner,
     webhooks) keeps working when settings.json only has media_servers[0].
     """
 
@@ -2033,7 +1964,7 @@ class TestLoadConfig:
 
         env = _set_test_env(None, args)
         with patch.dict("os.environ", env, clear=False):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigValidationError, match="FFmpeg is not installed"):
                 load_config()
 
     @patch("shutil.which")
@@ -2361,3 +2292,20 @@ class TestWorkerGroupPeakWithinLoadConfigLimits:
         _validate_thread_config(gpu, cpu, 2, errors)
 
         assert any(fragment in e and "0-64" in e for e in errors)
+
+
+class TestNfdPathMapping:
+    """A macOS-origin (NFD) path under an NFC prefix with accents maps without losing characters."""
+
+    def test_nfd_path_maps_to_the_right_remainder(self):
+        import unicodedata
+
+        from media_preview_generator.config import expand_path_mapping_candidates, path_to_canonical_local
+
+        prefix = "/données"
+        nfd_path = unicodedata.normalize("NFD", "/données/Film.mkv")
+        assert len(nfd_path) != len("/données/Film.mkv")
+        mappings = [{"remote_prefix": prefix, "local_prefix": "/media", "webhook_prefixes": []}]
+
+        assert path_to_canonical_local(nfd_path, mappings) == "/media/Film.mkv"
+        assert "/media/Film.mkv" in expand_path_mapping_candidates(nfd_path, mappings)

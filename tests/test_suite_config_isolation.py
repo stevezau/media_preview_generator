@@ -34,5 +34,5 @@ def test_default_locations_resolve_inside_it(config_dir, monkeypatch):
         store._store = None
 
     # auth.py reads CONFIG_DIR when it is first imported, so this also shows the variable was set before that.
-    for path in (webhooks._history_file_path(), jobs._resolve_default_config_dir(), auth.get_config_dir(), markers_db):
+    for path in (webhooks._history_file_path(), jobs._resolve_default_config_dir(), auth.CONFIG_DIR, markers_db):
         assert _inside(str(path), config_dir), path

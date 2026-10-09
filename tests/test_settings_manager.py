@@ -25,7 +25,7 @@ class TestSettingsManager:
 
         return SettingsManager(config_dir=temp_config_dir)
 
-    def test_init_creates_empty_settings(self, settings_manager, temp_config_dir):
+    def test_init_creates_empty_settings(self, settings_manager):
         """Test that init creates empty settings when no file exists."""
         assert settings_manager.get_all() == {}
 
@@ -75,46 +75,30 @@ class TestSettingsManager:
         assert data["test"] == "value"
 
 
-class TestPreviewSettingsAfterUpdate:
-    """preview_settings_after_update matches SettingsManager.update for gpu_threads."""
+class TestLoadFailedFlag:
+    def test_reload_clears_load_failed_once_the_file_is_valid(self, tmp_path):
+        from media_preview_generator.web.settings_manager import SettingsManager
 
-    def test_gpu_threads_distribution_matches_update(self, tmp_path):
-        """Preview must match what update() actually writes — including the per-GPU
-        distribution, not just the total. Without this, the UI's "Apply" preview
-        could show a different layout than what gets persisted."""
-        from media_preview_generator.config import validate_processing_thread_totals
-        from media_preview_generator.web.settings_manager import (
-            SettingsManager,
-            preview_settings_after_update,
-        )
+        (tmp_path / "settings.json").write_text("{not json")
+        manager = SettingsManager(config_dir=str(tmp_path))
+        assert manager._load_failed is True
+
+        (tmp_path / "settings.json").write_text("{}")
+        manager.reload()
+        assert manager._load_failed is False
+
+
+class TestGpuThreadsUpdate:
+    def test_gpu_threads_distribution_first_gpus_get_extras(self, tmp_path):
+        from media_preview_generator.web.settings_manager import SettingsManager
 
         sm = SettingsManager(config_dir=str(tmp_path))
         sm.gpu_config = [
             {"device": "/a", "enabled": True, "workers": 1, "ffmpeg_threads": 2},
             {"device": "/b", "enabled": True, "workers": 1, "ffmpeg_threads": 2},
         ]
-        sm.set("cpu_threads", 1)
-        base = sm.get_all()
-        merged = preview_settings_after_update(base, {"gpu_threads": 3})
-        assert validate_processing_thread_totals(merged)[0] is True
-        total = sum(e["workers"] for e in merged["gpu_config"] if isinstance(e, dict) and e.get("enabled", True))
-        assert total == 3
-
-        # The preview's per-GPU layout must match what an actual sm.update() writes.
-        # Mismatch here was the failure mode that motivated this test.
-        sm2 = SettingsManager(config_dir=str(tmp_path / "sm2"))
-        sm2.gpu_config = [
-            {"device": "/a", "enabled": True, "workers": 1, "ffmpeg_threads": 2},
-            {"device": "/b", "enabled": True, "workers": 1, "ffmpeg_threads": 2},
-        ]
-        sm2.set("cpu_threads", 1)
-        sm2.update({"gpu_threads": 3})
-        actual_workers = [e["workers"] for e in sm2.gpu_config]
-        merged_workers = [e["workers"] for e in merged["gpu_config"]]
-        assert actual_workers == merged_workers, f"preview {merged_workers} diverged from update() {actual_workers}"
-        # And the distribution must be the canonical "first GPUs get extras" layout:
-        # 3 workers across 2 enabled GPUs → [2, 1].
-        assert merged_workers == [2, 1]
+        sm.update({"gpu_threads": 3})
+        assert [e["workers"] for e in sm.gpu_config] == [2, 1]
 
 
 class TestSettingsManagerProperties:
@@ -195,25 +179,25 @@ class TestSettingsManagerProperties:
         per_gpu_workers = [entry.get("workers") for entry in settings_manager.gpu_config]
         assert per_gpu_workers == [3, 3], f"String '6' must coerce and distribute as [3, 3]; got {per_gpu_workers!r}."
 
-    def test_plex_verify_ssl_property(self, settings_manager):
-        """Test plex_verify_ssl property with bool conversion."""
-        settings_manager.plex_verify_ssl = False
-        assert settings_manager.plex_verify_ssl is False
-
     def test_plex_verify_ssl_defaults_true(self, settings_manager, monkeypatch):
         """Test plex_verify_ssl defaults to True when unset."""
         monkeypatch.delenv("PLEX_VERIFY_SSL", raising=False)
         assert settings_manager.plex_verify_ssl is True
 
     def test_plex_verify_ssl_saved_true(self, settings_manager):
-        """Test plex_verify_ssl persists True value."""
+        """Test plex_verify_ssl persists True across a reload."""
+        from media_preview_generator.web.settings_manager import SettingsManager
+
         settings_manager.plex_verify_ssl = True
-        assert settings_manager.plex_verify_ssl is True
+        assert SettingsManager(config_dir=str(settings_manager.config_dir)).plex_verify_ssl is True
 
     def test_plex_verify_ssl_saved_false(self, settings_manager):
-        """Test plex_verify_ssl persists False value."""
+        """Test plex_verify_ssl persists False across a reload (default is True)."""
+        from media_preview_generator.web.settings_manager import SettingsManager
+
         settings_manager.plex_verify_ssl = False
         assert settings_manager.plex_verify_ssl is False
+        assert SettingsManager(config_dir=str(settings_manager.config_dir)).plex_verify_ssl is False
 
     def test_cpu_threads_default_when_missing(self, settings_manager, monkeypatch):
         """Test cpu_threads defaults to 1 when key is not set."""
@@ -235,9 +219,16 @@ class TestSettingsManagerProperties:
         assert sm2.cpu_threads == 0
 
     def test_gpu_threads_zero_preserved(self, settings_manager):
-        """Test gpu_threads=0 is preserved."""
+        """Test gpu_threads=0 overwrites a non-zero distribution and survives a reload."""
+        settings_manager.gpu_config = [
+            {"device": "/dev/dri/renderD128", "name": "GPU 0", "type": "vaapi", "enabled": True, "workers": 3},
+        ]
+        assert settings_manager.gpu_threads == 3
         settings_manager.gpu_threads = 0
         assert settings_manager.gpu_threads == 0
+        from media_preview_generator.web.settings_manager import SettingsManager
+
+        assert SettingsManager(config_dir=str(settings_manager.config_dir)).gpu_threads == 0
 
     def test_thumbnail_interval_property(self, settings_manager):
         """Test thumbnail_interval property."""

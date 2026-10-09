@@ -88,6 +88,7 @@ def test_privacy_preferences_prevent_every_request(page: Page, init: str) -> Non
 def test_other_origins_never_count_even_with_production_config(page: Page, origin: str) -> None:
     sent = load_docs(page, origin=origin)
     page.locator("#install").click()
+    page.wait_for_load_state("networkidle")
     assert sent == []
 
 
@@ -106,4 +107,5 @@ def test_opt_out_survives_reload_and_blocks_events(page: Page) -> None:
 def test_empty_or_untrusted_endpoint_never_counts(page: Page) -> None:
     sent = load_docs(page, endpoint="https://other.example/count")
     page.locator("#start").click()
+    page.wait_for_load_state("networkidle")
     assert sent == []

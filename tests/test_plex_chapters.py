@@ -410,6 +410,32 @@ def test_expired_image_validation_does_not_read_files(backend):
         backend._images(read(backend), {1: "a" * 64, 2: "b" * 64}, deadline=time.monotonic() - 1)
 
 
+def test_images_are_decoded_before_plexs_write_lock_is_taken(backend, monkeypatch):
+    target = read(backend)
+    _, revisions = images(backend)
+    order = []
+    real_images, real_begin = backend._images, backend.database._begin_write
+    monkeypatch.setattr(backend, "_images", lambda *a, **k: order.append("images") or real_images(*a, **k))
+    monkeypatch.setattr(backend.database, "_begin_write", lambda *a, **k: order.append("begin") or real_begin(*a, **k))
+
+    backend.register(target, revisions, VERSION, deadline=time.monotonic() + 3)
+
+    assert order == ["images", "begin"]
+
+
+def test_an_image_replaced_after_validation_is_refused_inside_the_transaction(backend):
+    target = read(backend)
+    folder, revisions = images(backend)
+    seen = backend._images(target, revisions, deadline=time.monotonic() + 3)
+    before = rows(backend)
+
+    (folder / "chapter1.jpg").write_bytes((folder / "chapter1.jpg").read_bytes() + b"\0")
+
+    with pytest.raises(ChapterError, match="Chapter 1 image"):
+        backend._images_unchanged(target, seen)
+    assert rows(backend) == before
+
+
 def test_agent_typed_requests_and_auth(backend, monkeypatch):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plex-marker-agent"))
     import plex_marker_agent

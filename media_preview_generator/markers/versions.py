@@ -1,64 +1,30 @@
-"""Answers from an older detector version, read again once (spec §6.2 step 3, "A detector's new version").
+"""The versions of the detectors and readers whose stored answers carry one, for deciding whether an answer is older.
 
 Every detector and reader stores its version with each answer (``evidence_versions``), and a file's run asks again an
 answer from another version (``pipeline._detector_pending``, ``_stale_evidence``, ``_server_markers_due``). Files are
 refreshed by their next manual or scheduled run.
-The batch helpers below remain for jobs saved by earlier versions; startup and completion create no new batches.
 
-A file is listed for a detector when an unlocked decided type rests on its older answer, or a type it answers is still
-undecided (no evidence) beside one. The two detectors that read the file check what other sources
-decided (credit text moves a credits chapter's start and wins an online start, season audio checks an intro chapter
-and a lone online answer: spec §5.5 rules 3, 4 and 16), so their older answer lists an unlocked decided type whatever
-decided it: a credits chapter credit text version 6 kept, which version 7 moves, is read again although nothing else
-would run the file (10 Things I Hate About You on sflix kept version 6's answer, 2026-09-28). For the readers of
-chapters, servers' markers and online answers a type decided by other sources is left to the file's own next run. The decision rules have a version too (``decide.DECIDE_RULES_VERSION``): a file not recorded as decided
-under today's (every run that decides a file records it) is listed when an unlocked type has a stored answer those
-rules could decide differently. Its run is an ordinary one: it decides from what is stored and asks only what is due or
-from an older version (a credits chapter rule 3 holds for credit text has it read). After the rules' first version
-that lists most decided files once, 100 a batch.
-
-A job holds its batch in its config, so a run revived after a restart runs the same files, and each file is recorded
-with the versions it was read for as it finishes (``version_reruns``), whatever its outcome: it is never read again for
-one version, and a file a batch never reached (a cancel, a restart the job isn't revived after) is taken by a later
-batch. A later version takes it again.
+A detector that reads the file itself and checks what other sources decided (credit text moves a credits chapter's
+start and wins an online start, season audio checks an intro chapter and a lone online answer) marks its version
+``checks_others``: its older answer matters for an unlocked decided type whatever decided it. The decision rules have a
+version too (``decide.DECIDE_RULES_VERSION``).
 """
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .audio.season import SEASON_AUDIO_ANSWER_VERSION
-from .carry_over import CARRIED_OVER
 from .credits.detector import _WINDOW_VERSION_STEP, CREDITS_TEXT_VERSION
-from .decide import DECIDE_RULES, DECIDE_RULES_VERSION
-from .missing import files_on_disk, mark_missing_files
 from .models import SERVER_SOURCES, MarkerType, Source
 from .pipeline import PARSER_VERSIONS
 from .sources.chapters import CHAPTER_RULES_VERSION
 from .sources.server_markers import READER_VERSION
 
 if TYPE_CHECKING:
-    from ..servers.base import ServerConfig
     from .settings import GlobalMarkersSettings
-    from .store import MarkerStore
-
-# Limit the work in an existing legacy batch restored after a restart.
-BATCH_FILES = 100
-# Not a detector: a one-version Plex item left showing times within 2 s of a moved decision, before the publisher
-# stopped keeping them (``MarkerStore.files_on_one_version_items_showing_other_times``). The file's next run sends the
-# decided times; its version names that rule.
-PUBLISHED_TIMES = "published_times"
-PUBLISHED_TIMES_VERSION = 1
-# Not a detector: a file whose last publish was left waiting for its Plex item's other versions
-# (``MarkerStore.files_waiting_for_other_versions``). Version 1: the item waited for good for a replaced version whose
-# season folder went with it. Version 2 (2026-10-02): an item no longer waits for its versions to agree at all (the
-# first version holding a type decides it, ``publishers.base.agreed_across_versions``), so every file still recorded
-# as waiting is published once under that rule.
-WAITING_VERSIONS = "waiting_versions"
-WAITING_VERSIONS_VERSION = 2
 
 _EVERY_TYPE = frozenset(MarkerType)
 
@@ -119,79 +85,4 @@ def answer_versions() -> tuple[AnswerVersion, ...]:
             AnswerVersion(source.value, frozenset({source}), _EVERY_TYPE, version)
             for source, version in PARSER_VERSIONS.items()
         ),
-    )
-
-
-def _asked(answer: AnswerVersion, settings: GlobalMarkersSettings) -> bool:
-    if answer.asked is not None:
-        return answer.asked(settings)
-    return any(settings.source_enabled(source.value) for source in answer.sources)
-
-
-def files_to_read_again(store: MarkerStore, settings: GlobalMarkersSettings) -> dict[str, dict[str, int]]:
-    """The files to read again and, for each, the versions it is read again for.
-
-    Args:
-        store: The markers store.
-        settings: The detection settings: a detector no run would ask lists nothing.
-
-    Returns:
-        ``{path: {detector: version}}``, files marked missing and files already taken for those versions left out.
-    """
-    due: dict[str, dict[str, int]] = {}
-    for answer in answer_versions():
-        if not _asked(answer, settings):
-            continue
-        for path in store.files_with_older_answers(
-            answer.key,
-            sources=answer.sources,
-            types=answer.types,
-            version=answer.version,
-            version_step=answer.version_step,
-            checks_others=answer.checks_others,
-        ):
-            due.setdefault(path, {})[answer.key] = answer.version
-    for path in store.files_on_one_version_items_showing_other_times(PUBLISHED_TIMES, PUBLISHED_TIMES_VERSION):
-        due.setdefault(path, {})[PUBLISHED_TIMES] = PUBLISHED_TIMES_VERSION
-    for path in store.files_waiting_for_other_versions(WAITING_VERSIONS, WAITING_VERSIONS_VERSION):
-        due.setdefault(path, {})[WAITING_VERSIONS] = WAITING_VERSIONS_VERSION
-    for path in store.files_decided_under_older_rules(DECIDE_RULES, DECIDE_RULES_VERSION, carried_by=CARRIED_OVER):
-        due.setdefault(path, {})[DECIDE_RULES] = DECIDE_RULES_VERSION
-    return due
-
-
-def next_batch(
-    store: MarkerStore,
-    settings: GlobalMarkersSettings,
-    configs: Sequence[ServerConfig],
-    *,
-    limit: int = BATCH_FILES,
-) -> dict[str, dict[str, int]]:
-    """The next files to read again: the first ``limit`` still on disk, by season folder then path (a season's episodes
-    run together). Nothing is recorded: the job records each file as it finishes (``record_taken``).
-
-    A file not on disk now is left out and stays listed (its disk may only be unmounted); one whose disk says it is
-    gone is marked missing (``mark_missing_files``), which leaves it out of every listing until it is back.
-
-    Args:
-        store: The markers store.
-        settings: The detection settings.
-        configs: The servers' configs (for their disk roots).
-        limit: The most files to take.
-
-    Returns:
-        ``{path: {detector: version}}`` in run order.
-    """
-    due = files_to_read_again(store, settings)
-    ordered = sorted(due, key=lambda path: (os.path.dirname(path), path))
-    present, absent = files_on_disk(ordered, limit=limit)
-    if absent:
-        mark_missing_files(store, absent, configs)
-    return {path: due[path] for path in present[:limit]}
-
-
-def record_taken(store: MarkerStore, batch: Mapping[str, Mapping[str, int]]) -> None:
-    """Record that files were read again for these versions, so no later listing takes them again for those."""
-    store.record_version_reruns(
-        (path, detector, version) for path, taken in batch.items() for detector, version in taken.items()
     )

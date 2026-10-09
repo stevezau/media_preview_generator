@@ -8,28 +8,11 @@ be exercised by the setup wizard before an :class:`EmbyServer` exists.
 
 from __future__ import annotations
 
-from ._mediabrowser_auth import (
-    _AUTH_DEVICE_ID,
-    MediaBrowserAuthResult,
-    authenticate_with_password,
-    mediabrowser_authorization_header,
-)
+from ._mediabrowser_auth import MediaBrowserAuthResult, authenticate_with_password
 
-# Backwards-compatible aliases — callers and tests use the per-vendor
-# names. ``EmbyAuthResult`` is a strict alias of the shared dataclass.
 EmbyAuthResult = MediaBrowserAuthResult
 
-# The private name lives on for any internal callers that imported it
-# from this module. Prefer ``mediabrowser_authorization_header`` in
-# new code.
-_emby_authorization_header = mediabrowser_authorization_header
-
-__all__ = [
-    "EmbyAuthResult",
-    "_AUTH_DEVICE_ID",
-    "_emby_authorization_header",
-    "authenticate_emby_with_password",
-]
+__all__ = ["EmbyAuthResult", "authenticate_emby_with_password"]
 
 
 def authenticate_emby_with_password(

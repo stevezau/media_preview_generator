@@ -1,4 +1,4 @@
-"""Publisher contract (spec §6.3)."""
+"""Publisher contract."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from ..models import Marker, MarkerType
 if TYPE_CHECKING:
     from ..decide import FileLimits
 
-# Versions of one item that decided a type within this of each other show one marker set (spec §6.3).
+# Versions of one item that decided a type within this of each other show one marker set.
 VERSION_AGREEMENT_MS = 2_000
 
 
@@ -154,7 +154,7 @@ def agreed_across_versions(
 
     Whichever times win, each returned marker carries the calling file's ``locked`` flag for its type -- only that
     file's, never a sibling version's: a lock belongs to the file the user edited, and whether the type is the user's
-    own decides whether the server may keep its own markers of it (spec §5.5 rule 1).
+    own decides whether the server may keep its own markers of it.
 
     Args:
         markers: The calling file's decided markers.
@@ -288,7 +288,7 @@ class MarkerPublisher(ABC):
     # elsewhere.
     last_kept_types: frozenset[MarkerType] = frozenset()
     # Set by every successful ``write``: the types whose markers on the item were the server's own and were replaced
-    # anyway because the user locked them, although the server is set to keep its own (spec §5.5 rule 1). The caller
+    # anyway because the user locked them, although the server is set to keep its own. The caller
     # says so in the server's row; empty whenever nothing of the server's own was taken off it.
     last_replaced_own_types: frozenset[MarkerType] = frozenset()
     # Set by every successful ``write``: the types whose server's own markers were made for an earlier file at the

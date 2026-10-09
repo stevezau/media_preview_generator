@@ -1,4 +1,4 @@
-"""Frames of a file's ending for credit text detection (spec §5.4): the keyframes of the tail, then one frame a second
+"""Frames of a file's ending for credit text detection: the keyframes of the tail, then one frame a second
 just before the coarse answer. Decoded with the worker's GPU through the same hwaccel arguments as previews.
 
 Only 320×180 NV12 leaves ffmpeg (or a whole multiple of it, ``scale``) and only the Y plane is kept; each chunk of
@@ -155,7 +155,7 @@ class NoDecoderError(FrameDecodeError):
 
 
 class DecodeTimeoutError(FrameDecodeError):
-    """The decode ran past its time limit (on the GPU or the CPU: never a reason to rerun on the CPU, T-R7)."""
+    """The decode ran past its time limit (on the GPU or the CPU: never a reason to rerun on the CPU)."""
 
 
 class DecodeCancelledError(Exception):
@@ -178,7 +178,7 @@ class KeyframeThinning(NamedTuple):
 
 
 def tail_length_s(*, is_episode: bool, tv_s: int | None = None, movie_s: int | None = None) -> float:
-    """How much of the end is the tail: the last 450 s of an episode, the last 900 s of anything else (T-R4), unless
+    """How much of the end is the tail: the last 450 s of an episode, the last 900 s of anything else, unless
     the user chose a window in Settings.
 
     Args:
@@ -236,7 +236,7 @@ def decode_command(
     download_format: str | None = None,
     ffmpeg_threads: int | None = None,
 ) -> tuple[list[str], bool]:
-    """The spec §5.4 ffmpeg command for one decode.
+    """The ffmpeg command for one decode.
 
     Args:
         ffmpeg: ffmpeg binary.
@@ -252,7 +252,7 @@ def decode_command(
             dropped before the decoder (an intra-only stream's keyframe pass, where every packet decodes on its own).
         drop_non_key: Drop that stream's packets not flagged as keyframes before the decoder (the keyframe pass of a
             codec whose decoder ignores ``-skip_frame``). With neither, every packet is decoded and the command is
-            exactly the spec's.
+            exactly the plain one.
         scale: Decode frames this many times 320×180 (2: 640×360), on the same scaler.
         download_format: The format of the stream's decoded GPU surfaces (``KeyframeThinning.download_format``). On
             CUDA and VAAPI (``_SURFACE_VENDORS``) the frames then stay surfaces until the filter graph downloads them,
@@ -522,8 +522,8 @@ def _kill_on_cancel(
     """Watcher thread: kill ffmpeg's group as soon as the job is cancelled, whatever the decode loop is waiting on.
 
     The loop itself looks at the cancel only between chunks, and one chunk's text detection can take a fresh app's whole
-    helper start and self-test (10-14 s on storage's P5000): ffmpeg would decode on through all of it (lab phase 3 row
-    6). ``cancelled`` tells the loop the kill was the cancel's, not ffmpeg failing.
+    helper start and self-test (10-14 s on a slow GPU): ffmpeg would decode on through all of it.
+    ``cancelled`` tells the loop the kill was the cancel's, not ffmpeg failing.
     """
     while not done.wait(_POLL_S):
         if cancel_check():
@@ -884,7 +884,7 @@ def read_text_at(
     ffmpeg_threads: int | None = None,
 ) -> list[str]:
     """The words on the frame at ``at_s``: one second decoded at 1 fps and ``scale`` times 320x180 exactly as a refine
-    window is (the worker's device, the one scaler), and its frame read (a card at a credits start, spec §5.4).
+    window is (the worker's device, the one scaler), and its frame read (a card at a credits start).
 
     Args:
         path: The media file (read only).

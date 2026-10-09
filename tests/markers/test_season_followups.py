@@ -20,7 +20,7 @@ from tests.markers import test_job_runner, test_job_runner_real, test_triggers
 from tests.markers.audio import test_season
 from tests.markers.audio.test_season import (
     SEASON_RAW,
-    _Audio,
+    Audio,
     _Chapters,
     _evidence,
     _intro_decision,
@@ -28,13 +28,13 @@ from tests.markers.audio.test_season import (
     _write,
 )
 from tests.markers.fakes import ready_publisher
-from tests.markers.test_pipeline import _run
+from tests.markers.pipeline_helpers import _run
 
 # Fixtures shared with the runner, trigger and detector tests.
 env, _item = test_job_runner.env, test_job_runner._item
 engine = test_job_runner_real.engine
 settings, _server = test_triggers.settings, test_triggers._server
-store, show = test_season.store, test_season.show
+show = test_season.show
 
 SHOW = "/media/tv/Show (2020) {tvdb-1}"
 S1, S2 = f"{SHOW}/Season 01", f"{SHOW}/Season 02"
@@ -45,46 +45,10 @@ def ep(season_folder: str, e: int) -> str:
     return f"{season_folder}/Show (2020) - S{n:02d}E{e:02d}.mkv"
 
 
-class TestNoAutomaticSeasonFollowUps:
-    @pytest.mark.parametrize("source", ["manual", "schedule", "sonarr", "inspector", "inspector_season", "season"])
-    @pytest.mark.parametrize("ending", ["completed", "cancelled", "failed", "empty", "already-finished"])
-    def test_sibling_requests_never_create_another_job(self, env, monkeypatch, source, ending):
-        own, sibling = ep(S1, 1), ep(S1, 2)
-        env.job.config = {"source": source, "file_paths": [own], "late_requests": {sibling: 7}}
-        env.ctx.take_followups.return_value = [sibling]
-        env.ctx.take_changed_siblings_left_out.return_value = [own]
-        env.ctx.ran_since.return_value = False
-        items = [] if ending == "empty" else [_item(own)]
-        if ending == "cancelled":
-            env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
-        elif ending == "failed":
-            env.dispatcher.submit_items.side_effect = RuntimeError("boom")
-        elif ending == "already-finished":
-            monkeypatch.setattr(
-                job_runner,
-                "_skip_finished_before_restart",
-                lambda *args: ([], {"markers_published": 1}, set(), {}),
-            )
-        with (
-            patch.object(job_runner, "build_items", return_value=(items, [], {})),
-            patch.object(triggers, "create_intro_credits_job") as create,
-        ):
-            job_runner.run_intro_credits_job("j1")
-        create.assert_not_called()
-        env.jm.create_job.assert_not_called()
-        if ending == "cancelled":
-            env.jm.cancel_job.assert_called_once_with("j1")
-        else:
-            assert env.jm.complete_job.call_args.args == ("j1",)
-            if ending == "failed":
-                assert env.jm.complete_job.call_args.kwargs["error"] == "RuntimeError: boom"
-            else:
-                assert not env.jm.complete_job.call_args.kwargs.get("error")
-
-    @pytest.mark.parametrize(("source", "retried"), [("season", False), ("sonarr", True)])
-    def test_a_season_job_doesnt_retry_a_file_missing_from_disk(self, env, monkeypatch, source, retried):
+class TestRetryAndVerifyForWebhookJobs:
+    def test_a_webhook_job_retries_a_file_missing_from_disk(self, env, monkeypatch):
         path = ep(S1, 1)
-        env.job.config = {"file_paths": [path], "source": source}
+        env.job.config = {"file_paths": [path], "source": "sonarr"}
         captured = {}
         monkeypatch.setattr(job_runner, "set_file_result_callback", lambda fn, job_id: captured.setdefault("fn", fn))
 
@@ -93,18 +57,16 @@ class TestNoAutomaticSeasonFollowUps:
             return env.tracker
 
         env.dispatcher.submit_items.side_effect = submit
-        env.ctx.take_followups.return_value = []
         with (
             patch.object(job_runner, "build_items", return_value=([_item(path)], [], {path: path})),
             patch.object(job_runner, "_queue_retry") as retry,
         ):
             job_runner.run_intro_credits_job("j1")
-        assert retry.called is retried
+        assert retry.called is True
 
-    @pytest.mark.parametrize(("source", "verified"), [("season", False), ("sonarr", True)])
-    def test_a_season_job_queues_no_verify(self, env, monkeypatch, source, verified):
+    def test_a_webhook_job_queues_a_verify_for_a_replaced_file(self, env, monkeypatch):
         path = ep(S1, 1)
-        env.job.config = {"file_paths": [path], "source": source}
+        env.job.config = {"file_paths": [path], "source": "sonarr"}
         captured = {}
         monkeypatch.setattr(job_runner, "set_file_result_callback", lambda fn, job_id: captured.setdefault("fn", fn))
 
@@ -114,30 +76,29 @@ class TestNoAutomaticSeasonFollowUps:
             return env.tracker
 
         env.dispatcher.submit_items.side_effect = submit
-        env.ctx.take_followups.return_value = []
         with (
             patch.object(job_runner, "build_items", return_value=([_item(path)], [], {path: path})),
             patch.object(job_runner, "_queue_verify") as verify,
         ):
             job_runner.run_intro_credits_job("j1")
-        assert verify.called is verified
+        assert verify.called is True
 
 
 class TestExplicitSeasonRefresh:
     def test_next_selected_run_refreshes_an_episode_after_its_sibling_changed(self, store, show):
         e1, e2 = show(1, 2)
-        with _Audio():
+        with Audio():
             for path in (e1, e2):
                 _run(_season_ctx(store, path), path, {"plex-1": ready_publisher()}, stage="process")
         assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
         _write(e2, 999)
         ctx = _season_ctx(store, e1)
-        with _Audio():
+        with Audio():
             for path in (e1, e2):
                 _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
         assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
         assert _evidence(store, e2, season.Source.SEASON_AUDIO)[0].origin == "1/1"
-        with _Audio():
+        with Audio():
             _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
         assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
 
@@ -151,7 +112,6 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
             return True
 
         monkeypatch.setattr(job_runner, "wait_for_preceding_job", joined_while_waiting)
-        env.ctx.take_followups.return_value = []
         with patch.object(job_runner, "build_items", return_value=([_item(ep(S1, 1))], [], {})) as build:
             job_runner.run_intro_credits_job("j1")
         listed = build.call_args.args[0]
@@ -160,17 +120,7 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
         env.jm.merge_job_config.assert_called_once_with("j1", {job_runner.FILES_SEALED: True})
         env.jm.update_job_config.assert_not_called()
 
-    def test_a_season_job_reads_the_episodes_later_requests_added_and_is_sealed(self, env):
-        env.job.config = {"file_paths": [ep(S1, 1)], "source": "season"}
-        added = {"file_paths": [ep(S1, 1), ep(S1, 2)], "source": "season"}
-        env.jm.get_job.side_effect = [env.job, SimpleNamespace(config=added)]
-        env.ctx.take_followups.return_value = []
-        with patch.object(job_runner, "build_items", return_value=([_item(ep(S1, 1))], [], {})) as build:
-            job_runner.run_intro_credits_job("j1")
-        assert build.call_args.args[0] == {**added, job_runner.FILES_SEALED: True}
-
     def test_jobs_that_follow_no_preview_job_are_not_sealed(self, env):
-        env.ctx.take_followups.return_value = []
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.jm.update_job_config.assert_not_called()
@@ -179,7 +129,6 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
     def test_an_episode_joining_while_the_runner_reads_the_files_is_listed(self, env, monkeypatch):
         env.job.config = {"file_paths": [ep(S1, 1)], "follows_job_id": "p1", "source": "plex"}
         monkeypatch.setattr(job_runner, "wait_for_preceding_job", lambda *args: True)
-        env.ctx.take_followups.return_value = []
         about_to_read = threading.Event()
 
         def registry(config):  # the runner's last step before it reads the files
@@ -345,9 +294,8 @@ class TestWebhookSeasonGrouping:
             {"verify": True},
             {"force": True},
             {"follows_job_id": None, "source": "schedule"},  # only webhook follow-ups take episodes
-            {"follows_job_id": None, "source": "season"},  # a legacy Season job does not take webhook requests
         ],
-        ids=["sealed", "retry", "verify", "forced", "no-preview-job", "season-job"],
+        ids=["sealed", "retry", "verify", "forced", "no-preview-job"],
     )
     def test_sealed_retry_verify_and_forced_jobs_take_no_more_files(self, jm, extra):
         existing = self._existing(jm, [ep(S1, 1)], **extra)
@@ -552,7 +500,6 @@ class TestExplicitSeasonRefreshThroughTheRealEngine:
                 run(library_name="My season schedule", priority=3, source="schedule", file_paths=[e1, e2, e3])
             assert _intro_decision(store, e2) == (DecisionStatus.NO_EVIDENCE, LONG_INTRO_CHAPTER_REASON, None)
             assert len(jm.get_all_jobs()) == 3
-            assert all(job.config.get("source") != "season" for job in jm.get_all_jobs())
 
         finally:
             store.close()

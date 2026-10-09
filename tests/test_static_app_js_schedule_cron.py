@@ -324,18 +324,6 @@ class TestDescribeScheduleCronWeekdays:
             f"APS dow={aps_dow} should display {label} (the 2d29fe9 fix maps APS->Unix); got {out['result']!r}"
         )
 
-    def test_sunday_only_does_not_say_monday(self) -> None:
-        """Direct pin on the bug shape from 2d29fe9: a schedule for
-        Sunday must read 'Sun', NOT 'Mon'. Pre-fix code indexed
-        DAY_NAMES[6] which is 'Sat' for the buggy version that shipped
-        before the (n+1)%7 conversion was added.
-        """
-        out = _eval_js("describeSchedule('cron', '30 9 * * 6')")
-        assert "Sun" in out["result"], f"Sunday cron should mention Sun: {out['result']!r}"
-        assert "Mon" not in out["result"], (
-            f"BUG SHAPE 2d29fe9: Sunday cron must NOT display 'Mon' (or any other day); got {out['result']!r}"
-        )
-
 
 class TestDescribeScheduleCronAggregations:
     """The describeSchedule simple-time branch collapses common patterns
@@ -449,31 +437,6 @@ class TestSaveScheduleCronEncoding:
         # Format: "30 14 * * <APSday>"
         assert cron == f"30 14 * * {expected_aps}", (
             f"unix_dow={unix_dow} should map to APS {expected_aps}; got cron {cron!r}"
-        )
-
-    def test_sunday_only_encodes_to_aps_6_not_aps_0(self) -> None:
-        """Direct pin on the 2d29fe9 bug shape from the SAVE side: a user
-        ticking only the Sunday checkbox (UI value '0') must produce
-        cron '... * * 6' (APS Sun=6), NOT '... * * 0' (APS Mon=0).
-        """
-        form = {
-            "scheduleEditId": {"value": ""},
-            "scheduleName": {"value": "Sunday only"},
-            "scheduleEnabled": {"checked": True},
-            "schedulePriority": {"value": "2"},
-            "scheduleStopTime": {"value": ""},
-            "scheduleLibraryAll": {"checked": True},
-            "scheduleServer": {"value": ""},
-            "scheduleTime": {"value": "09:00"},
-            "__scheduleType": "specific-time",
-            "__checkedDays": [0],  # Sunday in Unix cron
-            "__scanMode": "full_library",
-        }
-        out = _eval_js("saveSchedule()", form_values=form)
-        cron = out["captured"]["posts"][0]["body"]["cron_expression"]
-        assert cron.endswith(" 6"), (
-            f"BUG SHAPE 2d29fe9 (save-side): Sunday checkbox must encode to APS day 6, "
-            f"NOT 0 (which would fire on Monday). Got cron: {cron!r}"
         )
 
     def test_weekdays_encode_to_aps_0_through_4(self) -> None:
@@ -758,48 +721,44 @@ class TestPendingProgressReplay:
       * After the DOM target appears, a subsequent call clears the cache
         entry.
 
-    These are static-source guards (regex on app.js) rather than full
-    JS execution because updateJobProgress drags in a much larger DOM
-    surface (queue rendering, timers, percent-override math) that isn't
-    relevant to the bug shape. The pair of lines below are the entire
-    "cache-on-miss / clear-on-hit" contract.
+    updateJobProgress and its cache are extracted from app.js and run
+    under node with a stub ``jobs`` list and ``document``; the replay
+    call site inside loadJobs() is only checked in the source because
+    loadJobs() drags in the whole dashboard.
     """
 
     @pytest.fixture(scope="class")
     def app_src(self) -> str:
         return APP_JS.read_text(encoding="utf-8")
 
-    def test_pending_progress_cache_object_exists(self, app_src: str) -> None:
-        assert "const _pendingProgress = {};" in app_src, (
-            "31cd4a0 introduced a module-level _pendingProgress cache so progress "
-            "events arriving before the active-job DOM card exists can be replayed. "
-            "Removing the cache regresses the original bug (job stuck at 0% during first file)."
-        )
+    def _run_update_job_progress(self, app_src: str, *, jobs: str, row_exists: bool) -> dict:
+        start = app_src.index("const _pendingProgress = {};")
+        fn_start = app_src.index("function updateJobProgress(", start)
+        source = app_src[start : app_src.index("\n}\n", fn_start) + 3]
+        row = "{ querySelector: () => null }" if row_exists else "null"
+        snippet = f"""
+const jobs = {jobs};
+const document = {{ getElementById: (id) => id === 'job-row-7' ? {row} : null }};
+{source}
+_pendingProgress['7'] = {{ percent: 1 }};
+updateJobProgress('7', {{ percent: 5 }});
+console.log(JSON.stringify({{ pending: _pendingProgress, jobs }}));
+"""
+        return json.loads(_run_node(snippet))
 
-    def test_update_job_progress_caches_when_dom_missing(self, app_src: str) -> None:
-        body = app_src.split("function updateJobProgress(", 1)[1].split("\n}", 1)[0]
-        assert "_pendingProgress[jobId] = progress" in body, (
-            "updateJobProgress must cache the progress payload into _pendingProgress[jobId] "
-            "when the per-job progress bar element is missing — otherwise the very first "
-            "progress event of a job is dropped (the 31cd4a0 bug)."
-        )
-        # The cache write must be guarded by the missing-DOM branch — i.e.
-        # a `return` immediately follows it so the rest of the function
-        # doesn't try to mutate the absent bar.
-        cache_idx = body.find("_pendingProgress[jobId] = progress")
-        return_idx = body.find("return", cache_idx)
-        assert 0 <= return_idx - cache_idx < 80, (
-            "The cache write must be in the early-return branch (the DOM-missing path); "
-            "without the early return the function falls through and crashes on null."
-        )
+    def test_progress_for_a_job_not_yet_listed_is_cached(self, app_src: str) -> None:
+        out = self._run_update_job_progress(app_src, jobs="[]", row_exists=False)
+        assert out["pending"] == {"7": {"percent": 5}}
 
-    def test_update_job_progress_clears_cache_when_dom_ready(self, app_src: str) -> None:
-        body = app_src.split("function updateJobProgress(", 1)[1].split("\n}", 1)[0]
-        assert "delete _pendingProgress[jobId]" in body, (
-            "updateJobProgress must delete the cache entry once the DOM target exists; "
-            "otherwise the replay loop in loadJobs() would re-apply stale progress on "
-            "every poll and overwrite live updates from the worker."
-        )
+    def test_progress_for_a_job_without_a_dom_row_is_cached_and_applied_to_the_job(self, app_src: str) -> None:
+        out = self._run_update_job_progress(app_src, jobs="[{ id: 7, progress: {} }]", row_exists=False)
+        assert out["pending"] == {"7": {"percent": 5}}
+        assert out["jobs"][0]["progress"] == {"percent": 5}
+
+    def test_progress_clears_the_cache_entry_once_the_dom_row_exists(self, app_src: str) -> None:
+        out = self._run_update_job_progress(app_src, jobs="[{ id: 7, progress: {} }]", row_exists=True)
+        assert out["pending"] == {}
+        assert out["jobs"][0]["progress"] == {"percent": 5}
 
     def test_load_jobs_replays_pending_progress(self, app_src: str) -> None:
         # The replay site lives at the end of loadJobs() — assert it iterates

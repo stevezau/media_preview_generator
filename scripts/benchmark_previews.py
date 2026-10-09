@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Time Plex's built-in preview generation against this app, on the same files and the same machine.
 
-Runs on `storage` against the site lab (docs/design/site-redesign-lab/, plan Task 4): the lab Plex
+Runs against the site lab (docs/design/site-redesign-lab/): the lab Plex
 `mlab-plex` (given the GPU, hardware acceleration on) and this branch's app `mlab-site-app`, the
 Open Films library, the same frame interval and JPEG quality. Appends raw timings to
 docs/benchmark/results.csv and records the setup in docs/benchmark/environment.json; `summary`
@@ -64,7 +64,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LAB = REPO_ROOT / "docs" / "design" / "site-redesign-lab"
 BENCH = REPO_ROOT / "docs" / "benchmark"
 ENVIRONMENT = BENCH / "environment.json"
-PLEXDB = Path("/home/data/workspace/plex_generate_vid_previews/docs/design/intro-credits/evidence/lab/plexdb.sh")
+PLEXDB = REPO_ROOT / "docs/design/intro-credits/evidence/lab/plexdb.sh"
 PLEX_DATA = "/config/Library/Application Support/Plex Media Server"
 TOOLS = ("plex-builtin", "app-gpu", "app-cpu")
 MIN_RUNS = 3

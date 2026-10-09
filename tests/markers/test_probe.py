@@ -1,4 +1,4 @@
-"""Tests for media_preview_generator.markers.probe (spec §5.1)."""
+"""Tests for media_preview_generator.markers.probe."""
 
 import json
 import os

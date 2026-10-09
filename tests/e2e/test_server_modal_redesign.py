@@ -233,7 +233,7 @@ def _mock_api(page: Page, servers: list[dict], *, unreachable: tuple[str, ...] =
         captured["patches"].append(route.request.post_data_json)
         _fulfill(route, {"enabled": route.request.post_data_json["enabled"]})
 
-    def test_connection_handler(route: Route) -> None:
+    def probe_new_handler(route: Route) -> None:
         captured["tests"].append(route.request.post_data_json)
         _fulfill(route, {"ok": True, "server_name": "Home Server", "version": "1.2.3"})
 
@@ -242,7 +242,7 @@ def _mock_api(page: Page, servers: list[dict], *, unreachable: tuple[str, ...] =
     page.route("**/api/servers", list_handler)
     page.route("**/api/servers/*/test-connection", probe_handler)
     page.route("**/api/servers/*/enabled", enabled_handler)
-    page.route("**/api/servers/test-connection", test_connection_handler)
+    page.route("**/api/servers/test-connection", probe_new_handler)
     page.route(
         "**/api/servers/*/previews-readiness",
         lambda route: _fulfill(route, _readiness(by_id[route.request.url.split("/servers/")[1].split("/")[0]]["type"])),
@@ -1043,7 +1043,6 @@ class TestServersPageLayouts:
         _mock_api(authed_page, servers, unreachable=(servers[-1]["id"],) if count > 1 else ())
         authed_page.goto(f"{app_url}/servers")
         expect(authed_page.locator("#serverList .srv-card")).to_have_count(count, timeout=10000)
-        authed_page.wait_for_timeout(500)
         assert authed_page.evaluate("document.documentElement.scrollWidth") <= PHONE["width"]
         for card in authed_page.locator("#serverList .srv-card").all():
             box = card.bounding_box()

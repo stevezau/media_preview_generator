@@ -82,9 +82,11 @@ jobs:
             echo "::error::${TAG} would publish :${version}, but AGENT_VERSION says ${reported}. Bump one to match the other."
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "image=ghcr.io/${OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "image=ghcr.io/${OWNER,,}/${IMAGE_NAME}"
+          } >> "$GITHUB_OUTPUT"
           echo "Publishing ghcr.io/${OWNER,,}/${IMAGE_NAME}:${version}"
 
       # Its own interpreter, like every other pip-installing job here (ci.yml's lint, gpu-tests.yml): the runner's
@@ -198,6 +200,7 @@ jobs:
         working-directory: /tmp/digests
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2046  # the digest list must split into one argument per digest
           docker buildx imagetools create \
             -t "${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}" \
             $(printf '${{ needs.resolve.outputs.image }}@sha256:%s ' *)

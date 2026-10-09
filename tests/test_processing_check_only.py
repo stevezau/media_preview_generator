@@ -327,7 +327,7 @@ class TestCancellationDuringGeneration:
 
 class TestAlreadyDoneFilesLogAtDebug:
     """A scheduled scan's checking stage visits every file, most of them already done: 3 of the 4 INFO lines per such
-    file came from here (92% of 557k INFO lines in 12 h on the owner's server). The checking stage's breadcrumbs and
+    file came from here, which dominated the INFO log. The checking stage's breadcrumbs and
     the "already fresh" line are DEBUG; a worker's dispatch (a file being generated) keeps its INFO breadcrumbs."""
 
     _LINES = ("Dispatch: path=", "Owners resolved:", "All publishers' outputs already fresh")

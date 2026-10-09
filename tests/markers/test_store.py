@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import threading
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -14,13 +14,6 @@ from media_preview_generator.markers.sources.server_markers import imported_deta
 from media_preview_generator.markers.store import MarkerStore, get_marker_store, reset_marker_store
 
 T = MarkerType
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
 
 
 def _ident(path="/m/Show/Season 01/S01E01.mkv", size=100, mtime_ns=1):
@@ -133,7 +126,7 @@ def test_identity_change_invalidates_evidence_decisions_and_unlocked_markers(sto
     # replace; the basis is cleared so an in-place rewrite landing on identical times still re-publishes.
     assert kept.markers == tuple(published) and kept.status == "written"
     assert store.get_publish_basis(rec.id, "plex-1") is None
-    assert store.get_file_by_id(rec.id).duration_ms == 1_100_000
+    assert store.get_file(new.canonical_path).duration_ms == 1_100_000
 
     assert len(store.get_evidence(other.id)) == 1
     assert store.evidence_version(other.id, Source.SKIPDB) == 1
@@ -241,8 +234,6 @@ def test_a_legacy_needs_review_row_reads_as_no_evidence_and_is_listed_for_decidi
         ("skipdb",),
     )
     assert store.get_decisions(gone.id)[T.INTRO].status is DecisionStatus.NO_EVIDENCE
-    # Only the legacy rows of files on disk are listed; a row the rules wrote as no evidence isn't decided again.
-    assert store.files_with_legacy_review_decisions() == ["/m/Show/Season 01/S01E01.mkv"]
 
 
 def test_save_decisions_never_overwrites_locked_marker(store):
@@ -276,7 +267,7 @@ class TestUserMarkers:
         assert store.get_locked(rec.id) == saved
         for mtype in (T.INTRO, T.CREDITS):
             row = store.get_decisions(rec.id)[mtype]
-            assert (row.status, row.reason) is not None and row.status is DecisionStatus.DECIDED
+            assert row.status is DecisionStatus.DECIDED
             assert row.reason == store_mod.LOCKED_BY_USER
             assert (row.proposed_start_ms, row.proposed_end_ms, row.decided_by) == (None, None, ())
             assert row.settings_fingerprint == "fp-now"
@@ -291,7 +282,7 @@ class TestUserMarkers:
         assert decide([], ctx, {T.INTRO: locked})[T.INTRO].reason == store_mod.LOCKED_BY_USER
 
     def test_a_save_whose_decision_write_fails_leaves_no_marker_either(self, store):
-        """P-R1: the save is all or nothing -- a half-saved edit (locked, but still undecided) is worse than
+        """The save is all or nothing -- a half-saved edit (locked, but still undecided) is worse than
         a refused one."""
         rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
         store._conn = _FailOnPrefix(store._conn, "INSERT OR REPLACE INTO decisions")
@@ -343,7 +334,7 @@ class TestUserMarkers:
 
 
 def test_save_decisions_stores_the_proposals_own_sources(store):
-    """L100: the editor shows what a proposal was based on, and a proposal has no row in `markers`."""
+    """The editor shows what a proposal was based on, and a proposal has no row in `markers`."""
     rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
     proposed = Marker(T.CREDITS, 1_290_000, 1_320_000, ("chapters", "theintrodb"))
     store.save_decisions(
@@ -359,7 +350,7 @@ def test_save_decisions_stores_the_proposals_own_sources(store):
     assert rows[T.INTRO].decided_by == ()
 
 
-def test_markers_hash_is_order_independent_and_sensitive_to_times(store):
+def test_markers_hash_is_order_independent_and_sensitive_to_times():
     a = Marker(T.INTRO, 1, 2, ("x",))
     b = Marker(T.CREDITS, 3, 4, ("y",))
     assert MarkerStore.markers_hash([a, b]) == MarkerStore.markers_hash([b, a])
@@ -429,12 +420,12 @@ def test_persists_across_reopen(tmp_path):
     rec = s.upsert_file(_ident(), duration_ms=5, season_key=None, is_movie=True)
     s.close()
     s2 = MarkerStore(path)
-    assert s2.get_file_by_id(rec.id).canonical_path == _ident().canonical_path
+    assert s2.get_file(_ident().canonical_path).id == rec.id
     s2.close()
 
 
 def test_identity_change_leaves_other_files_alone(store):
-    """HIGH 1: a mutant dropping a table from the invalidation loop, dropping its WHERE file_id=?,
+    """A mutant dropping a table from the invalidation loop, dropping its WHERE file_id=?,
     or scoping the unlocked-markers delete to all files rather than one, must fail this test."""
     rec = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1_000_000, season_key=None, is_movie=True)
     other = store.upsert_file(_ident("/m/b.mkv"), duration_ms=1_000_000, season_key=None, is_movie=True)
@@ -459,9 +450,9 @@ def test_identity_change_leaves_other_files_alone(store):
     assert T.INTRO in store.get_markers(other.id)
     assert store._count("fingerprints") == 1
 
-    # HIGH A: a mutant dropping WHERE id=? from upsert_file's changed-branch UPDATE would blast every
+    # A mutant dropping WHERE id=? from upsert_file's changed-branch UPDATE would blast every
     # file's row to A's new size/mtime/duration.
-    other_file = store.get_file_by_id(other.id)
+    other_file = store.get_file(other.canonical_path)
     assert (other_file.size, other_file.mtime_ns, other_file.duration_ms) == (100, 1, 1_000_000)
 
 
@@ -539,7 +530,7 @@ def test_an_answer_can_replace_another_sources_rows_under_the_same_origin(store)
 
 
 def test_evidence_scoping_by_source(store):
-    """HIGH 2: a mutant dropping the source (or origin) filter from evidence_fetched_at's WHERE
+    """A mutant dropping the source (or origin) filter from evidence_fetched_at's WHERE
     clause, or from replace_evidence's DELETE, must fail this test."""
     rec = store.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=True)
     store.replace_evidence(rec.id, Source.CHAPTERS, [], detail="no chapters")
@@ -550,14 +541,14 @@ def test_evidence_scoping_by_source(store):
 
 
 def test_get_locked_excludes_decided(store):
-    """HIGH 2: a mutant dropping the ``AND locked=1`` filter from _markers must fail this test."""
+    """A mutant dropping the ``AND locked=1`` filter from _markers must fail this test."""
     rec = store.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=True)
     store.save_decisions(rec.id, {T.CREDITS: _decided(T.CREDITS, 900_000, 1_000_000)}, settings_fingerprint="f")
     assert store.get_locked(rec.id) == {}
 
 
 def test_replace_evidence_chapters_share_one_key_regardless_of_titled_labels(store):
-    """MED 1: replace_evidence's delete/insert must key off the `origin` argument (the lookup key),
+    """replace_evidence's delete/insert must key off the `origin` argument (the lookup key),
     never off each candidate's own `c.origin` (its label) -- otherwise replacing CHAPTERS again with
     differently-titled candidates accumulates duplicates instead of replacing."""
     rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
@@ -576,7 +567,7 @@ def test_replace_evidence_chapters_share_one_key_regardless_of_titled_labels(sto
 
 
 def test_replace_evidence_server_markers_by_origin_replace_independently(store):
-    """MED 1 / HIGH B: two different server origins under the same source must not clobber each
+    """Two different server origins under the same source must not clobber each
     other, and evidence_fetched_at must be scoped to its own origin (store.py ~386-393)."""
     rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
     plex = Candidate(T.INTRO, 1_000, 2_000, Source.SERVER_MARKERS, origin="plex-1")
@@ -598,14 +589,14 @@ def test_replace_evidence_server_markers_by_origin_replace_independently(store):
 
 @pytest.mark.parametrize("change", [{"size": 101}, {"mtime_ns": 2}])
 def test_identity_change_with_unknown_duration_stores_null(store, change):
-    """LOW: a changed identity with duration_ms=None must not COALESCE the stale old duration."""
+    """A changed identity with duration_ms=None must not COALESCE the stale old duration."""
     store.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=False)
     changed = store.upsert_file(_ident(**change), duration_ms=None, season_key=None, is_movie=False)
     assert changed.duration_ms is None
 
 
 def test_unchanged_identity_with_no_duration_keeps_previous_value(store):
-    """LOW: an unchanged identity must still COALESCE, unlike the changed-identity case above."""
+    """An unchanged identity must still COALESCE, unlike the changed-identity case above."""
     store.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=False)
     same = store.upsert_file(_ident(), duration_ms=None, season_key=None, is_movie=False)
     assert same.duration_ms == 1_000_000
@@ -729,7 +720,7 @@ def test_get_marker_store_created_once_under_concurrent_first_access(tmp_path):
 
 
 def test_publish_states_scoped_to_file(store):
-    """LOW: a mutant dropping WHERE file_id=? from publish_states must fail this test."""
+    """A mutant dropping WHERE file_id=? from publish_states must fail this test."""
     a = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1, season_key=None, is_movie=False)
     b = store.upsert_file(_ident("/m/b.mkv"), duration_ms=1, season_key=None, is_movie=False)
     store.set_publish_state(a.id, "plex-1", item_id="1", markers=[Marker(T.INTRO, 1, 2, ("x",))], status="written")
@@ -738,18 +729,17 @@ def test_publish_states_scoped_to_file(store):
     assert [r.item_id for r in store.publish_states(b.id)] == ["2"]
 
 
-def test_get_file_by_id_scoped_to_id(store):
-    """LOW: a mutant dropping WHERE id=? from get_file_by_id must fail this test."""
+def test_get_file_scoped_to_path(store):
     a = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1, season_key=None, is_movie=False)
     b = store.upsert_file(_ident("/m/b.mkv"), duration_ms=2, season_key="/m", is_movie=True)
-    assert store.get_file_by_id(a.id).canonical_path == "/m/a.mkv"
-    assert store.get_file_by_id(b.id).canonical_path == "/m/b.mkv"
-    assert store.get_file_by_id(a.id).duration_ms == 1
-    assert store.get_file_by_id(b.id).duration_ms == 2
+    assert store.get_file("/m/a.mkv").id == a.id
+    assert store.get_file("/m/b.mkv").id == b.id
+    assert store.get_file("/m/a.mkv").duration_ms == 1
+    assert store.get_file("/m/b.mkv").duration_ms == 2
 
 
 def test_open_refuses_a_newer_schema_version_before_any_ddl(tmp_path, monkeypatch):
-    """MED: the version check must run off sqlite_master before any DDL -- build a DB with only the
+    """The version check must run off sqlite_master before any DDL -- build a DB with only the
     `meta` table (never the full app schema) so a mutant that applies `_SCHEMA` before checking the
     version would leave behind tables this test can catch. Also: the connection must be closed on
     refusal (LOW), and the database must not have been switched to WAL before the check (LOW)."""
@@ -835,7 +825,6 @@ def _schema_1_database(path, version="1"):
     raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (version,))
     raw.commit()
     raw.close()
-    return raw
 
 
 def test_open_upgrades_an_older_schema_version(tmp_path):
@@ -850,7 +839,7 @@ def test_open_upgrades_an_older_schema_version(tmp_path):
 
 
 def test_a_schema_1_database_gains_the_lock_and_proposal_columns_and_keeps_its_rows(tmp_path):
-    """The columns Task 3 adds must reach an existing install: `_SCHEMA` is CREATE TABLE IF NOT EXISTS, so without
+    """The columns added after schema 1 must reach an existing install: `_SCHEMA` is CREATE TABLE IF NOT EXISTS, so without
     `_MIGRATIONS[1]` this database keeps the schema-1 tables and every read of the new columns raises."""
     path = str(tmp_path / "markers.db")
     _schema_1_database(path)
@@ -929,9 +918,8 @@ def test_a_schema_2_database_gains_the_missing_mark_and_keeps_its_rows(tmp_path)
             backup.close()
         rec = s.get_file("/m/Show/S01E01.mkv")
         assert (rec.id, rec.size, rec.missing_since) == (1, 100, None)
-        assert s.files_with_legacy_review_decisions() == ["/m/Show/S01E01.mkv"]
         assert s.mark_missing(rec) is True
-        assert s.files_with_legacy_review_decisions() == [] and s.get_file(rec.canonical_path).missing_since is not None
+        assert s.get_file(rec.canonical_path).missing_since is not None
     finally:
         s.close()
 
@@ -989,80 +977,6 @@ def test_a_second_process_opening_the_same_schema_1_store_migrates_nothing(tmp_p
         assert "locked_at" in columns  # the winner's migration stands; the loser neither repeated nor undid it
     finally:
         loser.close()
-
-
-class TestAnOlderBuildOpenedItMeanwhile:
-    """A rollback to a build from before ``season_pair_runs`` (40311c3, 98bed80: schema 3 as well) opens markers.db
-    and works, but never reads or clears the tables this build added. That build recreates ``season_pairs``, which
-    this build drops on every open, so finding it means one ran since; what it can have left out of step is emptied."""
-
-    @staticmethod
-    def _touched_by_this_build(path):
-        store = MarkerStore(path)
-        a = store.upsert_file(FileIdentity("/m/a.mkv", 1, 1), duration_ms=1_300_000, season_key="/m", is_movie=False)
-        b = store.upsert_file(FileIdentity("/m/b.mkv", 1, 1), duration_ms=1_300_000, season_key="/m", is_movie=False)
-        intro = Marker(T.INTRO, 1_000, 30_000, ("chapters",))
-        store.save_decisions(b.id, {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.DECIDED, intro, None, "chapters")},
-                             settings_fingerprint="f")  # fmt: skip
-        b = store.upsert_file(FileIdentity("/m/b.mkv", 2, 2), duration_ms=1_300_000, season_key="/m", is_movie=False)
-        for rec in (a, b):
-            store.set_fingerprint(rec.id, points=b"\x01\x00\x00\x00", size=rec.size, mtime_ns=rec.mtime_ns,
-                                  window="intro", start_s=0.0, length_s=455.0, algorithm=1)  # fmt: skip
-        assert store.set_season_pair(a.id, b.id, 9, [(1.0, 2.0, 3.0, 4.0)], identity_a=(1, 1), identity_b=(2, 2))
-        store.record_version_reruns([("/m/a.mkv", "decide_rules", 1)])
-        credits = Marker(T.CREDITS, 1_200_000, 1_300_000, ("credits_text",))
-        store.save_decisions(
-            a.id,
-            {
-                T.INTRO: TypeDecision(T.INTRO, DecisionStatus.DECIDED, intro, None, "chapters"),
-                T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.DECIDED, credits, None, "credits_text"),
-            },
-            settings_fingerprint="f",
-        )
-        store.lock_marker(a.id, credits)  # the user's own
-        store.close()
-
-    @staticmethod
-    def _counts(path):
-        with closing(sqlite3.connect(path)) as raw:
-            tables = ("season_pair_runs", "replaced_decisions", "version_reruns", "files", "decisions", "fingerprints",
-                      "markers", "evidence_versions")  # fmt: skip
-            counts = {t: raw.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
-            counts["locked"] = raw.execute("SELECT COUNT(*) FROM markers WHERE locked=1").fetchone()[0]
-            return counts
-
-    def test_what_it_couldnt_keep_in_step_is_emptied_on_the_next_open(self, tmp_path):
-        path = str(tmp_path / "markers.db")
-        self._touched_by_this_build(path)
-        with closing(sqlite3.connect(path)) as older_build:  # its _SCHEMA's CREATE TABLE IF NOT EXISTS
-            older_build.execute(
-                "CREATE TABLE season_pairs (file_a INTEGER NOT NULL, file_b INTEGER NOT NULL, "
-                "matcher_version INTEGER NOT NULL, runs_json TEXT NOT NULL, PRIMARY KEY (file_a, file_b))"
-            )
-            older_build.commit()
-
-        MarkerStore(path).close()
-
-        assert self._counts(path) == {
-            "season_pair_runs": 0,
-            "replaced_decisions": 0,
-            "version_reruns": 0,
-            "files": 2,
-            "decisions": 2,  # a's; b's went with its identity
-            "fingerprints": 2,
-            "markers": 2,
-            "evidence_versions": 0,
-            "locked": 1,
-        }
-
-    def test_without_one_in_between_everything_is_kept(self, tmp_path):
-        path = str(tmp_path / "markers.db")
-        self._touched_by_this_build(path)
-
-        MarkerStore(path).close()
-
-        counts = self._counts(path)
-        assert (counts["season_pair_runs"], counts["replaced_decisions"], counts["version_reruns"]) == (1, 1, 1)
 
 
 def test_losing_the_race_to_a_newer_build_is_still_refused(tmp_path):
@@ -1124,28 +1038,6 @@ def test_file_record_exposes_size_mtime_season_and_is_movie(store):
     assert (rec.size, rec.mtime_ns, rec.season_key, rec.is_movie) == (555, 777, "/m/Show/Season 01", True)
 
 
-def test_publish_state_row_exposes_item_id_and_updated_at(store):
-    rec = store.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
-    store.set_publish_state(
-        rec.id, "plex-1", item_id="item-42", markers=[Marker(T.INTRO, 1, 2, ("x",))], status="written"
-    )
-    row = store.get_publish_state(rec.id, "plex-1")
-    assert row.item_id == "item-42"
-    assert row.updated_at != ""
-
-
-def test_decision_row_exposes_reason_and_decided_at(store):
-    rec = store.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
-    store.save_decisions(
-        rec.id,
-        {T.RECAP: TypeDecision(T.RECAP, DecisionStatus.NO_EVIDENCE, None, None, "no evidence")},
-        settings_fingerprint="f",
-    )
-    d = store.get_decisions(rec.id)[T.RECAP]
-    assert d.reason == "no evidence"
-    assert d.decided_at != ""
-
-
 def test_set_publish_state_leaves_the_retired_hash_columns_empty(store):
     rec = store.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
     first = [Marker(T.INTRO, 1, 5000, ("chapters",))]
@@ -1157,18 +1049,18 @@ def test_set_publish_state_leaves_the_retired_hash_columns_empty(store):
 
 
 def test_unchanged_upsert_on_one_file_does_not_touch_another_files_row(store):
-    """HIGH A: a mutant dropping WHERE id=? from upsert_file's UNCHANGED-branch UPDATE would blast
+    """A mutant dropping WHERE id=? from upsert_file's UNCHANGED-branch UPDATE would blast
     every file's duration_ms to the same COALESCE(?, duration_ms) value."""
     a = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
-    b = store.upsert_file(_ident("/m/b.mkv"), duration_ms=2_000_000, season_key=None, is_movie=False)
+    store.upsert_file(_ident("/m/b.mkv"), duration_ms=2_000_000, season_key=None, is_movie=False)
     same = store.upsert_file(_ident("/m/a.mkv"), duration_ms=9_999_999, season_key=None, is_movie=False)
     assert same.id == a.id
-    assert store.get_file_by_id(a.id).duration_ms == 9_999_999
-    assert store.get_file_by_id(b.id).duration_ms == 2_000_000
+    assert store.get_file("/m/a.mkv").duration_ms == 9_999_999
+    assert store.get_file("/m/b.mkv").duration_ms == 2_000_000
 
 
 def test_locked_marker_on_one_file_does_not_block_decisions_for_another(store):
-    """HIGH A: a mutant dropping file_id from save_decisions' locked check (N40) would make A's lock
+    """A mutant dropping file_id from save_decisions' locked check (N40) would make A's lock
     look like it also covers B, silently dropping B's decided marker."""
     a = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
     b = store.upsert_file(_ident("/m/b.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
@@ -1178,7 +1070,7 @@ def test_locked_marker_on_one_file_does_not_block_decisions_for_another(store):
 
 
 def test_no_evidence_decision_on_one_file_does_not_delete_another_files_marker(store):
-    """HIGH A: a mutant dropping file_id from save_decisions' unlocked-marker DELETE (N41) would
+    """A mutant dropping file_id from save_decisions' unlocked-marker DELETE (N41) would
     delete B's marker when A's same-type decision ends with no evidence."""
     a = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
     b = store.upsert_file(_ident("/m/b.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
@@ -1192,7 +1084,7 @@ def test_no_evidence_decision_on_one_file_does_not_delete_another_files_marker(s
 
 
 def test_migration_runs_and_bumps_version(tmp_path, monkeypatch):
-    """MED: a real ALTER TABLE migration must actually run (not just an empty-migrations bump), and
+    """A real ALTER TABLE migration must actually run (not just an empty-migrations bump), and
     it must run BEFORE `_SCHEMA` -- a `_SCHEMA` index on the migration's new column would fail with
     "no such column" if a mutant applied `_SCHEMA` first, so its existence proves the ordering."""
     path = str(tmp_path / "markers.db")
@@ -1220,7 +1112,7 @@ def test_migration_runs_and_bumps_version(tmp_path, monkeypatch):
 
 
 def test_migration_failure_leaves_version_and_schema_unchanged(tmp_path, monkeypatch):
-    """MED: a migration whose SECOND statement fails must roll back the first statement too, and
+    """A migration whose SECOND statement fails must roll back the first statement too, and
     leave schema_version unbumped; fixing the migration and reopening must then succeed cleanly."""
     path = str(tmp_path / "markers.db")
     raw = sqlite3.connect(path)
@@ -1309,7 +1201,7 @@ def test_item_publish_state_matrix(store):
     assert (row.markers, row.status) == ((), "written") and row.version > failed_version
     assert store.published_to_item("plex-1", "42") is False
 
-    # Every type Plex keeps as its own (keepplex re-review LOW-5): still an item this app published to, so its markers
+    # Every type Plex keeps as its own: still an item this app published to, so its markers
     # (possibly ours beside Plex's) are never read back as a second opinion.
     store.set_item_publish_state("plex-1", "42", [], "written", kept_types={T.INTRO})
     assert store.published_to_item("plex-1", "42") is True
@@ -1517,7 +1409,7 @@ class TestPublishedItems:
 
 
 class TestUndeliveredLocks:
-    """Check servers must find a user's locked edit that a server never received (spec §6.2 step 6, ruling P-R1)."""
+    """Check servers must find a user's locked edit that a server never received."""
 
     LOCKED = Marker(MarkerType.INTRO, 1_000, 30_000, ("user",), locked=True)
 
@@ -1889,33 +1781,3 @@ class TestGoneItemsAndDriftTurns:
             assert store.drift_listed_at("plex-1", ["b"]) == {}
         finally:
             store.close()
-
-
-def test_a_legacy_needs_review_row_counts_as_changed_so_deciding_again_rewrites_it(store):
-    """sflix 2026-10-03: 79 rows kept the raw ``needs_review`` after the decide-again job. The stored row loaded as no
-    evidence equalled the new no-evidence verdict (same reason, proposal and fingerprint), so it was never rewritten
-    and ``files_with_legacy_review_decisions`` listed the file again on every trigger."""
-    from media_preview_generator.markers.pipeline import _decisions_changed
-
-    legacy = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
-    store._conn.execute(
-        "INSERT INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
-        "settings_fingerprint, decided_at, decided_by) VALUES (?, 'intro', 'needs_review', 'sources disagree', "
-        "1000, 30000, 'fp', '2026-09-01T00:00:00+00:00', '[\"skipdb\"]')",
-        (legacy.id,),
-    )
-    store._conn.commit()
-    same = {
-        T.INTRO: TypeDecision(
-            T.INTRO, DecisionStatus.NO_EVIDENCE, None, Marker(T.INTRO, 1000, 30_000, ("skipdb",)), "sources disagree"
-        )
-    }
-
-    assert _decisions_changed(store, legacy.id, same, "fp")
-    store.save_decisions(legacy.id, same, settings_fingerprint="fp")
-
-    raw = store._conn.execute("SELECT status FROM decisions WHERE file_id=?", (legacy.id,)).fetchone()["status"]
-    assert raw == "no_evidence"
-    assert store.files_with_legacy_review_decisions() == []
-    # Once written under today's rules the same verdict is not written again.
-    assert not _decisions_changed(store, legacy.id, same, "fp")

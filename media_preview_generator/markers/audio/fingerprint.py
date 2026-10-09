@@ -1,8 +1,8 @@
-"""Chromaprint fingerprints of an episode's opening (spec §5.3), cached per file identity in markers.db.
+"""Chromaprint fingerprints of an episode's opening, cached per file identity in markers.db.
 
 CPU only (there is no GPU chromaprint). As many run at once as workers run them: the worker pool is the cap, as it is
 for previews. Each runs at ffmpeg's own thread count on any worker: a GPU worker's ``ffmpeg_threads`` caps its GPU
-work, and chromaprint is CPU work (spec §5.6). Pause all, quiet hours and a schedule's stop time stop a running one where it is
+work, and chromaprint is CPU work. Pause all, quiet hours and a schedule's stop time stop a running one where it is
 (:mod:`..freeze`). Only jellyfin-ffmpeg carries the chromaprint muxer in the image; the arm64 image has none, so season
 audio is then unavailable rather than failing every episode.
 """
@@ -38,7 +38,7 @@ WINDOW = SEASON_PAIR_WINDOW
 ALGORITHM = 1
 # A retimed fingerprint's audio is resampled to this rate and then declared to run at this rate times the retime factor,
 # so it plays that much faster or slower, pitch with it: the exact inverse of a PAL speed-up (``markers.speed``). A
-# pitch-keeping stretch (atempo) matched none of Bones season 5's 85 cross-speed pairs; this matched all 85.
+# pitch-keeping stretch (atempo) matched none of one season's 85 cross-speed pairs; this matched all 85.
 RETIME_BASE_RATE = 48_000
 # Retime factors outside this range are no PAL speed-up (a bug, not a file): ffmpeg is never started with one.
 MIN_RETIME, MAX_RETIME = 0.5, 2.0
@@ -118,7 +118,7 @@ class FingerprintSkippedError(Exception):
 
 
 def window_s(duration_ms: int) -> float:
-    """Seconds fingerprinted from the start: 35% of the file, at most 900 s (spec §5.3)."""
+    """Seconds fingerprinted from the start: 35% of the file, at most 900 s."""
     return min(MAX_WINDOW_S, WINDOW_FRACTION * duration_ms / 1000.0)
 
 
@@ -215,7 +215,7 @@ def fingerprint_window(retime: float | None) -> str:
 
 
 def fingerprint_command(ffmpeg: str, path: str, length_s: float, retime: float | None = None) -> list[str]:
-    """The spec §5.3 command: raw algorithm-1 chromaprint of the first ``length_s`` seconds, stereo.
+    """The command: raw algorithm-1 chromaprint of the first ``length_s`` seconds, stereo.
 
     Args:
         ffmpeg: An ffmpeg with chromaprint.

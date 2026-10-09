@@ -55,33 +55,6 @@ def mock_plex_libraries(page: Page, libs: list[dict] | None = None, status: int 
     page.route("**/api/plex/libraries**", handler)
 
 
-def mock_plex_servers(page: Page, servers: list[dict] | None = None) -> None:
-    """GET /api/plex/servers — list of plex.tv-discovered servers."""
-    if servers is None:
-        servers = [
-            {
-                "name": "Home Plex",
-                "uri": "http://192.168.1.10:32400",
-                "access_token": "tok-home",
-                "machine_identifier": "abc123",
-            }
-        ]
-
-    def handler(route: Route) -> None:
-        _fulfill_json(route, {"servers": servers})
-
-    page.route("**/api/plex/servers**", handler)
-
-
-def mock_plex_test(page: Page, ok: bool = True, message: str = "Connected") -> None:
-    """POST /api/plex/test — quick connection probe."""
-
-    def handler(route: Route) -> None:
-        _fulfill_json(route, {"success": ok, "message": message})
-
-    page.route("**/api/plex/test", handler)
-
-
 # ---------------------------------------------------------------------------
 # Servers (CRUD + auth + test-connection)
 # ---------------------------------------------------------------------------
@@ -187,20 +160,6 @@ def mock_emby_password_auth(page: Page, ok: bool = True, *, token: str = "emby-t
         _fulfill_json(route, body)
 
     page.route("**/api/servers/auth/emby/password", handler)
-
-
-def mock_jellyfin_password_auth(page: Page, ok: bool = True, *, token: str = "jf-tok") -> None:
-    """POST /api/servers/auth/jellyfin/password."""
-    body = (
-        {"ok": True, "access_token": token, "user_id": "jf-user-1"}
-        if ok
-        else {"ok": False, "message": "Invalid credentials"}
-    )
-
-    def handler(route: Route) -> None:
-        _fulfill_json(route, body)
-
-    page.route("**/api/servers/auth/jellyfin/password", handler)
 
 
 def mock_jellyfin_quick_connect(
@@ -340,61 +299,6 @@ def mock_server_previews_readiness(
     )
 
 
-def mock_server_health_check(
-    page: Page,
-    *,
-    issues: list[dict] | None = None,
-    vendor: str = "jellyfin",
-) -> None:
-    """GET /api/servers/<id>/health-check.
-
-    Drives the per-card health pill on the Servers list. Defaults to
-    a single mis-set Jellyfin flag so the pill renders red; pass
-    ``issues=[]`` to simulate "all good" (the pill stays hidden).
-    """
-    if issues is None:
-        issues = [
-            {
-                "library_id": "lib1",
-                "library_name": "Movies",
-                "flag": "EnableTrickplayImageExtraction",
-                "label": "Trickplay enabled in Jellyfin",
-                "rationale": "Without this Jellyfin ignores our published trickplay sheets.",
-                "current": False,
-                "recommended": True,
-                "severity": "critical",
-                "fixable": True,
-            }
-        ]
-    payload = {
-        "vendor": vendor,
-        "issues": issues,
-        "issue_count": len(issues),
-        "fixable_count": sum(1 for i in issues if i.get("fixable")),
-    }
-    page.route(
-        "**/api/servers/*/health-check",
-        lambda route: _fulfill_json(route, payload),
-    )
-
-
-def mock_server_health_check_apply(page: Page, ok: bool = True) -> list[bool]:
-    """POST /api/servers/<id>/health-check/apply. Returns a list capturing each call."""
-    called: list[bool] = []
-    body = (
-        {"ok": True, "results": {"lib1:EnableTrickplayImageExtraction": "ok"}}
-        if ok
-        else {"ok": False, "results": {"lib1:EnableTrickplayImageExtraction": "error: HTTP 500"}}
-    )
-
-    def handler(route: Route) -> None:
-        called.append(True)
-        _fulfill_json(route, body)
-
-    page.route("**/api/servers/*/health-check/apply", handler)
-    return called
-
-
 def mock_servers_refresh_libraries(page: Page, count: int = 2) -> list[str]:
     """POST /api/servers/<id>/refresh-libraries. Returns a list capturing each call's url, so a test can pin
     which server was refreshed (the glob matches any id)."""
@@ -503,20 +407,6 @@ def mock_setup_skip(page: Page) -> list[bool]:
 
     page.route("**/api/setup/skip", handler)
     return called
-
-
-def mock_setup_validate_paths(page: Page, *, valid: bool = True) -> None:
-    """POST /api/setup/validate-paths — returns the legacy validation shape."""
-    body = (
-        {"valid": True, "errors": [], "warnings": [], "info": ["Plex Data Path: OK"]}
-        if valid
-        else {"valid": False, "errors": ["Plex Data Path not found"], "warnings": [], "info": []}
-    )
-
-    def handler(route: Route) -> None:
-        _fulfill_json(route, body)
-
-    page.route("**/api/setup/validate-paths", handler)
 
 
 # ---------------------------------------------------------------------------

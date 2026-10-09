@@ -31,7 +31,7 @@ import requests
 from loguru import logger
 
 from ..config import resolve_frame_interval
-from ._embyish import NO_ANSWER_ERRORS, EmbyApiClient, is_video_library_folder
+from ._embyish import NO_ANSWER_ERRORS, EmbyApiClient, is_video_library_folder, library_folder_id
 from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
 from .ownership import apply_inverse_path_mappings
 
@@ -147,7 +147,7 @@ class JellyfinServer(EmbyApiClient):
         On failure (4xx/5xx), falls back to a rate-limited full
         ``/Library/Refresh`` so we still nudge the server even when
         the path-based endpoint is unavailable. The base wrapper logs
-        any exception this method raises at debug level.
+        any exception this method raises at warning level.
 
         The base class (see :meth:`MediaServer.trigger_refresh`) calls
         this once per mapped candidate so multi-disk installs nudge
@@ -167,40 +167,13 @@ class JellyfinServer(EmbyApiClient):
             )
             return
         except Exception as exc:
-            logger.debug(
+            logger.warning(
                 "Jellyfin /Library/Media/Updated failed for {}: {} — falling back to /Library/Refresh",
                 server_view_path,
                 exc,
             )
 
         self._maybe_trigger_full_refresh()
-
-    def _trigger_path_deleted(self, server_view_path: str) -> None:
-        """Tell Jellyfin a previously-imported file is gone.
-
-        Same ``/Library/Media/Updated`` endpoint as
-        :meth:`_trigger_path_refresh`, but with ``UpdateType:"Deleted"``
-        so Jellyfin drops the stale library row immediately. Used after
-        Radarr/Sonarr upgrade webhooks where the payload's
-        ``deletedFiles[]`` lists the prior release that was replaced —
-        without this, Jellyfin's library item lingers on the old path
-        until its filesystem monitor or the 3 AM scheduled scan
-        notices the deletion.
-
-        Best-effort; failures are logged at debug level by the base
-        wrapper.
-        """
-        response = self._request(
-            "POST",
-            "/Library/Media/Updated",
-            json_body={"Updates": [{"Path": server_view_path, "UpdateType": "Deleted"}]},
-        )
-        response.raise_for_status()
-        logger.info(
-            "[{}] Notified deleted path: {}",
-            self.name,
-            server_view_path,
-        )
 
     def _trigger_item_refresh(self, item_id: str) -> None:
         """Refresh metadata + register published trickplay for one item.
@@ -222,9 +195,8 @@ class JellyfinServer(EmbyApiClient):
         The base wrapper logs any exception this method raises.
         """
         # 1. Plugin bridge — instant trickplay registration.
-        # Audit L1: width / intervalMs MUST match the
-        # JellyfinTrickplayAdapter's configured values, NOT hardcoded
-        # defaults. Without this, a user with a non-default
+        # width / intervalMs MUST match the JellyfinTrickplayAdapter's
+        # configured values, NOT hardcoded defaults. Without this, a user with a non-default
         # ``output.width`` (e.g. 480) writes tiles into
         # ``<basename>.trickplay/480 - 10x10/`` but the plugin gets
         # asked to register ``<basename>.trickplay/320 - 10x10/`` —
@@ -279,7 +251,7 @@ class JellyfinServer(EmbyApiClient):
                     resp.text[:200] if resp.text else "",
                 )
         except Exception as exc:
-            logger.debug(
+            logger.warning(
                 "Media Preview Bridge plugin call failed for {}: {}",
                 item_id,
                 exc,
@@ -296,7 +268,7 @@ class JellyfinServer(EmbyApiClient):
             )
             return
         except Exception as exc:
-            logger.debug("Jellyfin per-item refresh failed for {}: {}", item_id, exc)
+            logger.warning("Jellyfin per-item refresh failed for {}: {}", item_id, exc)
 
         self._maybe_trigger_full_refresh()
 
@@ -375,19 +347,11 @@ class JellyfinServer(EmbyApiClient):
                 params={"path": remote_path},
             )
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-            # Server is unreachable / overloaded. Falling through to
-            # the base resolver hits the SAME server with the SAME
-            # symptoms — wasted second 30s timeout. Job baf4f9cc
-            # (Jersey Shore Family Vacation, 2026-05-06 08:36-37)
-            # showed exactly this 30s × 2 = 59.4s pattern across all 3
-            # files when JellyTest was contention-locked by its own
-            # post-Sonarr-import scan.
-            #
-            # Return None and let the slow-backoff retry queue try
-            # again 30s later when the server should be idle. Recall
-            # is preserved by the retry — losing one webhook fire to
-            # an overloaded server is far cheaper than burning the
-            # second 30s on every per-file dispatch.
+            # Server is unreachable / overloaded. Falling through to the base
+            # resolver would hit the same server with the same symptoms and
+            # waste a second full timeout per file. Return None and let the
+            # slow-backoff retry queue try again later; losing one webhook
+            # fire to an overloaded server is far cheaper.
             logger.warning(
                 "Media Preview Bridge ResolvePath unreachable for {!r} ({}: {}) — "
                 "skipping base-resolver fallback to avoid a second timeout against the "
@@ -419,7 +383,7 @@ class JellyfinServer(EmbyApiClient):
                 # Either way the caller falls through to the base
                 # class (Pass 0/1/2) — log it so a buggy plugin
                 # silently re-paying the Pass-0 cost on every webhook
-                # is visible (final-audit LOW finding).
+                # is visible.
                 logger.debug(
                     "Media Preview Bridge ResolvePath returned 200 with empty itemId for {!r} "
                     "— falling back to base resolver. Plugin may be misconfigured.",
@@ -819,12 +783,9 @@ class JellyfinServer(EmbyApiClient):
             _record("uninstall_package", True, "already not installed")
         else:
             detail = f"HTTP {response.status_code}"
-            try:
-                body = (response.text or "")[:200]
-                if body:
-                    detail = f"{detail}: {body}"
-            except Exception:
-                pass
+            body = (response.text or "")[:200]
+            if body:
+                detail = f"{detail}: {body}"
             result["error"] = f"uninstall failed: {detail}"
             _record("uninstall_package", False, detail)
             return result
@@ -947,13 +908,6 @@ class JellyfinServer(EmbyApiClient):
             ),
         )
 
-    # Back-compat alias for test code and callers that read the tuple
-    # directly. New code should prefer ``_recommended_settings()`` which
-    # returns the plugin-aware set.
-    @property
-    def _RECOMMENDED_SETTINGS(self) -> tuple[tuple[str, str, bool, str, str], ...]:  # noqa: N802
-        return self._recommended_settings()
-
     def check_settings_health(self) -> list[HealthCheckIssue]:
         """Return a per-library audit of preview-relevant Jellyfin settings.
 
@@ -961,7 +915,7 @@ class JellyfinServer(EmbyApiClient):
         :class:`HealthCheckIssue` per (library, mis-set flag) pair.
         Empty list means all libraries are configured correctly.
 
-        The flags inspected are documented in :data:`_RECOMMENDED_SETTINGS`
+        The flags inspected are documented in :meth:`_recommended_settings`
         — extending the audit means adding a tuple there; check + apply
         + UI explanation stay in sync automatically.
         """
@@ -990,7 +944,7 @@ class JellyfinServer(EmbyApiClient):
             # trickplay flags — skip them before per-flag evaluation.
             if not is_video_library_folder(raw):
                 continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
+            lib_id = library_folder_id(raw)
             lib_name = str(raw.get("Name") or "")
             options = raw.get("LibraryOptions") or {}
             for flag, label, want, severity, rationale in recommended:
@@ -1328,20 +1282,6 @@ class JellyfinServer(EmbyApiClient):
         if not targets:
             return {}
 
-        try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
-        except Exception as exc:
-            return {"_global": f"failed to fetch libraries: {exc}"}
-
-        if not isinstance(folders, list):
-            return {"_global": "unexpected VirtualFolders response shape"}
-
-        # Index targets by flag for quick per-library application. Each
-        # (flag, library_id) pair maps to exactly one desired value;
-        # later entries overwrite earlier ones for the same (flag,
-        # lib_id) key.
         per_flag: dict[str, list[FlagTarget]] = {}
         for target in targets:
             flag = str(target.get("flag") or "")
@@ -1349,22 +1289,10 @@ class JellyfinServer(EmbyApiClient):
                 continue
             per_flag.setdefault(flag, []).append(target)
 
-        results: dict[str, str] = {}
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            # Issue #237: don't flip flags on music/photo/book libraries
-            # — they shouldn't appear in the UI list, but defend at the
-            # apply-site too.
-            if not is_video_library_folder(raw):
-                continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
-            options = dict(raw.get("LibraryOptions") or {})
-
+        def edit(lib_id: str, options: dict) -> list[str]:
             changed: list[str] = []
             for flag, target_rows in per_flag.items():
-                # Pick the most-specific matching row for this lib:
-                # an entry with matching library_ids wins over a
+                # An entry with matching library_ids wins over a
                 # wildcard (library_ids=None) entry.
                 chosen: FlagTarget | None = None
                 for row in target_rows:
@@ -1385,30 +1313,9 @@ class JellyfinServer(EmbyApiClient):
                     continue
                 options[flag] = bool(want)
                 changed.append(flag)
+            return changed
 
-            if not changed:
-                continue
-
-            try:
-                update = self._request(
-                    "POST",
-                    "/Library/VirtualFolders/LibraryOptions",
-                    json_body={"Id": lib_id, "LibraryOptions": options},
-                )
-                update.raise_for_status()
-                for flag in changed:
-                    results[f"{lib_id}:{flag}"] = "ok"
-            except Exception as exc:
-                logger.warning(
-                    "Could not update Jellyfin library {} settings on server {!r}: {}",
-                    lib_id,
-                    self.name,
-                    exc,
-                )
-                for flag in changed:
-                    results[f"{lib_id}:{flag}"] = f"error: {exc}"
-
-        return results
+        return self._update_video_library_options(edit)
 
     def apply_recommended_settings(self, flags: list[str] | None = None) -> dict[str, str]:
         """Flip every mis-set flag to its recommended value across all libraries.
@@ -1428,62 +1335,21 @@ class JellyfinServer(EmbyApiClient):
         rewritten. Any field we omit reverts to its default, which has
         bitten previous one-off update attempts.
         """
-        try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
-        except Exception as exc:
-            return {"_global": f"failed to fetch libraries: {exc}"}
-
-        if not isinstance(folders, list):
-            return {"_global": "unexpected VirtualFolders response shape"}
-
         target_flags = set(flags) if flags is not None else None
-        results: dict[str, str] = {}
         recommended = self._recommended_settings()
 
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            # Issue #237: don't apply recommended flag values to
-            # music/photo/book libraries — they don't have these flags.
-            if not is_video_library_folder(raw):
-                continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
-            options = dict(raw.get("LibraryOptions") or {})
-
-            changed_flags: list[str] = []
+        def edit(_lib_id: str, options: dict) -> list[str]:
+            changed: list[str] = []
             for flag, _label, want, _sev, _rationale in recommended:
                 if target_flags is not None and flag not in target_flags:
                     continue
                 if bool(options.get(flag, False)) == want:
                     continue
                 options[flag] = want
-                changed_flags.append(flag)
+                changed.append(flag)
+            return changed
 
-            if not changed_flags:
-                continue
-
-            try:
-                update = self._request(
-                    "POST",
-                    "/Library/VirtualFolders/LibraryOptions",
-                    json_body={"Id": lib_id, "LibraryOptions": options},
-                )
-                update.raise_for_status()
-                for flag in changed_flags:
-                    results[f"{lib_id}:{flag}"] = "ok"
-            except Exception as exc:
-                logger.warning(
-                    "Could not update Jellyfin library {} settings on server {!r}: {}",
-                    lib_id,
-                    self.name,
-                    exc,
-                )
-                for flag in changed_flags:
-                    results[f"{lib_id}:{flag}"] = f"error: {exc}"
-
-        return results
+        return self._update_video_library_options(edit)
 
     # ------------------------------------------------------------------
     # Unified "Previews readiness" probe + auto-fix
@@ -1597,10 +1463,9 @@ class JellyfinServer(EmbyApiClient):
 
         existing_widths = list(after_tp.get("WidthResolutions") or [])
         if geometry["width"] not in existing_widths:
-            existing_widths.append(geometry["width"])
             # Jellyfin renders resolutions in the order stored — keep
             # ours first so the default player width matches our tiles.
-            existing_widths.insert(0, existing_widths.pop())
+            existing_widths.insert(0, geometry["width"])
         after_tp["WidthResolutions"] = existing_widths
 
         mutated_config = dict(full_config)
@@ -1655,6 +1520,16 @@ class JellyfinServer(EmbyApiClient):
                 break
         return tuple(parts)
 
+    def _check_min_version(self, version_value: str) -> tuple[bool, str]:
+        """Whether ``version_value`` supports ``SaveTrickplayWithMedia`` (10.10+); ``(ok, reason)``."""
+        parsed = self._parse_version_tuple(version_value)
+        if parsed and parsed < (10, 10):
+            return False, (
+                f"Jellyfin {version_value} is pre-10.10 — SaveTrickplayWithMedia "
+                "isn't supported. Upgrade to 10.10+ for native adoption."
+            )
+        return True, ""
+
     def previews_readiness(self) -> dict[str, Any]:
         """Unified readiness payload for the Previews readiness card.
 
@@ -1676,7 +1551,7 @@ class JellyfinServer(EmbyApiClient):
         on, the plugin is required, so the existing ``plugin_installed``
         row escalates to critical and a ``markers_plugin_outdated`` row
         joins it when the installed build can't take markers. With the
-        feature off, one ``markers`` row says so (plan P-R6).
+        feature off, one ``markers`` row says so.
         """
         # Probe plugin first — all downstream checks depend on its state.
         plugin = self.check_plugin_installed()
@@ -1715,7 +1590,7 @@ class JellyfinServer(EmbyApiClient):
         off_media = self._off_media()
         # Intro & Credits needs the plugin too, and unconditionally: it is the only route markers have into
         # Jellyfin. So the switch being on makes this same row required, instead of adding a second plugin row
-        # the install controls wouldn't key on (plan Task 9 Step 2). Built from the facts the Intro & Credits
+        # the install controls wouldn't key on Built from the facts the Intro & Credits
         # tab already asked for, never a second probe.
         from ..markers import readiness as markers_readiness
 
@@ -1726,27 +1601,12 @@ class JellyfinServer(EmbyApiClient):
         sections: list[dict[str, Any]] = []
 
         # --- Connection + version (combined into one section) ---------
-        version_value = ""
+        version_value, connection_reason = self._probe_system_version()
+        connection_ok = not connection_reason
         version_ok = True
         version_reason = ""
-        connection_ok = True
-        connection_reason = ""
-        try:
-            response = self._request("GET", "/System/Info")
-            response.raise_for_status()
-            data = response.json() or {}
-            version_value = str(data.get("Version") or "") or ""
-            parsed = self._parse_version_tuple(version_value)
-            if parsed and parsed < (10, 10):
-                version_ok = False
-                version_reason = (
-                    f"Jellyfin {version_value} is pre-10.10 — SaveTrickplayWithMedia "
-                    "isn't supported. Upgrade to 10.10+ for native adoption."
-                )
-        except Exception as exc:
-            logger.debug("Version probe failed for {!r}: {}", self.name, exc)
-            connection_ok = False
-            connection_reason = f"Could not read /System/Info: {exc}"
+        if connection_ok:
+            version_ok, version_reason = self._check_min_version(version_value)
 
         sections.append(
             {
@@ -1967,7 +1827,7 @@ class JellyfinServer(EmbyApiClient):
             }
         ]
         # "Too old for markers" is its own row: the installed plugin works for previews, so the row above
-        # stays passing (plan Task 9 Step 2 — one plugin section, whose first check keeps the ``current``
+        # stays passing (one plugin section, whose first check keeps the ``current``
         # convention the install controls read).
         outdated_check = markers_readiness.outdated_plugin_check(marker_facts, vendor="jellyfin", offer_update=True)
         if outdated_check is not None:
@@ -2113,7 +1973,7 @@ class JellyfinServer(EmbyApiClient):
                 # UI doesn't show.
                 if not is_video_library_folder(raw):
                     continue
-                lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
+                lib_id = library_folder_id(raw)
                 lib_name = str(raw.get("Name") or "")
                 options = raw.get("LibraryOptions") or {}
                 for flag, label, want, severity, rationale in recommended:
@@ -2614,82 +2474,6 @@ class JellyfinServer(EmbyApiClient):
             "sections": sections,
         }
 
-    def trickplay_readiness(self) -> dict[str, Any]:
-        """Legacy alias for :meth:`previews_readiness` returning the legacy shape.
-
-        The legacy endpoint (``/trickplay-readiness``) and any external
-        caller that reads fields like ``plugin.mode`` or
-        ``trickplay_options`` keeps working: this method builds that
-        legacy dict from the same probes the unified path uses.
-        """
-        plugin = self.check_plugin_installed()
-
-        version_value = ""
-        version_ok = True
-        version_fix_kind: str | None = None
-        version_reason = ""
-        try:
-            response = self._request("GET", "/System/Info")
-            response.raise_for_status()
-            data = response.json() or {}
-            version_value = str(data.get("Version") or "") or ""
-            parsed = self._parse_version_tuple(version_value)
-            if parsed and parsed < (10, 10):
-                version_ok = False
-                version_fix_kind = "upgrade_jellyfin"
-                version_reason = (
-                    f"Jellyfin {version_value} is pre-10.10 — SaveTrickplayWithMedia "
-                    "isn't supported. Upgrade to 10.10+ for native adoption."
-                )
-        except Exception as exc:
-            logger.debug("Version probe failed for {!r}: {}", self.name, exc)
-            version_reason = f"Could not read /System/Info: {exc}"
-
-        library_issues = self.check_settings_health()
-        options_check = self._check_trickplay_options()
-
-        if plugin.get("installed"):
-            mode = "plugin_instant"
-        elif any(i.flag == "ExtractTrickplayImagesDuringLibraryScan" and not i.current for i in library_issues):
-            mode = "scan_nudge_pending"
-        else:
-            mode = "scan_nudge"
-
-        overall_ok = version_ok and not library_issues and options_check["ok"]
-
-        return {
-            "version": {
-                "ok": version_ok,
-                "value": version_value,
-                "fix_kind": version_fix_kind,
-                "reason": version_reason,
-            },
-            "plugin": {
-                "installed": bool(plugin.get("installed")),
-                "version": plugin.get("version") or "",
-                "error": plugin.get("error") or "",
-                "mode": mode,
-            },
-            "library_settings": {
-                "ok": not library_issues,
-                "issues": [
-                    {
-                        "library_id": i.library_id,
-                        "library_name": i.library_name,
-                        "flag": i.flag,
-                        "label": i.label,
-                        "current": i.current,
-                        "recommended": i.recommended,
-                        "severity": i.severity,
-                        "rationale": i.rationale,
-                    }
-                    for i in library_issues
-                ],
-            },
-            "trickplay_options": options_check,
-            "overall_ok": overall_ok,
-        }
-
     def trickplay_fix_all(self, *, install_plugin: bool = True) -> dict[str, Any]:
         """Auto-fix every readiness issue in one call.
 
@@ -2781,7 +2565,7 @@ class JellyfinServer(EmbyApiClient):
         Used by :meth:`get_vendor_extraction_status` to count per-library
         state without forcing the apply path. ``EnableTrickplayImageExtraction``
         is intentionally NOT in this list: it MUST stay True regardless
-        (D38 — Jellyfin deletes our published trickplay when it's False).
+        (Jellyfin deletes our published trickplay when it's False).
 
         ``SaveTrickplayWithMedia``'s recommended value depends on the
         server's off-media setting: ``True`` for media-adjacent (the app
@@ -2795,7 +2579,7 @@ class JellyfinServer(EmbyApiClient):
         )
 
     def get_vendor_extraction_status(self) -> dict[str, int]:
-        """Audit per-library vendor-extraction state without writing.
+        """Report per-library vendor-extraction state without writing.
 
         A library counts as ``stopped`` only when EVERY flag in
         :meth:`_vendor_extraction_flags` matches its recommended value;
@@ -2803,24 +2587,13 @@ class JellyfinServer(EmbyApiClient):
         would still touch this library).
         """
         try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
+            folders = self._video_library_folders()
         except Exception as exc:
             logger.debug("Vendor-extraction status probe failed for {!r}: {}", self.name, exc)
             return {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
 
-        if not isinstance(folders, list):
-            return {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
-
         extracting = stopped = 0
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            # Issue #237: skip music/photo/book libraries from the audit
-            # — they have no trickplay flags to evaluate.
-            if not is_video_library_folder(raw):
-                continue
+        for _lib_id, raw in folders:
             options = raw.get("LibraryOptions") or {}
             all_recommended = all(
                 bool(options.get(flag, False)) == want for flag, want in self._vendor_extraction_flags()
@@ -2869,8 +2642,7 @@ class JellyfinServer(EmbyApiClient):
            (where ``JellyfinTrickplayAdapter`` does write).
 
         The "Refresh Trickplay Images" daily scheduled task is left at
-        its default 3am trigger. We tried clearing it (D38 first cut)
-        but that produced a silent failure: ``RefreshTrickplayDataAsync``
+        its default 3am trigger. Clearing it causes a silent failure: ``RefreshTrickplayDataAsync``
         is THE import path for our published trickplay, so without the
         daily run our files sit on disk and Jellyfin's web client gets
         404 on the trickplay HLS endpoint. With the task running, it
@@ -2882,31 +2654,8 @@ class JellyfinServer(EmbyApiClient):
 
         ``library_ids=None`` means "every library".
         """
-        try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
-        except Exception as exc:
-            return {"_global": f"failed to fetch libraries: {exc}"}
 
-        if not isinstance(folders, list):
-            return {"_global": "unexpected VirtualFolders response shape"}
-
-        results: dict[str, str] = {}
-        target_ids = set(library_ids) if library_ids else None
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            # Issue #237: never write trickplay flags to music/photo/book
-            # libraries even if a caller (UI, webhook, API) targets them
-            # by id — they have no trickplay path to gate.
-            if not is_video_library_folder(raw):
-                continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
-            if target_ids is not None and lib_id not in target_ids:
-                continue
-
-            options = dict(raw.get("LibraryOptions") or {})
+        def edit(_lib_id: str, options: dict) -> list[str]:
             # Detection always on so our published trickplay is actually used.
             options["EnableTrickplayImageExtraction"] = True
             options["ExtractTrickplayImagesDuringLibraryScan"] = bool(scan_extraction)
@@ -2917,24 +2666,11 @@ class JellyfinServer(EmbyApiClient):
             # flag alone — they may have set it intentionally either way.
             if not scan_extraction:
                 options["SaveTrickplayWithMedia"] = not self._off_media()
+            return ["extraction"]
 
-            try:
-                update = self._request(
-                    "POST",
-                    "/Library/VirtualFolders/LibraryOptions",
-                    json_body={"Id": lib_id, "LibraryOptions": options},
-                )
-                update.raise_for_status()
-                results[lib_id] = "ok"
-            except Exception as exc:
-                logger.warning(
-                    "Could not update Jellyfin library {} extraction on server {!r}: {}",
-                    lib_id,
-                    self.name,
-                    exc,
-                )
-                results[lib_id] = f"error: {exc}"
-        return results
+        return self._update_video_library_options(
+            edit, library_ids=set(library_ids) if library_ids else None, key_per_flag=False
+        )
 
     def parse_webhook(
         self,
@@ -2971,7 +2707,6 @@ class JellyfinServer(EmbyApiClient):
         # commonly includes ``{{ItemPath}}`` (or ``ItemPath`` / ``Path``
         # via custom templates). When present, capturing it here lets the
         # dispatcher skip an extra reverse-lookup roundtrip per webhook.
-        # Audit fix — was being silently dropped.
         item_path = str(data.get("ItemPath") or data.get("Path") or data.get("path") or "").strip() or None
 
         return WebhookEvent(

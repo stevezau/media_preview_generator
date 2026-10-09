@@ -15,7 +15,7 @@ interactions:
       X-Emby-Token:
       - FAKE_EMBY_TOKEN
     method: POST
-    uri: http://fake-server/MediaPreviewBridge/Trickplay/MPG_FAKE_ITEM_ID_99999?intervalMs=5000&width=480
+    uri: http://fake-server/MediaPreviewBridge/Trickplay/MPG_FAKE_ITEM_ID_99999?intervalMs=5000&saveWithMedia=true&width=480
   response:
     body:
       string: ''

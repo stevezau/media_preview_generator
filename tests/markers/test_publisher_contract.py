@@ -34,7 +34,7 @@ from media_preview_generator.servers.base import Library, ServerConfig, ServerTy
 from media_preview_generator.servers.jellyfin import JellyfinServer
 from media_preview_generator.servers.plex import PlexServer
 from tests.markers.fakes import FakeRegistry
-from tests.markers.test_pipeline import CHAPTERS_BOTH, DUR, _ctx
+from tests.markers.pipeline_helpers import CHAPTERS_BOTH, DUR, _ctx
 from tests.markers.test_plex_db_publisher import PLEX_VERSION, _make_db, _rows, _writes
 from tests.markers.test_plex_db_publisher import _served as _plex_served
 
@@ -74,7 +74,7 @@ def _resp(status: int):
 
 @pytest.fixture
 def plex(tmp_path, monkeypatch):
-    # Plex holding its database and a local filesystem are proven by Task 8's own tests; here they are given.
+    # Plex holding its database and a local filesystem are proven by the lock tests; here they are given.
     monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
     monkeypatch.setattr(plex_db, "filesystem_type", lambda *_a, **_kw: "ext4")
     path = _media(tmp_path)
@@ -98,7 +98,7 @@ def plex(tmp_path, monkeypatch):
         item_id="7",
         path=path,
         shown=shown,
-        # Plex stores credits 2 s before they are served (spec §3.1).
+        # Plex stores credits 2 s before they are served.
         both=[("intro", INTRO.start_ms, INTRO.end_ms), ("credits", CREDITS.start_ms - 2_000, DUR)],
         # Nothing on the item is provably ours after a failed write, so nothing is removed.
         after_unknown_clear="kept",
@@ -469,7 +469,7 @@ INTRO_X = (126_771, 157_068)
 CREDITS_AT = 1_295_324
 SHOWN_INTRO = ("intro", *INTRO_X)
 SHOWN_CREDITS = ("credits", CREDITS_AT, DUR)
-# A replaced file of another length: nothing of the file it replaced carries over (spec §5.5 rule 15).
+# A replaced file of another length: nothing of the file it replaced carries over.
 NEW_CUT = DUR + 2_000
 
 
@@ -495,7 +495,7 @@ def test_single_version_publishes_once_then_is_up_to_date(plex_item):
 
 
 def test_a_same_length_replacement_without_chapters_keeps_what_the_item_shows(plex_item):
-    # Spec §5.5 rule 15 (Tomb Raider King S01E12): the new file has no evidence at all, and the same length.
+    # The new file has no evidence at all, and the same length.
     item = plex_item(versions=("1080p",))
     path = item.paths["1080p"]
     item.chapters[path] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -607,7 +607,7 @@ def test_a_write_that_changes_nothing_still_records_the_versions_it_saw(plex_ite
 
 
 def test_a_version_replaced_by_a_file_never_run_gets_that_files_markers_through_check_servers(plex_item):
-    # Publishers audit MED-2: an upgrade deleted the published file and Plex's scan pointed the part at the new one.
+    # An upgrade deleted the published file and Plex's scan pointed the part at the new one.
     item = plex_item(versions=("720p", "1080p"), in_item=("720p",))
     old, new = item.paths["720p"], item.paths["1080p"]
     item.chapters[old] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -700,7 +700,7 @@ def test_a_deleted_first_version_hands_its_types_to_the_next(plex_item):
 
 
 def test_a_version_plex_still_lists_but_that_is_gone_from_disk_doesnt_hold_the_item_back(plex_item):
-    # Found on the owner's server: Sonarr deleted the Bluray copy at 17:25, and Plex still listed it when the WEBDL copy
+    # Sonarr deleted the Bluray copy at 17:25, and Plex still listed it when the WEBDL copy
     # was decided at 18:01; the item waited for the deleted copy forever.
     item = plex_item()
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -712,7 +712,7 @@ def test_a_version_plex_still_lists_but_that_is_gone_from_disk_doesnt_hold_the_i
 
 
 def test_a_version_behind_a_dangling_symlink_doesnt_hold_the_item_back(plex_item, tmp_path):
-    # Review of #301 (MED 2): the version check counts a dangling link as gone (a symlinked 2160p whose remote mount
+    # The version check counts a dangling link as gone (a symlinked 2160p whose remote mount
     # dropped can't be decided), unlike marking a file missing, which keeps the file.
     item = plex_item()
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -837,7 +837,7 @@ def test_a_publish_plex_s_busy_database_refuses_fails_with_the_cause_and_its_ret
 
 
 def test_a_busy_database_during_the_capability_check_fails_the_file_for_a_retry_and_isnt_reused(plex_item, monkeypatch):
-    # Review of #301 (MED 1): the check's lock wait gave up, the file was Skipped with no retry, and the UNREACHABLE
+    # The check's lock wait gave up, the file was Skipped with no retry, and the UNREACHABLE
     # answer was reused for 5 minutes, skipping the job's next files too.
     monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.3)
     item = plex_item(versions=("1080p",))
@@ -1285,7 +1285,7 @@ class TestJellyfinReadBackVerify:
         assert jellyfin.server.put_bridge_markers.call_count == 1 and jellyfin.shown() == jellyfin.both
 
     def test_a_replaced_file_with_the_same_markers_sends_the_new_file_size(self, jellyfin, jf_run):
-        # Review probe C: a Tdarr in-place transcode keeps the chapters; Jellyfin still lists the old segments.
+        # A Tdarr in-place transcode keeps the chapters; Jellyfin still lists the old segments.
         jf_run()
         assert jellyfin.server.put_bridge_markers.call_args.kwargs == {"file_size": 100}
         with open(jellyfin.path, "wb") as fh:
@@ -1421,7 +1421,7 @@ class TestKeepPlexsPerType:
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_kept_after_plex_restarted_during_a_job_and_skipped_the_file(self, plex_item, monkeypatch, setting):
-        # Review probe F: the SKIPPED row clears the file's basis, so the next run goes straight to the write.
+        # The SKIPPED row clears the file's basis, so the next run goes straight to the write.
         item = _published_then_replaced(plex_item, setting)
         first = item.run("1080p")
         _plex_restarting(item, monkeypatch)
@@ -1437,7 +1437,7 @@ class TestKeepPlexsPerType:
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_kept_after_a_failed_write_while_plex_filled_in_its_own_intro(self, plex_item, monkeypatch, setting):
-        # Review probe E: a rescan wiped the item, the write failed (Plex busy), then Plex's own detection ran.
+        # A rescan wiped the item, the write failed (Plex busy), then Plex's own detection ran.
         item = plex_item(versions=("1080p",))
         item.cfg.markers["plex"]["on_plex_redetect"] = setting
         item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -1470,7 +1470,7 @@ class TestKeepPlexsPerType:
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_forced_run_and_re_detect_respect_the_setting(self, plex_item, setting):
-        # Review probe D: the Inspector's Re-detect is a forced single-file run.
+        # The Inspector's Re-detect is a forced single-file run.
         item = _published_then_replaced(plex_item, setting)
         out = item.run("1080p", force=True)
         self._expect(item, setting)
@@ -1481,7 +1481,7 @@ class TestKeepPlexsPerType:
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_a_version_holding_a_type_alone_respects_the_setting(self, plex_item, setting):
-        # Review probe A: 2160p has no credits chapter, so the credits are 1080p's alone; the read-back and the setting
+        # 2160p has no credits chapter, so the credits are 1080p's alone; the read-back and the setting
         # apply to the item all the same.
         item = plex_item(versions=("1080p", "2160p"))
         item.cfg.markers["plex"]["on_plex_redetect"] = setting
@@ -1507,7 +1507,7 @@ class TestKeepPlexsPerType:
         self._expect(item, setting)
 
     def test_mixed_replaced_and_wiped_restores_the_wiped_type(self, plex_item):
-        # Review probe B: Plex's intro replaced ours and a rescan dropped the credits rows.
+        # Plex's intro replaced ours and a rescan dropped the credits rows.
         item = _published_then_replaced(plex_item, "keep_plex")
         item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='credits'",))
         outs = [item.run("1080p") for _ in range(3)]
@@ -1551,7 +1551,7 @@ class TestKeepPlexsPerType:
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_plexs_own_rows_on_a_first_publish_follow_the_setting(self, plex_item, setting):
         # Nothing of ours is recorded for the intro, so Plex's intro can't be told from one we lost track of (a
-        # markers.db reset, a re-added server): "Keep Plex's" keeps it (keepplex re-review LOW-3).
+        # markers.db reset, a re-added server): "Keep Plex's" keeps it.
         item = plex_item(versions=("1080p",))
         item.cfg.markers["plex"]["on_plex_redetect"] = setting
         _native_intro(item)
@@ -1572,7 +1572,7 @@ class TestKeepPlexsPerType:
         assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
 
     def test_a_kept_type_plex_dropped_is_released_while_the_versions_disagree(self, plex_item):
-        # keepplex re-review P1: nothing of ours was recorded and the versions disagreed, so write returned before
+        # Nothing of ours was recorded and the versions disagreed, so write returned before
         # reading Plex's rows and carried the kept intro forward.
         item = plex_item(versions=("1080p", "2160p"))
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
@@ -1593,7 +1593,7 @@ class TestKeepPlexsPerType:
         assert item.served() == item.recorded() == [SHOWN_INTRO] and item.kept() == set()
 
     def test_plex_filling_a_type_we_removed_ourselves_is_kept(self, plex_item):
-        # keepplex re-review P2: our intro went when no version held it any more, then Plex's own detection filled
+        # Our intro went when no version held it any more, then Plex's own detection filled
         # the gap; the next version to hold an intro mustn't delete Plex's.
         item = plex_item(versions=("1080p", "2160p"))
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
@@ -1621,7 +1621,7 @@ class TestKeepPlexsPerType:
 
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_kept_is_found_again_after_markers_db_is_reset(self, plex_item, tmp_path, setting):
-        # keepplex re-review P3: a reset markers.db (or a re-added server, or a new Plex item id) forgets the kept
+        # A reset markers.db (or a re-added server, or a new Plex item id) forgets the kept
         # intro; Plex's intro still differs from our decision, so it is kept again rather than deleted.
         item = _published_then_replaced(plex_item, setting)
         item.run("1080p")
@@ -1631,7 +1631,7 @@ class TestKeepPlexsPerType:
         self._expect(item, setting)
 
     def test_our_own_new_rows_arent_taken_for_plexs_when_their_record_was_lost(self, plex_item, monkeypatch):
-        # keepplex re-review P4: Plex committed our new intro but recording it failed; the rows equal what the next
+        # Plex committed our new intro but recording it failed; the rows equal what the next
         # run would write, so they are ours.
         item = plex_item(versions=("1080p",))
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
@@ -1659,7 +1659,7 @@ class TestKeepPlexsPerType:
         assert item.served() == item.recorded() == [("intro", *INTRO_Y), SHOWN_CREDITS] and item.kept() == set()
 
     def test_an_item_whose_types_are_all_kept_isnt_read_back_as_a_second_opinion(self, plex_item):
-        # keepplex re-review P5: a forced run reads server markers only for items this app never published to.
+        # A forced run reads server markers only for items this app never published to.
         item = plex_item(versions=("1080p",))
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
         item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X)
@@ -1676,7 +1676,7 @@ class TestKeepPlexsPerType:
         before = item.server.get_markers.call_count
         item.run("1080p", force=True)
         # Nothing Plex shows on the item became evidence. The one read allowed is the check of which types Plex keeps
-        # its own of, which a type left undecided under Keep Plex's makes on every run (spec §6.2 step 3) and never
+        # its own of, which a type left undecided under Keep Plex's makes on every run and never
         # stores.
         assert plex_evidence() == evidence
         assert item.server.get_markers.call_count - before == 1
@@ -1685,7 +1685,7 @@ class TestKeepPlexsPerType:
     def test_a_kept_only_item_with_nothing_decided_any_more_leaves_check_servers_after_one_run(
         self, plex_item, monkeypatch, trigger
     ):
-        # Publishers audit MED-1: the record kept its kept type, so every Check servers run listed the file again.
+        # The record kept its kept type, so every Check servers run listed the file again.
         item = plex_item(versions=("1080p",))
         path = item.paths["1080p"]
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
@@ -1718,7 +1718,7 @@ class TestKeepPlexsPerType:
     def test_a_type_left_to_plexs_own_marker_is_read_back_and_run_again_once_ours_could_show(
         self, plex_item, monkeypatch, trigger
     ):
-        # Architecture review MED 1: a type every server keeps its own of is never decided (spec §6.2 step 3), so
+        # A type every server keeps its own of is never decided, so
         # nothing of ours is on the item. Check servers still reads Plex's marker back and runs the file once Plex
         # lost it or the server uses ours, as it did when the type was decided and kept.
         item = plex_item(versions=("1080p",))
@@ -1791,7 +1791,7 @@ class TestKeepPlexsPerType:
         assert item.store.get_decisions(rec.id)[MarkerType.CREDITS].status is DecisionStatus.DECIDED
 
     def test_an_item_with_nothing_of_ours_isnt_listed_for_versions_forever(self, plex_item):
-        # Focused review MED A: an item row with nothing of ours and nothing kept keeps the version files of its last
+        # An item row with nothing of ours and nothing kept keeps the version files of its last
         # write, and a write with nothing to send never reads the item, so a version added since read as "versions
         # changed" on every Check servers run. Such a row has no versions to agree on and isn't compared.
         item = plex_item(versions=("1080p", "2160p"), in_item=("1080p",))
@@ -1813,7 +1813,7 @@ class TestKeepPlexsPerType:
         assert _check_servers(item) == []
 
     def test_a_deleted_version_left_to_plex_doesnt_list_its_item_forever(self, plex_item):
-        # Focused review LOW 1: the kept status of a file gone from disk says nothing about the item now.
+        # The kept status of a file gone from disk says nothing about the item now.
         item = plex_item(versions=("1080p", "2160p"), in_item=("1080p",))
         item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
         _native_credits(item)

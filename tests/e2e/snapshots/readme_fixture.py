@@ -280,7 +280,7 @@ def seed_jobs(config_dir: str | Path) -> dict[str, Any]:
 
         # Three more completed jobs to bring the list to 9. All seeded
         # rows MUST be COMPLETED — ``JobManager._load_from_disk`` flips
-        # any RUNNING row to FAILED on startup (jobs.py:557-564) and
+        # any RUNNING row to FAILED on startup (JobManager._load_from_disk) and
         # PENDING rows sit in the "interrupted jobs" list. Both outcomes
         # muddy the marketing shot; COMPLETED is the only status that
         # survives the boot flip cleanly.
@@ -319,7 +319,7 @@ def seed_jobs(config_dir: str | Path) -> dict[str, Any]:
             storage.upsert(row)
 
         # Record a per-server publish for the Tears of Steel job (D9 shape,
-        # Worker._capture_publishers in media_preview_generator/jobs/worker.py:528-566)
+        # Worker._capture_publishers)
         # so its Files tab shows one pill per server — the Publish screenshot.
         from media_preview_generator.web.jobs import JobManager  # noqa: PLC0415
 

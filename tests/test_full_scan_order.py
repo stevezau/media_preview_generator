@@ -12,8 +12,16 @@ from media_preview_generator.servers.base import Library, ServerConfig, ServerTy
 
 
 @pytest.mark.parametrize("sort_by", ["newest", "oldest", "default", None, "random"])
-@pytest.mark.parametrize("route", ["single_plex", "multi_server"])
-@pytest.mark.parametrize("vendor", ["plex_movie", "plex_episode", "emby", "jellyfin"])
+@pytest.mark.parametrize(
+    ("route", "vendor"),
+    [
+        (route, vendor)
+        for vendor in ("plex_movie", "plex_episode", "emby", "jellyfin")
+        for route in ("single_plex", "multi_server")
+        # Non-Plex scans always use the multi-server route.
+        if route == "multi_server" or vendor.startswith("plex")
+    ],
+)
 def test_full_scan_submits_requested_order(
     monkeypatch: pytest.MonkeyPatch, sort_by: str | None, route: str, vendor: str
 ) -> None:
@@ -22,8 +30,6 @@ def test_full_scan_submits_requested_order(
     Server order deliberately differs from added-date order. Emby/Jellyfin
     span pages, so forgetting the sort on a later page also fails this test.
     """
-    if route == "single_plex" and not vendor.startswith("plex"):
-        pytest.skip("Non-Plex scans always use the multi-server route")
     server_type = ServerType.PLEX if vendor.startswith("plex") else ServerType(vendor)
     server_cfg = ServerConfig(id="server", type=server_type, name="Test", enabled=True, url="http://test", auth={})
     classes = {ServerType.PLEX: PlexServer, ServerType.EMBY: EmbyServer, ServerType.JELLYFIN: JellyfinServer}

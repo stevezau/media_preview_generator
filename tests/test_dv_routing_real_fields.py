@@ -1,8 +1,8 @@
 """Dolby Vision routing driven by the MediaInfo fields real library files carry.
 
-Every row except ``p84_hlg`` and ``hdr10`` is copied from a file in the owner's library, as read by libmediainfo
+Every row except ``p84_hlg`` and ``hdr10`` is copied from a real media file, as read by libmediainfo
 24.12 (the version pymediainfo 7.0.1 bundles, and the one in the Docker image).  Those two are synthetic: MediaInfo's
-shape for formats the library survey has no file of.  MediaInfo keeps the profile tag in
+shape for formats no surveyed file had.  MediaInfo keeps the profile tag in
 ``HDR_Format_Profile``; ``hdr_format`` never contains ``dvhe.05``.  The composite text
 ``"Dolby Vision, Version 1.0, dvhe.05.06, BL+RPU"`` is what MediaInfo prints for humans, not what the app reads.
 

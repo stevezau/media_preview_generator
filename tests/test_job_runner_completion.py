@@ -4,7 +4,7 @@ The classifier decides whether a finished job ends the run with a red
 "Failed" badge or an amber "Completed with warnings" badge. The rule
 used to start with ``bool(failures)`` — any single FFmpeg crash flipped
 the badge red regardless of how many items succeeded. On the 128k-item
-scan job ``deea99db`` this meant 1 failure out of 128000 successes
+scan of 128k items this meant 1 failure out of 128000 successes
 rendered as "Failed", which misrepresented the run.
 
 The fix: only treat the run as a hard failure when nothing succeeded.
@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from media_preview_generator.jobs.dispatcher import CHECK_STAGE_WORKER_NAME
 from media_preview_generator.web.routes.job_runner import (
     _chain_leftover_warning,
     _classify_job_completion,
@@ -51,7 +52,7 @@ def _pending_pub(server_name, server_type, count=1):
 class TestFormatRetryWaitServerLabel:
     """Covers the five branches that produce different retry-wait copy.
 
-    The fix this guards (chain ``2f7132d5``, 2026-05-13) was a label-rendering
+    The fix this guards was a label-rendering
     regression where the source-pill server was conflated with the publish
     target. Each cell below produces visibly different copy — the matrix
     must be tested so the conflation can't silently come back.
@@ -96,7 +97,7 @@ class TestFormatRetryWaitServerLabel:
     def test_pin_differs_from_source_falls_back_to_generic(self):
         """Source attribution (top-level server_id) is Plex, but the explicit
         publish-pin is something else — naming the source would re-introduce
-        the chain ``2f7132d5`` source-vs-target conflation, so we go generic.
+        the source-vs-target conflation, so we go generic.
         """
         retry = _job(
             server_id="plex-main",
@@ -370,7 +371,7 @@ class TestRetryCompletionMessage:
     def test_spawned_next_retry_logs_info_success(self):
         """If we DID spawn another retry, this child completed its work and
         the chain is still alive — INFO is correct (the WARNING about the
-        next-retry schedule is logged elsewhere, lines 1239-1242).
+        next-retry schedule is logged elsewhere).
         """
         level, msg = _retry_completion_message(
             retry_paths=["/a.mkv"],
@@ -390,8 +391,8 @@ class TestItemCompleteLogLevel:
     @pytest.mark.parametrize(
         ("display_name", "success", "level"),
         [
-            ("Library scan", True, "DEBUG"),
-            ("Library scan", False, "INFO"),
+            (CHECK_STAGE_WORKER_NAME, True, "DEBUG"),
+            (CHECK_STAGE_WORKER_NAME, False, "INFO"),
             ("GPU Worker 3 (NVIDIA TITAN RTX)", True, "INFO"),
             ("CPU Worker 1", False, "INFO"),
         ],
@@ -400,10 +401,8 @@ class TestItemCompleteLogLevel:
     def test_level(self, display_name, success, level):
         from loguru import logger
 
-        from media_preview_generator.jobs.dispatcher import CHECK_STAGE_WORKER_NAME
         from media_preview_generator.web.routes.job_runner import _log_item_complete
 
-        assert CHECK_STAGE_WORKER_NAME == "Library scan"
         records: list[tuple[str, str]] = []
         sink = logger.add(lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG")
         try:

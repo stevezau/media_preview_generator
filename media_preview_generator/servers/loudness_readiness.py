@@ -6,8 +6,7 @@ from typing import Any
 
 from loguru import logger
 
-from .base import MediaServer, ServerConfig
-from .chapter_readiness import NATIVE_MODES
+from .base import NATIVE_MODES, MediaServer, ServerConfig
 
 # Plex's own server-wide "Analyze audio tracks for loudness": one setting for every library, music included.
 PLEX_LOUDNESS_PREF = "LoudnessAnalysisBehavior"

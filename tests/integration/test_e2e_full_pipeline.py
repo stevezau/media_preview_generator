@@ -30,7 +30,6 @@ from __future__ import annotations
 import json
 import struct
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -40,14 +39,13 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
+from tests.integration.conftest import BIF_MAGIC, JPEG_SOI, assert_webhook_queued
 
 # ---------------------------------------------------------------------------
 # BIF format reader — used to validate publisher output is structurally sound.
 # ---------------------------------------------------------------------------
 
 # BIF magic header (8 bytes); see Roku's spec + the project's CLAUDE.md.
-_BIF_MAGIC = bytes([0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A])
-_JPEG_SOI = bytes([0xFF, 0xD8, 0xFF])  # JPEG start-of-image marker
 
 
 def _decode_bif(path: Path) -> dict:
@@ -59,7 +57,7 @@ def _decode_bif(path: Path) -> dict:
     """
     raw = path.read_bytes()
     assert len(raw) >= 64, f"BIF too small ({len(raw)} bytes); header is 64 bytes"
-    assert raw[:8] == _BIF_MAGIC, f"BIF magic mismatch: got {raw[:8].hex()}"
+    assert raw[:8] == BIF_MAGIC, f"BIF magic mismatch: got {raw[:8].hex()}"
 
     version = struct.unpack("<I", raw[8:12])[0]
     image_count = struct.unpack("<I", raw[12:16])[0]
@@ -89,7 +87,7 @@ def _decode_bif(path: Path) -> dict:
 
     # Sanity-check the first frame is actually a JPEG.
     first_offset = offsets[0]
-    assert raw[first_offset : first_offset + 3] == _JPEG_SOI, (
+    assert raw[first_offset : first_offset + 3] == JPEG_SOI, (
         f"frame at offset {first_offset} is not a JPEG (bytes={raw[first_offset : first_offset + 4].hex()})"
     )
 
@@ -105,43 +103,6 @@ def _decode_bif(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def real_config(tmp_path):
-    """A MagicMock-shaped Config that exercises the real FFmpeg path.
-
-    Config is a frozen dataclass at runtime; the orchestrator reads
-    only a handful of attrs from it. A MagicMock with explicit attrs
-    lets us avoid materialising the full schema while still hitting
-    real FFmpeg via :func:`generate_images`.
-    """
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = ""
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5  # extract every 5 seconds (synthetic clip is 30s → ~6 frames)
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []  # forces CPU FFmpeg path
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    return config
 
 
 @pytest.fixture
@@ -185,10 +146,10 @@ def emby_registry(emby_credentials, media_root):
 class TestRealFFmpegPipeline:
     """No mocks at the FFmpeg boundary — the pipeline runs end-to-end."""
 
-    def test_real_ffmpeg_produces_valid_bif_for_h264_clip(self, emby_registry, media_root, real_config):
+    def test_real_ffmpeg_produces_valid_bif_for_h264_clip(self, emby_registry, media_root, live_config):
         """Process a real H.264 clip; verify FFmpeg ran, BIF lands, BIF parses."""
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        sidecar = Path(canonical).parent / f"Test Movie H264 (2024)-320-{int(real_config.plex_bif_frame_interval)}.bif"
+        sidecar = Path(canonical).parent / f"Test Movie H264 (2024)-320-{int(live_config.plex_bif_frame_interval)}.bif"
 
         # Clear any leftover from a previous run.
         if sidecar.exists():
@@ -198,7 +159,7 @@ class TestRealFFmpegPipeline:
             result = process_canonical_path(
                 canonical_path=canonical,
                 registry=emby_registry,
-                config=real_config,
+                config=live_config,
                 # Force CPU; the test runner may not have a GPU.
                 gpu=None,
                 gpu_device_path=None,
@@ -233,10 +194,10 @@ class TestRealFFmpegPipeline:
             if sidecar.exists():
                 sidecar.unlink()
 
-    def test_real_ffmpeg_handles_hevc_clip(self, emby_registry, media_root, real_config):
+    def test_real_ffmpeg_handles_hevc_clip(self, emby_registry, media_root, live_config):
         """The HEVC fixture also produces a valid BIF — covers the other codec."""
         canonical = str(media_root / "Movies" / "Test Movie HEVC (2024)" / "Test Movie HEVC (2024).mkv")
-        sidecar = Path(canonical).parent / f"Test Movie HEVC (2024)-320-{int(real_config.plex_bif_frame_interval)}.bif"
+        sidecar = Path(canonical).parent / f"Test Movie HEVC (2024)-320-{int(live_config.plex_bif_frame_interval)}.bif"
 
         if sidecar.exists():
             sidecar.unlink()
@@ -245,7 +206,7 @@ class TestRealFFmpegPipeline:
             result = process_canonical_path(
                 canonical_path=canonical,
                 registry=emby_registry,
-                config=real_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
             )
@@ -332,74 +293,32 @@ def flask_app_for_webhook(emby_credentials, media_root, tmp_path, monkeypatch):
 @pytest.mark.integration
 @pytest.mark.slow
 class TestWebhookEndToEnd:
-    """Real Flask app receives a webhook; BIF lands on disk."""
+    """Real Flask app receives a webhook and queues a Job for the file."""
 
-    def test_sonarr_style_path_webhook_drives_full_pipeline(
+    def test_sonarr_style_path_webhook_queues_a_job(
         self,
         flask_app_for_webhook,
         media_root,
-        real_config,
-        monkeypatch,
     ):
-        """A path-based webhook (Sonarr/Radarr/templated) flows end-to-end.
-
-        Verifies that:
-        * The router classifies the payload as path-first.
-        * The dispatcher resolves owners and runs FFmpeg.
-        * The Emby publisher writes a structurally valid BIF on disk.
-        """
+        """A path-based webhook (Sonarr/Radarr/templated) is classified path-first and queued as a Job."""
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
-        if sidecar.exists():
-            sidecar.unlink()
-
-        # The Flask request handler builds its own Config via
-        # _load_config_or_minimal() inside the webhook router. Override
-        # it so the dispatcher uses our test_config (with the right
-        # working_tmp_folder + ffmpeg settings).
-        monkeypatch.setattr(
-            "media_preview_generator.web.webhook_router._load_config_or_minimal",
-            lambda: real_config,
+        response = flask_app_for_webhook.test_client().post(
+            "/api/webhooks/incoming",
+            headers={"X-Auth-Token": "integration-secret", "Content-Type": "application/json"},
+            data=json.dumps({"path": canonical, "trigger": "file_added"}),
         )
+        assert_webhook_queued(response, "path", canonical)
 
-        client = flask_app_for_webhook.test_client()
-        try:
-            response = client.post(
-                "/api/webhooks/incoming",
-                headers={"X-Auth-Token": "integration-secret", "Content-Type": "application/json"},
-                data=json.dumps({"path": canonical, "trigger": "file_added"}),
-            )
-
-            assert response.status_code == 200, (
-                f"expected 200, got {response.status_code}: {response.get_data(as_text=True)}"
-            )
-            body = response.get_json()
-            assert body["kind"] == "path"
-            # process_canonical_path's status is surfaced.
-            assert body.get("status") in ("published", "skipped"), body
-
-            # The BIF should have landed.
-            assert sidecar.exists(), f"sidecar BIF missing at {sidecar}"
-            decoded = _decode_bif(sidecar)
-            assert decoded["image_count"] >= 4, decoded
-            assert decoded["interval_ms"] == 5000, decoded["interval_ms"]
-        finally:
-            if sidecar.exists():
-                sidecar.unlink()
-
-    def test_emby_native_webhook_resolves_item_id_and_publishes(
+    def test_emby_native_webhook_resolves_item_id_and_queues_a_job(
         self,
         flask_app_for_webhook,
         emby_credentials,
         media_root,
-        real_config,
-        monkeypatch,
     ):
-        """An Emby-shaped webhook (with ItemId, no path) drives the full chain.
+        """An Emby-shaped webhook (with ItemId, no path) is resolved to a path and queued as a Job.
 
-        The router calls back to Emby to translate item id → path; then
-        the dispatcher publishes. This exercises the entire item-id-only
-        webhook flow end-to-end against a real Emby server.
+        The router calls back to Emby to translate item id → path, which
+        exercises the item-id-only webhook flow against a real Emby server.
         """
         # Look up a real item id from the live Emby container.
         import requests
@@ -417,47 +336,24 @@ class TestWebhookEndToEnd:
         )
         items_resp.raise_for_status()
         items = items_resp.json().get("Items", [])
-        # Pick the H264 fixture so we know which BIF to assert on.
+        # Pick the H264 fixture so the expected canonical path is known.
         target = next(i for i in items if "H264" in (i.get("Path") or ""))
         target_path = target["Path"]
         target_id = target["Id"]
 
         # Map the Emby-side path back to the local canonical path.
         local_canonical = target_path.replace("/em-media", str(media_root), 1)
-        sidecar = Path(local_canonical).parent / "Test Movie H264 (2024)-320-5.bif"
-        if sidecar.exists():
-            sidecar.unlink()
 
-        monkeypatch.setattr(
-            "media_preview_generator.web.webhook_router._load_config_or_minimal",
-            lambda: real_config,
+        response = flask_app_for_webhook.test_client().post(
+            "/api/webhooks/incoming",
+            headers={"X-Auth-Token": "integration-secret", "Content-Type": "application/json"},
+            data=json.dumps(
+                {
+                    # Emby Webhooks-plugin shape (Plex-format-compatible).
+                    "Event": "library.new",
+                    "Item": {"Id": target_id},
+                    "Server": {"Id": emby_credentials["EMBY_SERVER_ID"]},
+                }
+            ),
         )
-
-        client = flask_app_for_webhook.test_client()
-        try:
-            response = client.post(
-                "/api/webhooks/incoming",
-                headers={"X-Auth-Token": "integration-secret", "Content-Type": "application/json"},
-                data=json.dumps(
-                    {
-                        # Emby Webhooks-plugin shape (Plex-format-compatible).
-                        "Event": "library.new",
-                        "Item": {"Id": target_id},
-                        "Server": {"Id": emby_credentials["EMBY_SERVER_ID"]},
-                    }
-                ),
-            )
-
-            assert response.status_code == 200, (
-                f"expected 200, got {response.status_code}: {response.get_data(as_text=True)}"
-            )
-            body = response.get_json()
-            assert body["kind"] == "emby", body
-            assert body.get("status") in ("published", "skipped"), body
-
-            assert sidecar.exists(), f"sidecar BIF missing at {sidecar}"
-            decoded = _decode_bif(sidecar)
-            assert decoded["image_count"] >= 4
-        finally:
-            if sidecar.exists():
-                sidecar.unlink()
+        assert_webhook_queued(response, "emby", local_canonical)

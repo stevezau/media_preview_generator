@@ -10,9 +10,7 @@ from playwright.sync_api import Page, expect
 class TestLoginPage:
     def test_token_input_is_autofocused(self, page: Page, app_url: str) -> None:
         page.goto(f"{app_url}/login")
-        # Browser focuses the autofocus input on load.
-        focused = page.evaluate("document.activeElement?.id || document.activeElement?.name")
-        assert focused in ("token", "Authentication Token") or page.locator("#token").is_visible()
+        expect(page.locator("#token")).to_be_focused()
 
     def test_invalid_token_shows_error_alert(self, page: Page, app_url: str) -> None:
         page.goto(f"{app_url}/login")
@@ -21,12 +19,10 @@ class TestLoginPage:
         # The error alert renders with the new trimmed copy.
         expect(page.locator(".alert-danger")).to_contain_text("didn", timeout=3000)
 
-    def test_login_page_subtitle_is_concise(self, page: Page, app_url: str) -> None:
-        """Regression for the patronising 'Enter your authentication token to
-        continue' line — should now read just 'Sign in'."""
+    def test_login_page_shows_title_and_concise_subtitle(self, page: Page, app_url: str) -> None:
         page.goto(f"{app_url}/login")
-        # Old copy is gone.
-        assert "Enter your authentication token to continue" not in page.content()
+        expect(page.locator("h1")).to_have_text("Media Preview Generator")
+        expect(page.locator(".logo-container p")).to_have_text("Enter your token to continue")
 
     def test_token_field_and_reveal_button_are_touch_sized_when_viewport_is_phone(
         self, page: Page, app_url: str

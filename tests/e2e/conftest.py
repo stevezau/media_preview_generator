@@ -41,10 +41,12 @@ from playwright.sync_api import BrowserContext, Page, expect
 # ---------------------------------------------------------------------------
 
 
-def wait_for_port(port: int, timeout: float = 10.0) -> bool:
-    """Wait for a TCP port to become connectable."""
+def wait_for_port(port: int, timeout: float = 10.0, proc: subprocess.Popen | None = None) -> bool:
+    """Wait for a TCP port to become connectable; give up early if ``proc`` has exited."""
     start = time.time()
     while time.time() - start < timeout:
+        if proc is not None and proc.poll() is not None:
+            return False
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             if s.connect_ex(("localhost", port)) == 0:
                 return True
@@ -109,29 +111,32 @@ def _start_app(config_dir: str, port: int, extra_env: dict | None = None) -> sub
     }
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            app_boot_payload(port),
-        ],
-        env={**env, "PYTHONPATH": _REPO_ROOT},
-        # Defence in depth behind ``app_boot_payload``'s dotenv patch —
-        # a cwd with no ``.env`` in it.
-        cwd=config_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # Output goes to a file: an undrained PIPE fills up and blocks the server mid-run.
+    log_path = Path(config_dir).parent / f"app-{port}.log"
+    with open(log_path, "wb") as log_file:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                app_boot_payload(port),
+            ],
+            env={**env, "PYTHONPATH": _REPO_ROOT},
+            # Defence in depth behind ``app_boot_payload``'s dotenv patch —
+            # a cwd with no ``.env`` in it.
+            cwd=config_dir,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
     # 60s: under -n auto with 24 workers, the OS scheduler can't give
     # every concurrent Flask boot enough CPU to finish in 30s. Each
     # boot involves GPU detection + JobManager DB load + APScheduler
     # SQLite jobstore + SocketIO + module imports — ~2-3s wall idle,
     # but contention serialises chunks. 60s is enough headroom for
     # 32 workers concurrently while still failing fast on real bugs.
-    if not wait_for_port(port, timeout=60):
-        stdout, stderr = proc.communicate(timeout=5)
+    if not wait_for_port(port, timeout=60, proc=proc):
         proc.kill()
-        raise RuntimeError(f"App failed to start on port {port}.\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}")
+        proc.wait(timeout=5)
+        raise RuntimeError(f"App failed to start on port {port}.\n{log_path.read_text(errors='replace')}")
     return proc
 
 
@@ -220,12 +225,8 @@ def _reset_wizard_state(request) -> Generator[None, None, None]:
         # the next test will fail loudly rather than silently sharing
         # state.
         urllib.request.urlopen(req, timeout=10).close()  # noqa: S310
-    except Exception:
-        # Best-effort: a 401 (auth changed) or 403 (env var missing)
-        # falls through to a normal test run which may flake. Tests
-        # that depend on pristine state will fail visibly; tests
-        # that don't won't notice.
-        pass
+    except Exception as exc:
+        pytest.fail(f"wizard state reset failed ({url}/api/__test/reset): {exc}")
     yield
 
 

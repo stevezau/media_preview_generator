@@ -186,7 +186,14 @@ def _trickplay_facts(sheet_dir: str, interval_s: int) -> dict:
         logger.debug("Inspector: couldn't read the trickplay sheets at {}: {}", sheet_dir, type(exc).__name__)
         return {"error": "This preview's tile sheets couldn't be read"}
     sheets = info["sheets"]
-    mtimes = [os.path.getmtime(s["path"]) for s in sheets if s["exists"]]
+    mtimes = []
+    for sheet in sheets:
+        if not sheet["exists"]:
+            continue
+        try:
+            mtimes.append(os.path.getmtime(sheet["path"]))
+        except OSError:
+            continue  # sheet vanished between listing and stat
     return {
         "frame_count": info["thumbnail_count"],
         # Jellyfin keeps the interval in its database, not on disk: the server's setting is what the sheets were
@@ -416,14 +423,14 @@ def file_previews(
     kinds = {ServerType.PLEX: "bif", ServerType.EMBY: "bif", ServerType.JELLYFIN: "trickplay"}
     futures: list[tuple[ServerConfig, Any]] = []
     for cfg, server, matches in owners:
-        if _resting(cfg.id):
+        if is_resting(cfg.id):
             # It just didn't answer: asking again would only hold another lookup thread for the same wait.
             futures.append((cfg, None))
             continue
         futures.append(
             (
                 cfg,
-                _LOOKUPS.submit(
+                submit_lookup(
                     server_preview,
                     cfg,
                     server,
@@ -444,10 +451,10 @@ def file_previews(
             continue
         try:
             rows.append(future.result(timeout=max(0.0, deadline - time.monotonic())))
-            _answered(cfg.id)
+            mark_answered(cfg.id)
         except FutureTimeoutError:
             future.cancel()
-            _rest(cfg.id)
+            mark_resting(cfg.id)
             logger.debug("Inspector: {} didn't say in time where this file's preview is", cfg.name)
             rows.append(_unreachable(cfg, kinds.get(cfg.type, "unknown")))
         except Exception as exc:
@@ -456,18 +463,23 @@ def file_previews(
     return rows
 
 
-def _resting(server_id: str) -> bool:
+def submit_lookup(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run ``fn`` on the Inspector's shared bounded lookup pool; returns the future."""
+    return _LOOKUPS.submit(fn, *args, **kwargs)
+
+
+def is_resting(server_id: str) -> bool:
     with _rest_lock:
         since = _resting_since.get(server_id)
     return since is not None and time.monotonic() - since < REST_S
 
 
-def _rest(server_id: str) -> None:
+def mark_resting(server_id: str) -> None:
     with _rest_lock:
         _resting_since[server_id] = time.monotonic()
 
 
-def _answered(server_id: str) -> None:
+def mark_answered(server_id: str) -> None:
     with _rest_lock:
         _resting_since.pop(server_id, None)
 

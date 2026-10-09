@@ -3,7 +3,7 @@
 # (markers/publishers/plex_db.py) and must run it against the same libraries.
 requests==2.33.0
 defusedxml>=0.7.1,<1
-urllib3>=2.6.3,<3.0.0
+urllib3>=2.8.0,<3.0.0
 loguru==0.7.3
 flask>=3.0.0,<4
 werkzeug>=3.1.9,<3.2

@@ -1,21 +1,10 @@
-"""TEST_AUDIT Phase 5 — backfill tests for newly-shipped server features.
+"""Tests for the per-server feature endpoints.
 
-41 features shipped in 3 days. Most have ZERO direct test coverage today.
-This file targets the most user-facing of those:
-
-  * Vendor extraction toggle (POST /api/servers/{id}/vendor-extraction)
-    — commits a5070b6, 9e4ce73, 2c925db
-  * Vendor extraction status (GET /api/servers/{id}/vendor-extraction/status)
-  * Server health check (GET /api/servers/{id}/health-check) — commit be11807
-  * Server health check apply (POST /api/servers/{id}/health-check/apply)
-    — commit 4592852
-  * One-click Jellyfin plugin install (POST /api/servers/{id}/install-plugin)
-    — commit bfc9613
-
-Why this matters: the audit's incident archaeology covered HISTORICAL
-bugs. These features are NEW — the user has been hitting bugs in them
-and reaching for fixes manually. A regression in any of these would
-silently break a UI feature the user just shipped.
+* Vendor extraction toggle (POST /api/servers/{id}/vendor-extraction)
+* Vendor extraction status (GET /api/servers/{id}/vendor-extraction/status)
+* Server health check (GET /api/servers/{id}/health-check)
+* Server health check apply (POST /api/servers/{id}/health-check/apply)
+* One-click Jellyfin plugin install (POST /api/servers/{id}/install-plugin)
 """
 
 from __future__ import annotations
@@ -59,7 +48,6 @@ def _stub_jellyfin_plugin_probe(monkeypatch):
 def mock_auth_config(tmp_path, monkeypatch):
     auth_file = str(tmp_path / "auth.json")
     monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", auth_file)
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
     reset_settings_manager()
     from media_preview_generator.web.routes import clear_gpu_cache
 

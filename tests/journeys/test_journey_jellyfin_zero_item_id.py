@@ -7,7 +7,7 @@ Pins the contracts that the v3 preview-adoption plan depends on:
   Media Preview Bridge plugin isn't installed (and for Emby always).
 * Plugin presence toggles the recommendation for
   ``ExtractTrickplayImagesDuringLibraryScan``.
-* ``trickplay_readiness()`` probe aggregates version, plugin, library
+* ``previews_readiness()`` probe aggregates version, plugin, library
   settings, and server-wide ``TrickplayOptions`` into one payload.
 * ``trickplay_fix_all()`` sequences steps correctly.
 * ``sync_trickplay_options()`` preserves admin-customised fields.
@@ -19,7 +19,7 @@ Rule "Assert the kwargs the SUT controls".
 
 from __future__ import annotations
 
-import time
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -129,12 +129,6 @@ def jellyfin_server_stub():
 class TestJellyfinPublishWithoutItemId:
     """The load-bearing adapter-contract flip: item_id is NOT required."""
 
-    def test_compute_output_paths_accepts_none(self, tmp_path):
-        adapter = JellyfinTrickplayAdapter(width=320)
-        bundle = _make_bundle("/m/Foo.mkv", tmp_path, 0)
-        paths = adapter.compute_output_paths(bundle, MagicMock(), item_id=None)
-        assert paths[0] == Path("/m/Foo.trickplay/320 - 10x10/0.jpg")
-
     def test_publish_writes_tiles_without_item_id(self, tmp_path):
         frame_dir = tmp_path / "frames"
         _make_frame_dir(frame_dir, count=5)
@@ -169,17 +163,14 @@ class TestAtomicPublishSemantics:
         media_file = _seed_canonical(tmp_path / "X")
 
         final_dir = tmp_path / "X" / "Test (2024).trickplay"
-        sheets_dir = final_dir / "320 - 10x10"
-
-        observed_states: list[str] = []
-        original_rename = __import__("os").rename
+        original_rename = os.rename
+        # (final dir already visible?, tiles staged in the dir being renamed in)
+        swaps: list[tuple[bool, int]] = []
 
         def spying_rename(src, dst):
-            # BEFORE rename: final may either not exist, or contain the
-            # PRIOR complete tile set. Never a partial.
-            if final_dir.exists():
-                n_tiles = len(list(sheets_dir.iterdir())) if sheets_dir.is_dir() else 0
-                observed_states.append(f"final_exists:{n_tiles}tiles")
+            staged_sheets = Path(src) / "320 - 10x10"
+            staged_tiles = len(list(staged_sheets.iterdir())) if staged_sheets.is_dir() else 0
+            swaps.append((final_dir.exists(), staged_tiles))
             return original_rename(src, dst)
 
         with patch(
@@ -191,12 +182,12 @@ class TestAtomicPublishSemantics:
             sheet0 = adapter.compute_output_paths(bundle, MagicMock(), item_id=None)[0]
             adapter.publish(bundle, [sheet0], item_id=None)
 
-        # At the point the atomic rename fired, the final dir either
-        # didn't exist (clean slate) or it contained a complete prior
-        # tile set. Our test has no prior tiles so we see the former.
-        for state in observed_states:
-            assert not state.startswith("final_exists:0tiles"), (
-                "Final dir was empty mid-swap — Jellyfin adoption would have persisted ThumbnailCount=0 to its DB."
+        assert swaps, "publish never renamed a staging dir into place"
+        for visible, staged_tiles in swaps:
+            assert not visible, "Final dir existed before the swap on a clean slate"
+            assert staged_tiles > 0, (
+                "Staging dir was empty when renamed into place — Jellyfin adoption would have "
+                "persisted ThumbnailCount=0 to its DB."
             )
 
     def test_fallback_on_rename_failure_still_writes(self, tmp_path):
@@ -423,7 +414,7 @@ class TestDispatcherLookupPolicy:
 
 
 # ============================================================
-# Section D — trickplay_readiness() probe
+# Section D — previews_readiness() probe
 # ============================================================
 
 
@@ -472,29 +463,33 @@ class TestTrickplayReadiness:
 
         return patch.object(JellyfinServer, "_request", side_effect=fake_request)
 
+    @staticmethod
+    def _section(readiness, section_id):
+        return next(sec for sec in readiness["sections"] if sec["id"] == section_id)
+
     def test_all_green_with_plugin(self, jellyfin_server_stub):
         with self._stub_probes(jellyfin_server_stub, plugin_installed=True):
-            readiness = jellyfin_server_stub.trickplay_readiness()
+            readiness = jellyfin_server_stub.previews_readiness()
 
         assert readiness["overall_ok"] is True
-        assert readiness["version"]["value"] == "10.11.2"
-        assert readiness["plugin"]["installed"] is True
-        assert readiness["plugin"]["mode"] == "plugin_instant"
-        assert readiness["library_settings"]["ok"] is True
-        assert readiness["trickplay_options"]["ok"] is True
+        assert self._section(readiness, "version")["ok"] is True
+        assert self._section(readiness, "library_settings")["ok"] is True
+        assert self._section(readiness, "server_options")["ok"] is True
 
     def test_flags_tile_geometry_mismatch(self, jellyfin_server_stub):
-        """Server TileWidth=8 mismatches our adapter's 10 ⇒ ok=False."""
+        """Server TileWidth=8 mismatches our adapter's 10 => the geometry check fails."""
         bad_options = {"TileWidth": 8, "TileHeight": 8, "WidthResolutions": [320], "Interval": 10000}
         with self._stub_probes(jellyfin_server_stub, plugin_installed=True, trickplay_options=bad_options):
-            readiness = jellyfin_server_stub.trickplay_readiness()
+            readiness = jellyfin_server_stub.previews_readiness()
 
-        assert readiness["trickplay_options"]["ok"] is False
-        assert readiness["trickplay_options"]["fix_kind"] == "set_trickplay_options"
-        assert "TileWidth" in readiness["trickplay_options"]["reason"]
+        section = self._section(readiness, "server_options")
+        assert section["ok"] is False
+        geometry = next(c for c in section["checks"] if c["id"] == "trickplay_geometry")
+        assert geometry["ok"] is False
+        assert "TileWidth" in (geometry["reason"] or "")
 
     def test_warns_on_old_jellyfin(self, jellyfin_server_stub):
-        """Jellyfin < 10.10 pre-dates SaveTrickplayWithMedia — no auto-fix."""
+        """Jellyfin < 10.10 pre-dates SaveTrickplayWithMedia."""
 
         def fake_request(method, url, **kwargs):
             resp = MagicMock(status_code=200, raise_for_status=MagicMock())
@@ -521,31 +516,25 @@ class TestTrickplayReadiness:
             return resp
 
         with patch.object(JellyfinServer, "_request", side_effect=fake_request):
-            readiness = jellyfin_server_stub.trickplay_readiness()
+            readiness = jellyfin_server_stub.previews_readiness()
 
-        assert readiness["version"]["ok"] is False
-        assert readiness["version"]["fix_kind"] == "upgrade_jellyfin"
+        assert self._section(readiness, "version")["ok"] is False
         assert readiness["overall_ok"] is False
 
     def test_recommends_scan_extraction_on_when_no_plugin(self, jellyfin_server_stub):
-        """Dynamic recommendation pinning: Mode B (no plugin) needs
-        ExtractTrickplayImagesDuringLibraryScan=True to trigger adoption."""
-        # Stub: no plugin, flag is OFF — readiness should flag it.
+        """Without the plugin, ExtractTrickplayImagesDuringLibraryScan must be ON for adoption."""
         options_flag_off = {
             "EnableTrickplayImageExtraction": True,
             "SaveTrickplayWithMedia": True,
-            "ExtractTrickplayImagesDuringLibraryScan": False,  # wrong for Mode B
+            "ExtractTrickplayImagesDuringLibraryScan": False,
             "EnableRealtimeMonitor": True,
         }
         with self._stub_probes(jellyfin_server_stub, plugin_installed=False, library_options=options_flag_off):
-            readiness = jellyfin_server_stub.trickplay_readiness()
+            readiness = jellyfin_server_stub.previews_readiness()
 
-        issues = readiness["library_settings"]["issues"]
-        scan_ext_issue = next((i for i in issues if i["flag"] == "ExtractTrickplayImagesDuringLibraryScan"), None)
-        assert scan_ext_issue is not None, (
-            "Plugin absent + scan-ext=False should produce an issue (Mode B needs flag ON)"
-        )
-        assert scan_ext_issue["recommended"] is True
+        section = self._section(readiness, "library_settings")
+        assert section["ok"] is False
+        assert any("ExtractTrickplayImagesDuringLibraryScan" in str(c) for c in section["checks"]), section
 
 
 # ============================================================
@@ -1004,7 +993,7 @@ class TestNoPassTwoCost:
     """Mock a 30-second reverse-lookup; assert the whole Jellyfin-only
     dispatch completes in under 2 seconds (no plugin path = no lookup)."""
 
-    def test_jellyfin_dispatch_under_1s_without_plugin(self, tmp_path, mock_config):
+    def test_jellyfin_dispatch_skips_item_lookup_without_plugin(self, tmp_path, mock_config):
         mock_config.working_tmp_folder = str(tmp_path / "tmp")
         media_file = _seed_canonical(tmp_path / "data" / "movies")
         media_root = str(tmp_path / "data" / "movies")
@@ -1023,37 +1012,28 @@ class TestNoPassTwoCost:
         assert live is not None
         live._media_preview_bridge_installed = False
 
-        def slow_lookup(self, *a, **kw):
-            time.sleep(30)
-            return None
+        def forbidden_lookup(self, *a, **kw):
+            raise AssertionError("Pass-2 reverse lookup must not run when the plugin is not installed")
 
         def fake_generate_images(video_file, output_folder, *args, **kwargs):
             _make_frame_dir(Path(output_folder), count=3)
             return (True, 3, "h264", 1.0, 30.0, None)
 
         with (
-            patch.object(JellyfinServer, "resolve_remote_path_to_item_id", autospec=True, side_effect=slow_lookup),
+            patch.object(JellyfinServer, "resolve_remote_path_to_item_id", autospec=True, side_effect=forbidden_lookup),
             patch.object(JellyfinServer, "trigger_refresh", return_value=None),
             patch(
                 "media_preview_generator.processing.multi_server.generate_images",
                 side_effect=fake_generate_images,
             ),
         ):
-            t0 = time.monotonic()
             result = process_canonical_path(
                 canonical_path=str(media_file),
                 registry=registry,
                 config=mock_config,
                 schedule_retry_on_not_indexed=False,
             )
-            elapsed = time.monotonic() - t0
 
-        # Without the lookup, the whole dispatch should complete in well
-        # under the 30s that the reverse-lookup would have taken.
-        assert elapsed < 2.0, (
-            f"Jellyfin dispatch took {elapsed:.1f}s — the 30s Pass-2 lookup fired despite "
-            "no plugin. Regression in _make_item_id_resolver's vendor branching."
-        )
         assert result.status is MultiServerStatus.PUBLISHED
         # Without an item id (no plugin → no resolve), the publisher
         # returns PUBLISHED_PENDING_REGISTRATION (tiles on disk, retry

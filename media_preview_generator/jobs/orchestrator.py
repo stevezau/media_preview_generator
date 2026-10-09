@@ -22,8 +22,6 @@ from .parking import JobParked
 from .worker import JOB_LOG_SKIP, WorkerPool
 
 
-# Max cadence for worker-snapshot SocketIO emits during a multi-server
-# dispatch. See the long comment in ``_dispatch_processable_items`` —
 def _resolve_webhook_path_to_canonical(
     path: str, server_configs: list, *, log_resolution: bool = True
 ) -> tuple[str, list]:
@@ -48,13 +46,11 @@ def _resolve_webhook_path_to_canonical(
       (2) any candidate that owners agree on, (3) the raw input.
     * ``matches`` — the **aggregated** deduplicated list of
       :class:`~servers.ownership.OwnershipMatch` across EVERY
-      candidate. This is the audit-P2 fix: the previous version
-      returned at the first matching candidate, silently dropping
-      owners whose libraries matched a different candidate. On a
-      heterogeneous-mount install (Plex on ``/data_16tb``, Emby on
-      ``/em-media``, both with ``webhook_prefixes=['/data']``), the
-      first match would return Plex only and Emby would never publish.
-      Now both servers' owners are returned.
+      candidate, so owners whose libraries matched a different candidate
+      are not dropped. On a heterogeneous-mount install (Plex on
+      ``/data_16tb``, Emby on ``/em-media``, both with
+      ``webhook_prefixes=['/data']``), returning at the first match
+      would publish to Plex only.
 
     Tries the raw path first (the dominant case for installs without
     webhook_prefixes mappings), then every translated candidate.
@@ -216,7 +212,7 @@ def _publisher_rows_from_result(result, canonical_path: str) -> list[dict]:
                 # reused across a sibling-server webhook.
                 "frame_source": getattr(pub, "frame_source", "extracted"),
                 # output_paths feeds the BIF-viewer deep-link in the Files
-                # panel — see record_file_result + job_modal.js (D34).
+                # panel — see record_file_result + job_modal.js.
                 "output_paths": [str(op) for op in (getattr(pub, "output_paths", None) or [])],
                 "artifacts": getattr(pub, "artifacts", {}),
             }
@@ -444,16 +440,9 @@ def fold_publisher_rows_into_aggregate(aggregate: dict[str, dict], rows: list[di
     (``{status: shared message or None}``) for the statuses in
     ``_AGGREGATE_MESSAGE_STATUSES``.
 
-    Mutates ``aggregate`` in place. Both job-dispatch paths (legacy
-    WorkerPool dispatcher and the multi-server full-scan / webhook
-    ThreadPoolExecutor) feed this so they cannot drift again — commit
-    1ecf099 ("aggregate per-server, not per-file") patched only the
-    dispatcher path. ``_dispatch_processable_items`` was missed and
-    kept ``append_publishers``-ing one row per (file × server), which
-    on a 117k-item full library scan turned into an O(N²) SQLite write
-    storm (publishers_json grew to 11.8 MB and was re-encoded + UPSERTed
-    after every item, dropping throughput from ~30 items/sec early on
-    to <8 items/sec by minute 28).
+    Mutates ``aggregate`` in place. Every dispatch path feeds this one helper so the aggregate stays one
+    row per server: appending one row per (file × server) turns a large library scan into an O(N²) write
+    storm on the job row.
     """
     for row in rows:
         server_id = row.get("server_id") or ""
@@ -512,8 +501,7 @@ def _log_webhook_owning_servers(config, paths: list[str]) -> None:
     bug never blocks the actual dispatch. Used purely as a breadcrumb so
     the operator can read the log top-down and see, before any per-server
     work runs, *which* servers will be touched and how many paths each
-    owns. Without this line the legacy single-Plex resolver path looks
-    indistinguishable from the multi-server fan-out path.
+    owns.
     """
     try:
         from ..servers.registry import server_config_from_dict
@@ -607,7 +595,7 @@ def _enumerate_plex_full_scan_items(
     # enumeration on a large TV library can take a while before the
     # first item is yielded via ``list_canonical_paths``; without this
     # the progress bar sits at "0/0" with no message and the job looks
-    # frozen — live user report on job 90301a18. Log at INFO so it
+    # frozen. Log at INFO so it
     # lands in the per-job log file too (the UI's Job Detail tab reads
     # from that file, not the progress_callback stream).
     _label = plex_cfg.name or plex_cfg.id or plex_cfg.type.value
@@ -648,15 +636,14 @@ def _dispatch_processable_items(
     carried_state=None,
     continuation_context=None,
     return_result=False,
+    on_item_complete=None,
+    library_name: str = "",
 ) -> dict:
     """Submit ``(server_config, ProcessableItem)`` pairs to the shared dispatcher.
 
-    This used to be a second, parallel execution engine (its own
-    ThreadPoolExecutor + slot pool + hot-reload poller). It now feeds the one
-    shared :class:`JobDispatcher` — the same engine webhooks and single-Plex
-    scans use — so there is a SINGLE worker model with the checking/processing
-    split for every trigger and every vendor, and a scan + an incoming webhook
-    share one capped pool instead of oversubscribing two.
+    Every trigger (scans, webhooks, continuations) and every vendor feeds the one
+    shared :class:`JobDispatcher`, so a scan and an incoming webhook share one
+    capped worker pool.
 
     ``items`` is ``[(server_config, ProcessableItem), ...]``; only the
     ProcessableItem is forwarded — the per-item publish pin is resolved from
@@ -675,20 +662,20 @@ def _dispatch_processable_items(
 
     from ..web.jobs import PRIORITY_NORMAL
     from .dispatcher import get_dispatcher
-    from .worker import WorkerPool
 
     empty = {r.value: 0 for r in ProcessingResult}
     plain_items = [item for (_server_cfg, item) in items]
     total = len(plain_items)
     if not plain_items:
+        if return_result:
+            return {"completed": 0, "failed": 0, "failed_paths": [], "total": 0, "cancelled": False, "outcome": empty}
         return empty
     if job_id and not (cancel_check and cancel_check()):
         _queue_loudness_follow_up(job_id, plain_items, server_id_filter)
 
     # Reuse the shared dispatcher's pool when one already exists (e.g. a
     # concurrent webhook created it); otherwise build one sized from the
-    # user's GPU/CPU worker config + selected GPUs (mirrors the legacy
-    # ``_create_worker_pool`` in run_processing).
+    # user's GPU/CPU worker config + selected GPUs.
     existing = get_dispatcher()
     if existing is not None:
         worker_pool = existing.worker_pool
@@ -717,8 +704,7 @@ def _dispatch_processable_items(
     refresh_worker_groups(worker_pool, config, selected_gpus, force=True)
 
     # Reconcile the (possibly reused/stale) pool to the current GPU config —
-    # the same hook the webhook/single-Plex path uses so worker counts track
-    # settings. Replaces Engine B's bespoke 1.5s poller.
+    # the same hook the webhook path uses so worker counts track settings.
     if worker_pool_callback:
         try:
             worker_pool_callback(worker_pool)
@@ -749,10 +735,11 @@ def _dispatch_processable_items(
         config=config,
         registry=registry,
         title_max_width=200,
-        library_name="",
+        library_name=library_name,
         callbacks={
             "progress_callback": progress_callback,
             "worker_callback": worker_callback,
+            "on_item_complete": on_item_complete,
             "cancel_check": cancel_check,
             "pause_check": pause_check,
             "freeze_check": freeze_check,
@@ -797,11 +784,10 @@ def _enumerate_items_for_servers(
       green badge fine) from "library couldn't be reached" (zero items
       AND error logged — should surface as a job-level warning so the
       user sees the amber badge instead of a misleading green check).
-      Job b6deeac3 was the originating regression: Jellyfin's /Items
-      timed out, the library was skipped, and the job reported
-      "completed" with no indication anything went wrong.
+      Without it, a Jellyfin ``/Items`` timeout skips the library and the
+      job reports "completed" with no sign anything went wrong.
 
-    De-duping across servers (Phase P4) lives in this helper so it
+    De-duping across servers lives in this helper so it
     applies uniformly to full-scan AND recently-added flows.
     """
     from ..processing import get_processor_for
@@ -845,7 +831,7 @@ def _enumerate_items_for_servers(
                     logger.info("Cancellation requested mid-enumeration — aborting {}.", label)
                     return all_items, enumeration_errors
 
-                # Phase P4: when the same canonical_path appears on more
+                # When the same canonical_path appears on more
                 # than one server (typical: Plex+Jellyfin sharing media,
                 # or two Plex servers with shared storage), keep ONE
                 # ProcessableItem and merge every server's vendor item-id
@@ -944,16 +930,12 @@ def _run_full_scan_multi_server(
     """Multi-server full-library scan via the per-vendor :class:`VendorProcessor`.
 
     Walks every enabled server (or just ``server_id_filter`` when set) using
-    the right :class:`VendorProcessor` from the registry, then dispatches each
-    enumerated :class:`ProcessableItem` through ``process_canonical_path`` in
-    parallel via a :class:`ThreadPoolExecutor`. Workers are sized off the
-    user's GPU/CPU configuration and items are distributed across GPUs
-    round-robin so a single GPU isn't oversubscribed.
-
-    All vendors (Plex, Emby, Jellyfin) flow through this same path now —
-    no separate legacy worker pool. The unified :func:`process_canonical_path`
-    handles publish-to-every-owner fan-out so a Plex+Jellyfin install
-    publishes both bundles from a single FFmpeg pass.
+    the right :class:`VendorProcessor` from the registry, then submits each
+    enumerated :class:`ProcessableItem` to the shared :class:`JobDispatcher`,
+    whose workers run ``process_canonical_path``. All vendors (Plex, Emby,
+    Jellyfin) flow through this one path; ``process_canonical_path`` handles
+    publish-to-every-owner fan-out so a Plex+Jellyfin install publishes both
+    bundles from a single FFmpeg pass.
 
     Returns the aggregated ProcessingResult counts keyed by enum value
     (same shape as :func:`_dispatch_webhook_paths_multi_server`).
@@ -963,10 +945,9 @@ def _run_full_scan_multi_server(
     server whose enumeration failed AND ended up contributing zero
     items to the scan — these surface in the job UI's amber-badge
     "completed with warning" state via ``complete_job(warning=...)``.
-    Job b6deeac3 reproduced the silent-green-badge regression this
-    out-parameter addresses: Jellyfin's /Items timed out, the library
-    was skipped, and the job ended as "completed successfully" with
-    zero items processed.
+    This out-parameter prevents the silent-green-badge case: a Jellyfin
+    ``/Items`` timeout skips the library and the job would otherwise end
+    as "completed successfully" with zero items processed.
     """
     counts = {r.value: 0 for r in ProcessingResult}
 
@@ -1004,8 +985,7 @@ def _run_full_scan_multi_server(
     # came through from OTHER servers. The 2×2 matrix is
     # ``{items=0, items>0} × {errors=0, errors>0}``. The cell
     # ``items>0 AND errors>0`` (e.g. Plex enumerated fine, Jellyfin
-    # timed out) is the multi-server analogue of job b6deeac3 — the
-    # job processes some files but silently drops every Jellyfin
+    # timed out) processes some files but silently drops every Jellyfin
     # path. Without this hoist the badge stays green and the user
     # has no signal that Jellyfin's catalogue was missed. The
     # legitimate-empty-library case (no enumeration_errors at all)
@@ -1105,8 +1085,7 @@ def _run_recently_added_multi_server(
     Returns the aggregated ProcessingResult counts. ``warnings_out``
     mirrors :func:`_run_full_scan_multi_server` — without this plumbing
     a Sonarr/Radarr-driven recently-added scan whose Jellyfin /Items
-    times out would silently report "completed" with zero items, the
-    same shape of bug as job b6deeac3.
+    times out would silently report "completed" with zero items.
     """
     counts = {r.value: 0 for r in ProcessingResult}
 
@@ -1327,11 +1306,11 @@ def _should_use_multi_server_full_scan(config, pinned_type: str) -> bool:
     * At least one non-Plex server (Emby / Jellyfin) is enabled.
     * Two or more enabled Plex servers are configured.
 
-    The legacy Plex-only branch only fires for the pure single-Plex install.
+    The single-Plex branch only fires for the pure single-Plex install.
     It enumerates exactly one Plex config (the first enabled match from
     ``registry.configs()``) and has no notion of ``server_id_filter`` —
     so on a 2-Plex install pinning to the second Plex would still scan
-    the first, silently. Issue #244 (May 2026) was the live reproducer.
+    the first, silently (issue #244).
     """
     no_webhook_paths = not getattr(config, "webhook_paths", None)
     if not no_webhook_paths:
@@ -1422,11 +1401,8 @@ def _format_outcome_summary(aggregate_outcome: dict) -> str:
 def _build_path_mapping_mismatch_hints(unresolved_paths: list[str], server_configs: list) -> dict[str, str]:
     """Detect likely path-mapping mismatches and return per-path hints.
 
-    Audit P4 fix — previously returned ``list[str]``; the consumer
-    (``job_runner.py``) used ``hints[0]`` for every unresolved row, so
-    a multi-path webhook with different mismatches showed the SAME
-    hint on every row (often the wrong one). Returning a dict keyed
-    by the originating path lets each row pick its own hint.
+    Returns a dict keyed by the originating path so each unresolved row
+    picks its own hint.
 
     For each unresolved webhook path, walks every configured server's
     library remote_paths and looks for a location that's a
@@ -1565,11 +1541,9 @@ def _classify_processing_mode(config) -> str:
       (``webhook_source`` set) but ``webhook_paths`` is empty / None.
       The caller MUST NOT fall through to a full library scan: doing so
       attributes a 100k+ item scan to a Job that the UI presents as a
-      single-file webhook entry. See Job e7968486 (May 2026): one Sonarr
-      webhook for one TV episode triggered eight separate full-library
-      scans across eleven container restarts because the original
-      "Job-at-batch-open" refactor forgot to persist ``webhook_paths``
-      in ``job.config``. The webhook-side fix closes the primary hole;
+      single-file webhook entry (for example after a restart revived a webhook job
+      whose ``webhook_paths`` were not persisted in ``job.config``). The webhook-side
+      persistence closes the primary hole;
       this branch is defense in depth against any future code path that
       ships a webhook job without paths.
     * ``"recently_added"`` — a scheduled "Recently added" scan
@@ -1617,7 +1591,7 @@ def _run_webhook_paths_phase(
     runs through ``dispatch_items`` → ``process_canonical_path``. That
     worker handles per-server ownership resolution + parallel fan-out
     so Plex, Emby, and Jellyfin all publish for any path they own.
-    There is no Plex-first stage, no fallback, and no K4: every server
+    There is no Plex-first stage and no fallback: every server
     is a peer. Paths owned by no enabled server fast-skip here so a
     worker thread never gets handed a path it can't process.
 
@@ -1646,10 +1620,9 @@ def _run_webhook_paths_phase(
     # (a TV series root, a season directory) instead of a single file.
     # The unified dispatcher works one video file at a time, so expand
     # any directory into the video files it contains before resolving
-    # owners. Pre-#243 this happened inside get_media_items_by_paths;
-    # the unified-engine merge dropped it, so folder submissions hit
-    # the os.path.isfile gate in process_canonical_path and were
-    # mis-reported as "missing on disk" then retried forever. We pool
+    # owners. Without it, folder submissions hit the os.path.isfile
+    # gate in process_canonical_path and are mis-reported as
+    # "missing on disk" then retried forever. We pool
     # path_mappings from every enabled server so a folder that only
     # exists under a mapped local prefix still resolves to disk.
     #
@@ -1672,7 +1645,7 @@ def _run_webhook_paths_phase(
     hints = getattr(config, "webhook_item_id_hints", None) or {}
 
     webhook_items: list[_PI] = []
-    # Audit A3/A4 — keep a parallel canonical→raw-input map so the
+    # Keep a parallel canonical→raw-input map so the
     # ``unresolved_paths`` list (consumed by job_runner.py for
     # file_result rows + retry hint lookup keying) can stay in a
     # SINGLE namespace (the raw webhook input) regardless of whether
@@ -1700,7 +1673,7 @@ def _run_webhook_paths_phase(
         canonical_path, owners = _resolve_webhook_path_to_canonical(path, server_configs)
         per_path = hints.get(path) or {}
         if not owners:
-            # Audit A2 — when no library covers the path BUT the
+            # When no library covers the path BUT the
             # webhook payload supplied a vendor item-id hint (Plex
             # ``library.new``, Emby ``ItemAdded``, Jellyfin plugin
             # webhook all do), the dispatcher's ``_resolve_publishers``
@@ -1747,11 +1720,11 @@ def _run_webhook_paths_phase(
             )
         )
         # Track canonical → raw input so a FAILED outcome can be
-        # surfaced under the original webhook path (audit A3/A4).
+        # surfaced under the original webhook path.
         canonical_to_input[canonical_path] = path
 
     unresolved: list[str] = list(no_owners)
-    # Path-keyed mismatch hints (audit P4). Built per-path so a
+    # Path-keyed mismatch hints. Built per-path so a
     # multi-path webhook with N different mismatches displays N
     # different hints — one per file_result row, not one borrowed
     # from slot 0.
@@ -1770,9 +1743,8 @@ def _run_webhook_paths_phase(
         # certainly has a path-mapping mismatch (Sonarr/Radarr send
         # ``/data/Movies/X.mkv`` but Plex/Emby/Jellyfin reports
         # ``/media/Movies/X.mkv``, no mapping configured). Surfacing
-        # this hint per-row keeps the UX the legacy Plex-first stage
-        # gave users — without it, the file_result row just says "Not
-        # found", which doesn't tell the user *why*.
+        # this hint per-row tells the user *why* instead of a bare "Not
+        # found".
         path_hint_map.update(_build_path_mapping_mismatch_hints(no_owners, server_configs))
 
     if webhook_items:
@@ -1794,17 +1766,12 @@ def _run_webhook_paths_phase(
             aggregate_outcome[k] = aggregate_outcome.get(k, 0) + v
         failed_canonical_paths = result.get("failed_paths") or []
         if failed_canonical_paths:
-            # Audit A3/A4 — surface the RAW webhook-input path in the
-            # unresolved list so the retry job's
-            # ``webhook_item_id_hints`` lookup (keyed by raw input)
-            # finds its hint. Pre-fix this stored the server-view
-            # canonical_path; the retry job's webhook_paths matched,
-            # but the hint dict (keyed by raw) didn't → retries paid
-            # full reverse-lookup cost on every retry round.
+            # Surface the RAW webhook-input path in the unresolved list so the
+            # retry job's ``webhook_item_id_hints`` lookup (keyed by raw input)
+            # finds its hint instead of paying a full reverse lookup per retry.
             failed_inputs = [canonical_to_input.get(path, path) for path in failed_canonical_paths]
             unresolved.extend(failed_inputs)
-            # Pass-1 audit #6: also build hints for FAILED items, not
-            # only no_owners. A path that owners exist for but every
+            # Also build hints for FAILED items, not only no_owners. A path that owners exist for but every
             # publisher failed (e.g. publisher 5xx, source missing
             # post-rebind) gets the same diagnostic UX as a no-owner
             # path. Hints are best-effort — if no mismatch is detected
@@ -1817,10 +1784,8 @@ def _run_webhook_paths_phase(
         "skipped_paths": [],
         "resolved_count": total_paths - len(unresolved),
         "total_paths": total_paths,
-        # Backwards-compatible: legacy callers that consumed
-        # ``path_hints`` as a list still see a flat list of hint
-        # strings (the same set, dedup-preserved). New callers read
-        # ``path_hint_map`` for per-path correspondence.
+        # ``path_hints`` is the flat, de-duplicated hint list; ``path_hint_map``
+        # carries the per-path correspondence.
         "path_hints": list(dict.fromkeys(path_hint_map.values())),
         "path_hint_map": dict(path_hint_map),
         # File rows are keyed by the dispatched (canonical) path; job_runner's retry needs the path the webhook
@@ -1849,8 +1814,7 @@ def _run_plex_full_scan_phase(
 
     The dispatch goes through the same unified per-vendor processor →
     ProcessableItem → process_canonical_path path that Emby and Jellyfin
-    use. The legacy tuple-shape pump is gone — keep this in mind when
-    reading per-item logs (they'll mention the per-vendor adapter).
+    use, so per-item logs mention the per-vendor adapter.
     """
     all_media_items: list = []
     try:
@@ -1947,7 +1911,6 @@ def run_processing(
 
     """
     return_data = None
-    worker_pool = None
     work_context = {}
     try:
         if continuation is not None:
@@ -1988,7 +1951,7 @@ def run_processing(
                 result["webhook_resolution"] = resolution
             return result
         # Multi-server guard: when this job is pinned to a non-Plex server, or
-        # when no Plex is configured at all, the legacy Plex orchestrator can't
+        # when no Plex is configured at all, the Plex-only path can't
         # do anything useful — full-library enumeration uses the Plex API.
         # Honest no-op: log clearly and return so the job ends cleanly instead
         # of crashing with a Plex connection error.
@@ -2026,8 +1989,7 @@ def run_processing(
         # as webhook-origin but missing webhook_paths is malformed —
         # likely an auto-requeue after restart where the path list got
         # lost. Refuse outright; never let a webhook job degrade into a
-        # full-library scan. See Job e7968486 (May 2026) for the
-        # regression this guards. Tested in
+        # full-library scan. Tested in
         # tests/test_orchestrator_webhook_fallthrough.py.
         if _classify_processing_mode(config) == "refuse_malformed_webhook":
             logger.error(
@@ -2036,8 +1998,7 @@ def run_processing(
                 "was created by a webhook, persisted without webhook_paths in "
                 "job.config, then revived after a container restart with the path "
                 "list lost. Re-trigger the originating webhook to process the "
-                "original file. See Job e7968486 (May 2026) for the regression "
-                "this guards against.",
+                "original file.",
                 getattr(config, "webhook_source", None),
             )
             empty_outcome = {r.value: 0 for r in ProcessingResult}
@@ -2047,10 +2008,7 @@ def run_processing(
             library_ids = list(getattr(config, "plex_library_ids", None) or [])
             # Operator breadcrumb so a multi-Plex install that just got
             # routed through the fan-out path (issue #244 fix) can be
-            # spotted in logs without grepping the gate function. The
-            # pre-fix log trail was identical for legacy and multi-server
-            # paths, so a 2-Plex no-pin scan looked like it had always
-            # walked both servers when in fact it only walked the first.
+            # spotted in logs without grepping the gate function.
             logger.info(
                 "Full-scan dispatch: multi-server path (pin={!r}). Walks every "
                 "enabled server matching the pin; honours server_id_filter end-to-end.",
@@ -2087,28 +2045,19 @@ def run_processing(
         # Per-server PlexServer instances are established lazily by
         # the dispatch path (`process_canonical_path` → adapter →
         # `_resolve_one_path`) when a path actually needs Plex
-        # resolution. The orchestrator no longer pre-connects:
-        # * The result was a dead parameter on
-        #   ``_run_webhook_paths_phase`` after the K4 → peer-equal
-        #   unification (commit 3edd185). The full-scan phase never
-        #   took it.
+        # resolution. The orchestrator doesn't pre-connect:
         # * Eagerly opening a Plex session blocked job start by ~300ms
         #   even on jobs whose paths only Emby/Jellyfin own — and
         #   would abort the entire job (ConnectionError) on a Plex
         #   outage that shouldn't have touched non-Plex paths at all.
         # * The "[Plex] Connecting to Plex" log line landing before
         #   the unified-dispatch "Resolving N webhook path(s)…" read
-        #   like Plex-first dispatch in the timeline (user-flagged on
-        #   job 3b154264).
+        #   like Plex-first dispatch in the timeline.
         clear_failures()
 
         # Build a registry covering EVERY configured media server so the
         # dispatch path can fan out to all owning publishers (Plex + Emby +
-        # Jellyfin). Previously this used from_legacy_config which only
-        # produced a single-Plex registry — webhook + scheduled jobs then
-        # silently dropped fan-out, publishing only to Plex even when the
-        # canonical path was also owned by Emby/Jellyfin libraries. Falls
-        # back to the legacy single-Plex shim only when the persisted
+        # Jellyfin). Falls back to the single-Plex shim only when the persisted
         # media_servers list is empty (fresh install / pre-migration).
         from ..servers.registry import ServerRegistry as _ServerRegistry
         from ..web.settings_manager import get_settings_manager as _get_sm
@@ -2122,135 +2071,40 @@ def run_processing(
         else:
             registry = _ServerRegistry.from_legacy_config(config)
 
-        title_max_width = 200
-
-        def _create_worker_pool():
-            pool = WorkerPool(
-                gpu_workers=config.gpu_threads,
-                cpu_workers=config.cpu_threads,
-                selected_gpus=selected_gpus,
-            )
-            refresh_worker_groups(pool, config, selected_gpus, force=True)
-            if worker_pool_callback:
-                worker_pool_callback(pool)
-            return pool
-
         # Mutable accumulators threaded through the phase helpers. A dict
         # rather than several `nonlocal` ints because the phase helpers
         # are module-level functions, not closures.
         totals = {"processed": 0, "successful": 0, "failed": 0, "cancelled": False}
         aggregate_outcome = {r.value: 0 for r in ProcessingResult}
 
-        # (Headless is the only mode this app runs in — the legacy CLI
-        # console-display path was removed when the web UI became the only
-        # interface. The "headless mode" wording in worker.process_items_headless
-        # remains as a load-bearing API name.)
-
-        _dispatch_started = False
+        dispatch_started = False
 
         def _dispatch_items(items, library_name):
-            """Dispatch items via shared dispatcher or local pool."""
-            nonlocal worker_pool, _dispatch_started
-            if job_id and not (cancel_check and cancel_check()):
-                _queue_loudness_follow_up(job_id, items, getattr(config, "server_id_filter", None))
-            if job_id:
-                from .dispatcher import get_dispatcher
-
-                existing = get_dispatcher()
-                if existing is not None:
-                    worker_pool = existing.worker_pool
-                    # D33 — Surface the reuse so the per-job log doesn't
-                    # silently start dispatching with no worker context.
-                    # Without this, the absence of "Initialized N workers"
-                    # on a reused pool looked like the job was running
-                    # without any workers — confusing when comparing
-                    # back-to-back job logs.
-                    try:
-                        worker_count = len(worker_pool._snapshot_workers())
-                    except Exception:
-                        worker_count = 0
-                    logger.info(
-                        "Reusing existing worker pool ({} worker(s)) — no fresh init needed",
-                        worker_count,
-                    )
-                elif worker_pool is None:
-                    worker_pool = _create_worker_pool()
-                dispatcher = get_dispatcher(worker_pool)
-                # Another job may have created the dispatcher since the check above; its pool is the one that runs,
-                # so it's the one to register (an unused pool registered here would be what Settings saves resize).
-                worker_pool = dispatcher.worker_pool
-                refresh_worker_groups(worker_pool, config, selected_gpus, force=True)
-
-                # Reconcile the pool with the latest settings.  The pool
-                # may have been created minutes ago with stale config
-                # (e.g. 0 workers because the user hadn't configured GPUs
-                # yet at startup).  The callback re-reads current settings
-                # and calls reconcile_gpu_workers so the pool matches.
-                if worker_pool_callback:
-                    worker_pool_callback(worker_pool)
-
-                if not _dispatch_started and on_dispatch_start:
-                    on_dispatch_start()
-                    _dispatch_started = True
-                    # Emit the initial 0% progress AFTER the job
-                    # transitions to RUNNING so the frontend's
-                    # active-job DOM elements exist before the
-                    # job_progress SocketIO event arrives.
-                    if progress_callback:
-                        progress_callback(0, len(items), f"Starting {library_name}")
-
-                callbacks = {
-                    "progress_callback": progress_callback,
-                    "worker_callback": worker_callback,
-                    "on_item_complete": item_complete_callback,
-                    "cancel_check": cancel_check,
-                    "pause_check": pause_check,
-                    "freeze_check": freeze_check,
-                }
-                from ..web.jobs import PRIORITY_NORMAL
-
-                tracker = dispatcher.submit_items(
-                    job_id=job_id,
-                    items=items,
-                    config=config,
-                    registry=registry,
-                    title_max_width=title_max_width,
-                    library_name=library_name,
-                    callbacks=callbacks,
-                    priority=priority if priority is not None else PRIORITY_NORMAL,
-                    continuation_context=work_context,
-                )
-                if tracker_wait:
-                    while not tracker.wait(timeout=0.5):
-                        tracker_wait(dispatcher, tracker)
-                else:
-                    tracker.wait()
-                # D12 — Dispatcher._merge_worker_outcome maintains a
-                # per-server publisher aggregate on the tracker and
-                # mirrors it onto the Job (set_publishers) every task.
-                # Per-file × per-server detail lives in the Files panel
-                # JSONL via record_file_result; nothing to drain here.
-                return tracker.get_result()
-            else:
-                # Local pool mode (no dispatcher) — emit initial progress
-                # before starting the pool.
-                if progress_callback:
-                    progress_callback(0, len(items), f"Starting {library_name}")
-                if worker_pool is None:
-                    worker_pool = _create_worker_pool()
-                return worker_pool.process_items_headless(
-                    items,
-                    config,
-                    registry,
-                    title_max_width,
-                    library_name=library_name,
-                    progress_callback=progress_callback,
-                    worker_callback=worker_callback,
-                    on_item_complete=item_complete_callback,
-                    cancel_check=cancel_check,
-                    pause_check=pause_check,
-                    freeze_check=freeze_check,
-                )
+            """Submit ``items`` to the shared dispatcher and wait for them."""
+            nonlocal dispatch_started
+            start_hook = None if dispatch_started else on_dispatch_start
+            dispatch_started = True
+            return _dispatch_processable_items(
+                [(None, item) for item in items],
+                config=config,
+                registry=registry,
+                selected_gpus=selected_gpus,
+                server_id_filter=getattr(config, "server_id_filter", None),
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+                freeze_check=freeze_check,
+                job_id=job_id,
+                label=library_name,
+                worker_callback=worker_callback,
+                on_dispatch_start=start_hook,
+                worker_pool_callback=worker_pool_callback,
+                priority=priority,
+                tracker_wait=tracker_wait,
+                return_result=True,
+                on_item_complete=item_complete_callback,
+                library_name=library_name,
+            )
 
         # ``_classify_processing_mode`` here picks between
         # "webhook_paths" and "full_scan": the "recently_added" and
@@ -2333,20 +2187,6 @@ def run_processing(
         )
         raise
     finally:
-        try:
-            if worker_pool is not None and not job_id:
-                worker_pool.shutdown()
-        except Exception as worker_error:
-            logger.warning(
-                "Worker pool didn't shut down cleanly: {}. "
-                "Background threads may still be running — usually harmless, but if you see orphan FFmpeg "
-                "processes after the job ends, restart the container.",
-                worker_error,
-            )
-        finally:
-            if not job_id and worker_pool_callback:
-                worker_pool_callback(None)
-
         try:
             if os.path.isdir(config.working_tmp_folder):
                 shutil.rmtree(config.working_tmp_folder)

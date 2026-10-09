@@ -8,21 +8,9 @@ classification is unit-testable without spinning up FFmpeg.
 import pytest
 
 from media_preview_generator.processing.retry_cascade import (
-    RetryTier,
     classify_cpu_fallback_reason,
     classify_dv_safe_retry_reason,
 )
-
-
-class TestRetryTierEnum:
-    def test_all_known_tiers_present(self):
-        assert {t.value for t in RetryTier} == {
-            "none",
-            "skip_frame",
-            "sw_libplacebo",
-            "dv_safe_filter",
-            "cpu_fallback",
-        }
 
 
 class TestClassifyDvSafeRetryReason:

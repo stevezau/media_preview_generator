@@ -59,6 +59,21 @@ class TestSearchQueryParse:
         assert q.episode == expected_episode, f"input={raw!r}"
         assert q.raw == raw
 
+    @pytest.mark.parametrize(
+        "raw,expected_title",
+        [
+            ("THE BOYS", "the boys"),
+            ("LOST", "lost"),
+            ("BREAKING BAD", "breaking bad"),
+            ("The BOYS s01e01", "the boys"),
+            ("The.Boys.S01E01.1080p.WEB-DL.H.264-RARBG", "the boys"),
+            ("The.Boys.S01E01.1080p.WEB-DL.DDP5.1.H.264-RARBG", "the boys"),
+            ("Show.2160p.x265-NTb", "show"),
+        ],
+    )
+    def test_all_caps_titles_survive_and_release_tails_strip(self, raw, expected_title):
+        assert SearchQuery.parse(raw).title == expected_title
+
     def test_empty_input_is_empty_query(self):
         q = SearchQuery.parse("")
         assert q.is_empty

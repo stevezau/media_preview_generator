@@ -1,20 +1,12 @@
-"""Credit text decode timeouts in the store: kept per file identity, forgotten once old (Task 8, preflight I1)."""
+"""Credit text decode timeouts in the store: kept per file identity, forgotten once old."""
 
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
-from media_preview_generator.markers.store import MarkerStore
 
 AT = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
 
 
 def test_a_timeout_counts_only_for_the_identity_it_was_recorded_with(store):
@@ -46,7 +38,7 @@ def test_a_newer_timeout_replaces_the_paths_entry(store):
     ids=["credits-found", "no-credits", "other-detector"],
 )
 def test_a_stored_credit_text_answer_forgets_the_files_timeout(store, answers, forgotten):
-    # Audit phase 3 LOW-2: a file that timed out and then decoded fine (a forced run) must not be held back for the
+    # A file that timed out and then decoded fine (a forced run) must not be held back for the
     # rest of the day when it is asked again (a detector version bump).
     identity = FileIdentity("/m/Movie.mkv", 100, 1)
     other = FileIdentity("/m/Other.mkv", 100, 1)

@@ -197,8 +197,7 @@
 
     function applyServerLevel(level) {
         serverLevel = level;
-        // The localStorage override below reads this back as 'Server: <level>', so the text must stay exactly that.
-        serverLevelBadge.innerHTML = '<i class="bi bi-sliders"></i>Server: ' + esc(level);
+        serverLevelBadge.innerHTML = '<i class="bi bi-sliders"></i>Server: ' + escapeHtml(level);
         const minRank = LEVEL_RANK[level] ?? 0;
         document.querySelectorAll('.log-level-btn').forEach(btn => {
             const rank = LEVEL_RANK[btn.dataset.level] ?? 0;
@@ -228,15 +227,26 @@
     // Honour the user's localStorage override, but only if the server level
     // hasn't changed since they set it.  This way, changing the level in
     // Settings immediately takes effect in the log viewer on next visit.
+    // Storage can throw (private windows, blocked site data); the viewer then just uses the server level.
+    function storageGet(key) {
+        try { return localStorage.getItem(key); } catch (e) { return null; }
+    }
+    function storageSet(key, value) {
+        try { localStorage.setItem(key, value); } catch (e) { /* storage unavailable */ }
+    }
+    function storageRemove(key) {
+        try { localStorage.removeItem(key); } catch (e) { /* storage unavailable */ }
+    }
+
     async function resolveDefaultLevel() {
         const serverLevel = await fetchServerLevel();
-        const stored = localStorage.getItem(LS_KEY);
-        const storedFor = localStorage.getItem(LS_KEY + '_server');
+        const stored = storageGet(LS_KEY);
+        const storedFor = storageGet(LS_KEY + '_server');
         if (stored && storedFor === serverLevel && ['DEBUG','INFO','WARNING','ERROR'].includes(stored)) {
             return stored;
         }
-        localStorage.removeItem(LS_KEY);
-        localStorage.removeItem(LS_KEY + '_server');
+        storageRemove(LS_KEY);
+        storageRemove(LS_KEY + '_server');
         return serverLevel;
     }
 
@@ -305,13 +315,13 @@
         span.setAttribute('aria-expanded', 'false');
         if (data.mod && !Array.from(sourceSelect.options).some(option => option.value === data.mod)) sourceSelect.add(new Option(data.mod, data.mod));
 
-        const ts = '<span class="log-ts">' + esc(data.ts || '') + '</span>';
-        const lvl = '<span class="log-lvl">' + esc(level) + '</span>';
-        const mod = data.mod ? '<span class="log-mod">[' + esc(data.mod) + ']</span>' : '';
-        const msg = '<span class="log-msg">' + esc(data.msg || '') + '</span>';
-        const detail = '<span class="log-detail">' + esc(data.mod || '') + '.' + esc(data.func || '') + ':' + esc(String(data.line || '')) + '</span>';
+        const ts = '<span class="log-ts">' + escapeHtml(data.ts || '') + '</span>';
+        const lvl = '<span class="log-lvl">' + escapeHtml(level) + '</span>';
+        const mod = data.mod ? '<span class="log-mod">[' + escapeHtml(data.mod) + ']</span>' : '';
+        const msg = '<span class="log-msg">' + escapeHtml(data.msg || '') + '</span>';
+        const detail = '<span class="log-detail">' + escapeHtml(data.mod || '') + '.' + escapeHtml(data.func || '') + ':' + escapeHtml(String(data.line || '')) + '</span>';
 
-        span.innerHTML = ts + lvl + mod + msg + detail + '<span class="log-raw">' + esc(span.dataset.raw) + '</span>';
+        span.innerHTML = ts + lvl + mod + msg + detail + '<span class="log-raw">' + escapeHtml(span.dataset.raw) + '</span>';
         const toggleDetail = () => { span.classList.toggle('expanded'); span.setAttribute('aria-expanded', String(span.classList.contains('expanded'))); };
         span.addEventListener('click', toggleDetail);
         span.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleDetail(); } });
@@ -471,12 +481,6 @@
         countEl.textContent = '0 lines';
     }
 
-    function esc(s) {
-        const d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
-    }
-
     // --- Search ---
     function matchesSearch(raw, query) {
         if (!query) return true;
@@ -531,8 +535,8 @@
         btn.addEventListener('click', async () => {
             const level = btn.dataset.level;
             setLevelUI(level);
-            localStorage.setItem(LS_KEY, level);
-            localStorage.setItem(LS_KEY + '_server', serverLevelBadge.textContent.replace('Server: ', ''));
+            storageSet(LS_KEY, level);
+            storageSet(LS_KEY + '_server', serverLevel);
             if (socket && socket.connected) {
                 socket.emit('set_level', { level: level });
             }

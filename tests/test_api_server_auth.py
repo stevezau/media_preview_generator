@@ -2,49 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-
 from media_preview_generator.servers.emby_auth import EmbyAuthResult
 from media_preview_generator.servers.jellyfin_auth import (
     JellyfinAuthResult,
     QuickConnectInitiation,
 )
 from media_preview_generator.web.settings_manager import get_settings_manager
-
-
-@pytest.fixture
-def mock_auth_config(tmp_path, monkeypatch):
-    auth_file = str(tmp_path / "auth.json")
-    monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", auth_file)
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
-    from media_preview_generator.web.settings_manager import reset_settings_manager
-
-    reset_settings_manager()
-    from media_preview_generator.web.routes import clear_gpu_cache
-
-    clear_gpu_cache()
-    return str(tmp_path)
-
-
-@pytest.fixture
-def flask_app(tmp_path, mock_auth_config):
-    from media_preview_generator.web.app import create_app
-
-    app = create_app(config_dir=str(tmp_path))
-    app.config["TESTING"] = True
-    return app
-
-
-@pytest.fixture
-def client(flask_app):
-    return flask_app.test_client()
-
-
-@pytest.fixture
-def auth_headers():
-    from media_preview_generator.web.auth import get_auth_token
-
-    return {"X-Auth-Token": get_auth_token()}
 
 
 class TestEmbyPasswordAuth:
@@ -82,9 +45,7 @@ class TestEmbyPasswordAuth:
             headers=auth_headers,
             json={"url": "http://emby:8096", "username": "admin", "password": "wrong"},
         )
-        # Audit fix — assert the HTTP status too. The original test only
-        # checked the body shape; a regression that returned HTTP 500 with
-        # ``ok=False`` body would have passed silently.
+        # Status too, not just the body: a 500 with an ``ok=False`` body must fail.
         assert response.status_code == 200, (
             f"failed-creds path must return 200 with ok=False body (not 500); got {response.status_code}"
         )

@@ -68,7 +68,7 @@ class TestRetimeFactor:
 
 class TestOnlineTimeScale:
     def test_on_a_25_fps_file_film_rate_times_run_4_percent_late(self):
-        # Bones S07E01 (25 fps): IntroDB 324-354 s from a 23.976 release; the file's own theme plays 310-338 s.
+        # A 25 fps episode: IntroDB 324-354 s from a 23.976 release; the file's own theme plays 310-338 s.
         scale = speed.online_time_scale(25.0)
         assert scale == pytest.approx(FILM_FPS / PAL_FPS)
         assert (324 * scale, 354 * scale) == (pytest.approx(310.7, abs=0.1), pytest.approx(339.5, abs=0.1))

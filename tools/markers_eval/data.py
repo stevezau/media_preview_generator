@@ -1,4 +1,4 @@
-"""Loaders for the local-only truth sets under docs/design/intro-credits/evidence (git-ignored: real library paths)."""
+"""Loaders for the local-only truth sets in ``$MARKERS_EVAL_EVIDENCE`` (never committed: real library paths)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ EVIDENCE_ENV = "MARKERS_EVAL_EVIDENCE"
 
 
 def evidence_dir() -> Path:
-    """``$MARKERS_EVAL_EVIDENCE``, else this checkout's evidence folder."""
+    """``$MARKERS_EVAL_EVIDENCE``, else ``docs/design/intro-credits/evidence`` in this checkout."""
     env = os.environ.get(EVIDENCE_ENV)
     return Path(env) if env else Path(__file__).resolve().parents[2] / "docs/design/intro-credits/evidence"
 

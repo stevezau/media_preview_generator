@@ -41,6 +41,7 @@ from loguru import logger
 
 from ..bif_reader import read_bif_metadata, unpack_bif_to_jpegs
 from ..config import resolve_frame_interval
+from ..config.paths import expand_path_mapping_candidates
 from ..markers.external_ids import ids_from_path, is_extra
 from ..markers.fs import gone_from_disk
 from ..markers.missing import disk_roots, library_folders
@@ -159,13 +160,16 @@ _PUBLISHED_LIKE_STATUSES: frozenset[PublisherStatus] = frozenset(
 )
 
 
-# Video extensions used by the orphan-cleanup sweep to decide which
-# files in a folder are "live media" and which sidecars own them.
-# Matches the formats Plex / Emby / Jellyfin ingest by default — being
-# conservative here is critical: if a media file's extension isn't in
-# this set, the sweep treats its basename as absent and may delete
-# legitimate sidecars. Add new extensions only when the corresponding
-# server actually plays them as video items.
+# Extensions that are never a source video. The orphan sweep treats every other file in a folder as live
+# media, so a format missing from a video allow-list can never get its sidecars deleted.
+_NON_MEDIA_EXTS: frozenset[str] = frozenset(
+    {
+        ".bif", ".meta", ".tmp", ".part", ".nfo", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".srt", ".ass",
+        ".ssa", ".sub", ".idx", ".vtt", ".sup", ".smi", ".lrc", ".xml", ".txt", ".json", ".db",
+    }
+)  # fmt: skip
+
+# Video extensions the missing-source rebind scan looks at.
 _VIDEO_EXTS: frozenset[str] = frozenset(
     {".mkv", ".mp4", ".m4v", ".mov", ".avi", ".ts", ".m2ts", ".wmv", ".webm", ".mpg", ".mpeg"}
 )
@@ -311,9 +315,9 @@ def cleanup_orphaned_outputs(
        recursion.
 
     Safety:
-      * The neighbor sweep is **skipped** if the folder contains zero
-        recognised video files. A media folder that suddenly has no
-        ``.mkv`` / ``.mp4`` is most likely a temporarily-unmounted
+      * The neighbor sweep is **skipped** if the folder contains no
+        media files (``_list_media_files`` skips sidecars). A media folder
+        that suddenly has none is most likely a temporarily-unmounted
         volume; deleting all its sidecars would destroy work.
       * Each removal is logged at INFO with the source-missing
         explanation so an operator can audit what was deleted.
@@ -340,9 +344,17 @@ def cleanup_orphaned_outputs(
     # upgrades (Season 1 → Season 2) hit different directories. Always
     # work relative to the OLD path's folder for this pass.
     if deleted_paths:
-        for old_path in deleted_paths:
-            if not old_path:
-                continue
+        # Radarr/Sonarr report paths as they see them; try every locally mapped equivalent.
+        mappings = [
+            m for cfg in registry.configs() for m in (getattr(cfg, "path_mappings", None) or []) if isinstance(m, dict)
+        ]
+        candidate_old_paths = [
+            candidate
+            for deleted in deleted_paths
+            if deleted
+            for candidate in expand_path_mapping_candidates(deleted, mappings)
+        ]
+        for old_path in candidate_old_paths:
             # CRITICAL safety guard — skip ``old_path`` if a file still
             # exists at that exact path. Radarr's ``deletedFiles[]`` for
             # an in-place upgrade (same filename, new content) lists the
@@ -351,11 +363,7 @@ def cleanup_orphaned_outputs(
             # basename would wipe the previews we just published. The
             # canonical_path equality check below catches the most
             # common case (Radarr's payload echoes movieFile.path);
-            # the exists() check covers path-mapping edge cases. Same
-            # smoke test that exposed this: Gary (2026) 2026-05-09 — the
-            # cleanup deleted the live ``.trickplay/`` + ``.bif`` after
-            # publish completed, until the retry's regenerate restored
-            # them.
+            # the exists() check covers path-mapping edge cases.
             try:
                 if os.path.exists(old_path):
                     logger.debug(
@@ -387,7 +395,7 @@ def cleanup_orphaned_outputs(
             # adapter outputs there are protected).
             try:
                 live_basenames_for_targeted = {
-                    p.stem for p in _list_video_files(old_folder) if p.stem != candidate_basename
+                    p.stem for p in _list_media_files(old_folder) if p.stem != candidate_basename
                 }
             except OSError as exc:
                 logger.debug("Cleanup: cannot enumerate {} for targeted pass: {}", old_folder, exc)
@@ -420,7 +428,7 @@ def cleanup_orphaned_outputs(
 
     # --- Pass 2: neighbor sweep (safety net) ------------------------
     try:
-        live_videos = _list_video_files(media_dir)
+        live_videos = _list_media_files(media_dir)
     except OSError as exc:
         logger.debug("Cleanup: cannot enumerate {} for sweep: {}", media_dir, exc)
         return removed
@@ -430,7 +438,7 @@ def cleanup_orphaned_outputs(
         # Skip the sweep so we never wipe sidecars whose source disk
         # just isn't visible right now.
         logger.debug(
-            "Cleanup: skipping sweep of {} (no video files visible — possible mount issue)",
+            "Cleanup: skipping sweep of {} (no media files visible — possible mount issue)",
             media_dir,
         )
         return removed
@@ -467,11 +475,15 @@ def cleanup_orphaned_outputs(
     return removed
 
 
-def _list_video_files(folder: Path) -> list[Path]:
-    """Return regular video files directly under ``folder`` (no recursion)."""
+def _list_media_files(folder: Path) -> list[Path]:
+    """Return regular files directly under ``folder`` that could be a source video (no recursion).
+
+    Deny-list on purpose: a file with an unrecognised extension counts as media, so the
+    orphan sweep never deletes the sidecars of a video format it has not heard of.
+    """
     if not folder.exists():
         return []
-    return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _VIDEO_EXTS]
+    return [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() not in _NON_MEDIA_EXTS]
 
 
 def _orphan_source_basename(artifact: Path, adapter: OutputAdapter) -> str:
@@ -507,12 +519,7 @@ def _safe_remove(path: Path) -> bool:
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=False)
         else:
-            try:
-                path.unlink(missing_ok=True)
-            except TypeError:
-                # Python <3.8 fallback (we target >=3.10 but be safe).
-                if path.exists():
-                    path.unlink()
+            path.unlink(missing_ok=True)
         return True
     except FileNotFoundError:
         return True
@@ -1207,15 +1214,11 @@ def _server_needs_item_registration(server: MediaServer) -> bool:
        retry — the chain runs all 5 attempts and exhausts because the
        id will NEVER resolve.
 
-    Live regression (chain ``retry-3d1cfc6394a78c5a`` against one
-    episode, 2026-05-10 05:27 → 06:51): the lab's Emby server was
-    permanently ``PUBLISHED_PENDING_REGISTRATION`` because ``Emby`` is
-    in the resolver's no-lookup list. The path-based
-    ``/Library/Media/Updated`` partial scan fired correctly on every
-    attempt — the BIF was discoverable — but the chain still reported
-    "failed" after 70+ minutes of backoff because the
-    ``any(... PENDING_REGISTRATION ...)`` continuation condition was
-    permanently true.
+    Without this, an Emby server would stay ``PUBLISHED_PENDING_REGISTRATION``
+    forever (``Emby`` is in the resolver's no-lookup list): the path-based
+    ``/Library/Media/Updated`` partial scan works, but the
+    ``any(... PENDING_REGISTRATION ...)`` continuation condition would
+    keep every retry chain running until it exhausted.
 
     Plex reads BIFs from disk and does not require per-item registration.
     """
@@ -1371,9 +1374,7 @@ def _publish_one(
         #       NEVER resolve via the resolver's policy, so we MUST
         #       still fire trigger_refresh for the path-based nudge,
         #       but we MUST NOT classify the result as PENDING
-        #       (regression ``retry-3d1cfc6394a78c5a`` 2026-05-10:
-        #       chains exhausted at attempt 5 because the
-        #       continuation condition was permanently true).
+        #       (the retry chain would never be satisfied).
         #   (c) PENDING_REGISTRATION retry on a server where item_id
         #       CAN resolve (Jellyfin-with-plugin) — outputs
         #       are on disk but previous attempt's item_id was None
@@ -1500,7 +1501,6 @@ def _process_canonical_path_previews(
     config: Config,
     *,
     item_id_by_server: dict[str, str] | None = None,
-    bundle_metadata_by_server: dict[str, tuple[tuple[str, str], ...]] | None = None,
     gpu: str | None = None,
     gpu_device_path: str | None = None,
     progress_callback=None,
@@ -1656,7 +1656,7 @@ def _process_canonical_path_previews(
             )
             canonical_path = rebound_path
 
-            # Audit P3 — re-resolve publishers against the rebound path.
+            # Re-resolve publishers against the rebound path.
             # The original publisher list was built from the stale path
             # and may be missing servers whose libraries actually cover
             # the new disk (e.g. Plex library is rooted at /data_16tb3,
@@ -1748,7 +1748,6 @@ def _process_canonical_path_previews(
     # the probe path. Build one helper so the three call-sites below stay in
     # sync (a divergence here previously hid behind copy-pasted dataclass kwargs).
     probe_frame_interval = int(getattr(config, "thumbnail_interval", 10) or 10)
-    _bundle_meta_by_server = bundle_metadata_by_server or {}
     # Only bulk scans may take Plex's per-part hash (after a name + size match);
     # webhook and path-only dispatches hash the file, since Plex may not have rescanned it yet.
     trust_server_hash = not (
@@ -1756,7 +1755,6 @@ def _process_canonical_path_previews(
     )
 
     def _probe_bundle(server_id: str = "") -> BifBundle:
-        prefetched = _bundle_meta_by_server.get(server_id, ()) if server_id else ()
         return BifBundle(
             canonical_path=canonical_path,
             frame_dir=Path(os.devnull),  # unused by compute_output_paths
@@ -1765,7 +1763,6 @@ def _process_canonical_path_previews(
             width=320,
             height=180,
             frame_count=0,
-            prefetched_bundle_metadata=prefetched,
             source_fingerprint=source_fingerprint,
             trust_server_hash=trust_server_hash,
         )
@@ -1792,6 +1789,7 @@ def _process_canonical_path_previews(
         # generate, not sweeping the library. Label it accordingly.
         _phase("Checking existing previews…" if check_only else "Preparing to generate…")
         all_fresh = True
+        fresh_checks = []
         for server, adapter, item_id_hint in publishers:
             try:
                 item_id = resolve_item_id(server, item_id_hint)
@@ -1802,6 +1800,7 @@ def _process_canonical_path_previews(
             if not paths or not outputs_fresh_for_source(paths, canonical_path):
                 all_fresh = False
                 break
+            fresh_checks.append((server, adapter, item_id, paths))
         if all_fresh:
             if _source_changed():
                 return _source_changed_result()
@@ -1811,9 +1810,7 @@ def _process_canonical_path_previews(
                 canonical_path,
             )
             results = []
-            for server, adapter, item_id_hint in publishers:
-                item_id = resolve_item_id(server, item_id_hint)
-                paths = adapter.compute_output_paths(_probe_bundle(server.id), server, item_id)
+            for server, adapter, item_id, paths in fresh_checks:
                 # Mirror ``_publish_one``'s skip-if-exists branch
                 # exactly: if the server activates trickplay via per-item
                 # API and item_id still hasn't resolved, return
@@ -1823,10 +1820,6 @@ def _process_canonical_path_previews(
                 # for every publisher (registration never fires), and
                 # the retry chain would mark itself "complete" while
                 # Jellyfin still has no trickplay row for the file.
-                # Reproduced live 2026-05-09 against one episode —
-                # every retry attempt #1 short-circuited here
-                # without ever firing the plugin-bridge or
-                # /Items/{id}/Refresh registration calls.
                 needs_registration = item_id is None and _server_needs_item_registration(server)
                 # Always fire trigger_refresh for servers in the
                 # registration tier — when item_id IS now resolved
@@ -1874,27 +1867,25 @@ def _process_canonical_path_previews(
                             plex_refresh_requested=refresh_requested,
                         )
                     )
-            # Even on the all-fresh fast path, run the orphan cleanup —
-            # an upgrade webhook with deletedFiles[] arriving for a file
-            # whose new outputs are already on disk (e.g. duplicate-fire,
-            # or webhook arrived after a manual scan completed) MUST still
-            # remove the old release's sidecars. Without this hook the
-            # cleanup only ran on slow-path dispatches; the fast path
-            # silently lost the deletion signal.
-            try:
-                cleanup_orphaned_outputs(
-                    canonical_path,
-                    deleted_paths=deleted_paths,
-                    registry=registry,
-                    config=config,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Orphan cleanup raised an unexpected error on the all-fresh fast path "
-                    "for {}: {}. Sidecars from a previous release group may remain on disk.",
-                    canonical_path,
-                    exc,
-                )
+            # An upgrade webhook with deletedFiles[] can arrive for a file whose new outputs are
+            # already on disk (duplicate fire, or a scan finished first); it must still remove the
+            # old release's sidecars. Without a deletion signal, skip: the cleanup lists the media
+            # folder, which is a network round trip per already-fresh file during a scan.
+            if deleted_paths:
+                try:
+                    cleanup_orphaned_outputs(
+                        canonical_path,
+                        deleted_paths=deleted_paths,
+                        registry=registry,
+                        config=config,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Orphan cleanup raised an unexpected error on the all-fresh fast path "
+                        "for {}: {}. Sidecars from a previous release group may remain on disk.",
+                        canonical_path,
+                        exc,
+                    )
             # Aggregate status: when at least one publisher returned
             # PENDING_REGISTRATION (server hasn't indexed yet), treat
             # the dispatch as PUBLISHED so the retry-scheduling block
@@ -1985,7 +1976,9 @@ def _process_canonical_path_previews(
     # reading those JPGs to build its BIF, and we'd delete them mid-read.
     if use_frame_cache:
         generation_lock = cache.generation_lock(canonical_path)
-        generation_lock.acquire()
+        while not generation_lock.acquire(timeout=0.5):
+            if cancel_check and cancel_check():
+                raise CancellationError("Cancelled while waiting for another run on the same file")
 
     try:
         if generation_lock is not None and not regenerate:
@@ -2206,7 +2199,6 @@ def _process_canonical_path_previews(
                 width=gen_width,
                 height=180,
                 frame_count=frame_count,
-                prefetched_bundle_metadata=_bundle_meta_by_server.get(server.id, ()),
                 server_display_name=server.name,
                 source_fingerprint=source_fingerprint,
                 trust_server_hash=trust_server_hash,
@@ -2377,7 +2369,6 @@ def process_canonical_path(
     config: Config,
     *,
     item_id_by_server: dict[str, str] | None = None,
-    bundle_metadata_by_server: dict[str, tuple[tuple[str, str], ...]] | None = None,
     gpu: str | None = None,
     gpu_device_path: str | None = None,
     progress_callback=None,
@@ -2405,7 +2396,6 @@ def process_canonical_path(
     """
     options = dict(
         item_id_by_server=item_id_by_server,
-        bundle_metadata_by_server=bundle_metadata_by_server,
         gpu=gpu,
         gpu_device_path=gpu_device_path,
         progress_callback=progress_callback,

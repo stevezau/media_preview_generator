@@ -1,27 +1,11 @@
 """
-Tests for ETA-related behavior after removal of job-level ETA.
+Tests for the worker ETA (from ffmpeg) exposed via WorkerStatus.eta.
 
-Job-level ETA was removed; worker ETA (from ffmpeg) is still exposed via WorkerStatus.eta.
 This module tests the data model and formatting contract for worker ETA.
 """
 
-from media_preview_generator.web.jobs import JobProgress, WorkerStatus
+from media_preview_generator.web.jobs import WorkerStatus
 from media_preview_generator.web.routes.job_runner import _format_eta
-
-
-class TestJobProgressNoEta:
-    """JobProgress no longer has an eta field (job-level ETA removed)."""
-
-    def test_job_progress_default_has_no_eta(self):
-        p = JobProgress()
-        assert not hasattr(p, "eta")
-        d = p.to_dict()
-        assert "eta" not in d
-
-    def test_job_progress_to_dict_omits_eta(self):
-        p = JobProgress(percent=50.0, processed_items=10, total_items=20)
-        d = p.to_dict()
-        assert "eta" not in d
 
 
 class TestWorkerStatusEta:

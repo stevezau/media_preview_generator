@@ -29,16 +29,19 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 
 from loguru import logger
 
-from .ffmpeg_capabilities import _is_hwaccel_available
+from .ffmpeg_capabilities import _is_hwaccel_available, ffmpeg_binary
 
 _VULKAN_DEVICE_CACHE: str | None = None
 _VULKAN_DEVICE_PROBED: bool = False
 _VULKAN_ENV_OVERRIDES: dict = {}
 _VULKAN_DEBUG_BUFFER: str = ""
+# Concurrent first callers (FFmpeg workers on the DV5 path) must not each run the multi-second probe.
+_VULKAN_PROBE_LOCK = threading.Lock()
 
 # What users see without hardware Vulkan: the DV5 path skips libplacebo and
 # extracts frames with no tone mapping (see processing/generator.py), so the
@@ -270,7 +273,7 @@ def _run_vulkan_probe(
         )
         return None, ""
     cmd = [
-        "ffmpeg",
+        ffmpeg_binary(),
         "-loglevel",
         "debug",
         "-init_hw_device",
@@ -582,6 +585,43 @@ def _probe_vulkan_device() -> str | None:
     return device
 
 
+def _run_first_vulkan_probe() -> None:
+    """Run the probe, cache its result, and log the outcome exactly once. Caller holds ``_VULKAN_PROBE_LOCK``."""
+    global _VULKAN_DEVICE_CACHE, _VULKAN_DEVICE_PROBED
+    logger.debug("Vulkan device info: running first-time probe")
+    _VULKAN_DEVICE_CACHE = _probe_vulkan_device()
+    _VULKAN_DEVICE_PROBED = True
+
+    # First-time probe finished — log the outcome exactly once.
+    # Every subsequent call returns the cached dict silently. The
+    # three branches below are intentionally mutually exclusive:
+    #   - INFO on success (single line, user-friendly)
+    #   - WARNING on software fallback (action needed)
+    #   - INFO on no-Vulkan (informational, harmless)
+    probe_device = _VULKAN_DEVICE_CACHE
+    if probe_device is None:
+        logger.info(
+            "Vulkan not available in this container. {} {}",
+            DV5_NO_VULKAN_EFFECT,
+            DV5_NO_VULKAN_FIX,
+        )
+    elif _is_software_vulkan_device(probe_device):
+        logger.warning(
+            "Vulkan picked a software rasterizer ({}) instead of your GPU. {} {} "
+            "Settings → System in the dashboard has GPU-specific steps and a diagnostic bundle "
+            "you can attach to a GitHub issue.",
+            probe_device,
+            DV5_NO_VULKAN_EFFECT,
+            DV5_NO_VULKAN_FIX,
+        )
+    else:
+        via = ""
+        if _VULKAN_ENV_OVERRIDES:
+            override_keys = ", ".join(sorted(_VULKAN_ENV_OVERRIDES))
+            via = f" (via {override_keys} override)"
+        logger.info("Vulkan ready for Dolby Vision Profile 5 tone-mapping: {}{}", probe_device, via)
+
+
 def get_vulkan_device_info() -> VulkanProbeResult:
     """Return cached Vulkan device info for libplacebo diagnostics.
 
@@ -600,40 +640,10 @@ def get_vulkan_device_info() -> VulkanProbeResult:
             green-and-purple-tinted thumbnails).  Callers assemble the user-facing warning
             message themselves.
     """
-    global _VULKAN_DEVICE_CACHE, _VULKAN_DEVICE_PROBED
     if not _VULKAN_DEVICE_PROBED:
-        logger.debug("Vulkan device info: running first-time probe")
-        _VULKAN_DEVICE_CACHE = _probe_vulkan_device()
-        _VULKAN_DEVICE_PROBED = True
-
-        # First-time probe finished — log the outcome exactly once.
-        # Every subsequent call returns the cached dict silently. The
-        # three branches below are intentionally mutually exclusive:
-        #   - INFO on success (single line, user-friendly)
-        #   - WARNING on software fallback (action needed)
-        #   - INFO on no-Vulkan (informational, harmless)
-        probe_device = _VULKAN_DEVICE_CACHE
-        if probe_device is None:
-            logger.info(
-                "Vulkan not available in this container. {} {}",
-                DV5_NO_VULKAN_EFFECT,
-                DV5_NO_VULKAN_FIX,
-            )
-        elif _is_software_vulkan_device(probe_device):
-            logger.warning(
-                "Vulkan picked a software rasterizer ({}) instead of your GPU. {} {} "
-                "Settings → System in the dashboard has GPU-specific steps and a diagnostic bundle "
-                "you can attach to a GitHub issue.",
-                probe_device,
-                DV5_NO_VULKAN_EFFECT,
-                DV5_NO_VULKAN_FIX,
-            )
-        else:
-            via = ""
-            if _VULKAN_ENV_OVERRIDES:
-                override_keys = ", ".join(sorted(_VULKAN_ENV_OVERRIDES))
-                via = f" (via {override_keys} override)"
-            logger.info("Vulkan ready for Dolby Vision Profile 5 tone-mapping: {}{}", probe_device, via)
+        with _VULKAN_PROBE_LOCK:
+            if not _VULKAN_DEVICE_PROBED:
+                _run_first_vulkan_probe()
 
     device = _VULKAN_DEVICE_CACHE
     if device is None:

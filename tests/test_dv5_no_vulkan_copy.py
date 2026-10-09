@@ -42,6 +42,9 @@ def _capture_logs(level: str = "DEBUG") -> tuple[list[str], int]:
 
 @pytest.fixture(autouse=True)
 def _fresh_vulkan_cache():
+    from media_preview_generator.web.routes import api_vulkan
+
+    api_vulkan._loader_rejected_logged = False
     _reset_vulkan_device_cache()
     _gpu_cache["result"] = []
     yield
@@ -200,6 +203,7 @@ class TestDashboardWarning:
                 ),
             ):
                 _get_vulkan_info()
+                _get_vulkan_info()  # routine poll: must not log again
         finally:
             logger.remove(sink_id)
 

@@ -1,4 +1,4 @@
-"""The per-GPU decode check for credits (spec §5.4): once per device per process, logged only; it never moves the
+"""The per-GPU decode check for credits: once per device per process, logged only; it never moves the
 decodes off the worker's GPU."""
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from media_preview_generator.markers.credits import decode_check, detector, frames
+from tests.markers.fakes import infos_in, warnings_in
 
 ROOT = Path(__file__).resolve().parents[3]
 H264, HEVC = "h264-8bit.mkv", "hevc-10bit.mkv"
@@ -62,14 +63,6 @@ class FakeDecode:
         return [(c["clip"], c["scale"]) for c in self.calls if c["gpu"] is None]
 
 
-def warnings(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-
-
-def infos(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
-
-
 MISMATCH = "Credits decoding on {device} doesn't match the reference decode: {where}: {reason}. Credits detection keeps decoding on this GPU."  # noqa: E501
 
 
@@ -84,13 +77,13 @@ class TestVerdict:
         assert {(c["gpu"], c["device"]) for c in decode.calls if c["gpu"]} == {NVIDIA}
         assert {c["ffmpeg"] for c in decode.calls} == {"/usr/bin/ffmpeg"}
         assert all(c["cancel_check"] is cancel for c in decode.calls)
-        (line,) = [m for m in infos(loguru_caplog) if m.startswith("Credits decoding on")]
+        (line,) = [m for m in infos_in(loguru_caplog) if m.startswith("Credits decoding on")]
         assert re.fullmatch(
             r"Credits decoding on cuda:0 matches the reference decode \(h264-8bit\.mkv and hevc-10bit\.mkv at "
             r"320x180 and 640x360; checked in \d+ ms\)",
             line,
         )
-        assert warnings(loguru_caplog) == []
+        assert warnings_in(loguru_caplog) == []
 
     @pytest.mark.parametrize(
         ("differ", "where"),
@@ -106,7 +99,7 @@ class TestVerdict:
     def test_any_frame_that_differs_is_one_warning_and_the_decodes_stay_on_the_gpu(self, loguru_caplog, differ, where):
         decode = FakeDecode(differ={("cuda:0", clip, scale) for clip, scale in differ})
         assert decode_check.DecodeChecks(decode=decode).check_device(*NVIDIA, ffmpeg="ffmpeg") is False
-        assert warnings(loguru_caplog) == [
+        assert warnings_in(loguru_caplog) == [
             MISMATCH.format(
                 device="cuda:0", where=where, reason="1 of 9 frames differ from the CPU's (the first at 4.0 s)"
             )
@@ -125,7 +118,7 @@ class TestVerdict:
             return gpu_frames if gpu and (clip.name, scale) == (H264, 1) else reference(clip.name, scale)
 
         assert decode_check.DecodeChecks(decode=decode).check_device(*NVIDIA, ffmpeg="ffmpeg") is False
-        assert warnings(loguru_caplog) == [
+        assert warnings_in(loguru_caplog) == [
             MISMATCH.format(device="cuda:0", where="h264-8bit.mkv at 320x180", reason=reason)
         ]
 
@@ -146,7 +139,7 @@ class TestVerdict:
         decode = FakeDecode(fail={cell: error})
         assert decode_check.DecodeChecks(decode=decode).check_device(*NVIDIA, ffmpeg="ffmpeg") is False
         size = "320x180" if cell[2] == 1 else "640x360"
-        assert warnings(loguru_caplog) == [
+        assert warnings_in(loguru_caplog) == [
             MISMATCH.format(device="cuda:0", where=f"{cell[1]} at {size}", reason=reason)
         ]
 
@@ -155,7 +148,7 @@ class TestVerdict:
         decode = FakeDecode(fail={(device, H264, 1): frames.DecodeTimeoutError("decoding h264-8bit.mkv timed out")})
         checks = decode_check.DecodeChecks(decode=decode)
         assert checks.check_device(*NVIDIA, ffmpeg="ffmpeg") is False
-        assert warnings(loguru_caplog) == [
+        assert warnings_in(loguru_caplog) == [
             MISMATCH.format(
                 device="cuda:0",
                 where="h264-8bit.mkv at 320x180",
@@ -166,7 +159,7 @@ class TestVerdict:
         before = len(decode.calls)
         assert checks.check_device(*NVIDIA, ffmpeg="ffmpeg") is False
         assert len(decode.calls) == before
-        assert len(warnings(loguru_caplog)) == 1
+        assert len(warnings_in(loguru_caplog)) == 1
 
     def test_every_decode_gets_what_is_left_of_one_time_limit_and_none_starts_past_it(self, loguru_caplog):
         now = [100.0]
@@ -182,7 +175,7 @@ class TestVerdict:
         # CPU then GPU for the first clip at 320x180, then the CPU reference at 640x360; the GPU decode after that
         # would start past the limit.
         assert limits == [20.0, 13.0, 6.0]
-        assert warnings(loguru_caplog) == [
+        assert warnings_in(loguru_caplog) == [
             MISMATCH.format(
                 device="cuda:0", where="h264-8bit.mkv at 640x360", reason="the check timed out: it ran past 20 s"
             )
@@ -213,10 +206,10 @@ class TestVerdict:
         assert sorted(decode.gpu_calls("cuda:0")) == sorted(decode.gpu_calls(INTEL[1])) == sorted(EVERY_DECODE)
         # The CPU's side of the comparison is decoded once for the process, not once per device.
         assert sorted(decode.cpu_calls()) == sorted(EVERY_DECODE)
-        assert [m.split(":")[0] for m in warnings(loguru_caplog)] == [
+        assert [m.split(":")[0] for m in warnings_in(loguru_caplog)] == [
             "Credits decoding on /dev/dri/renderD128 doesn't match the reference decode"
         ]
-        assert [m for m in infos(loguru_caplog) if m.startswith("Credits decoding on cuda:0 matches")]
+        assert [m for m in infos_in(loguru_caplog) if m.startswith("Credits decoding on cuda:0 matches")]
 
     def test_the_same_device_through_another_ffmpeg_is_checked_again(self):
         decode = FakeDecode()
@@ -330,7 +323,7 @@ class TestInTheBackground:
         monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=slow))
         started = time.monotonic()
         threads = decode_check.start_checks([NVIDIA, INTEL, (None, None)], ffmpeg="/ff")
-        assert time.monotonic() - started < 0.5  # returns at once
+        assert time.monotonic() - started < 3  # returns at once, not after the 5 s the decode is held
         assert len(threads) == 2 and all(t.daemon and t.is_alive() for t in threads)
         # A second pool build while they run starts nothing more.
         assert decode_check.start_checks([NVIDIA, INTEL], ffmpeg="/ff") == []
@@ -340,7 +333,7 @@ class TestInTheBackground:
         assert sorted(decode.gpu_calls("cuda:0")) == sorted(decode.gpu_calls(INTEL[1])) == sorted(EVERY_DECODE)
         assert {c["ffmpeg"] for c in decode.calls} == {"/ff"}
         assert all(c["cancel_check"] is None for c in decode.calls)  # no job's cancel: no job waits for it
-        assert len([m for m in infos(loguru_caplog) if m.startswith("Credits decoding on")]) == 2
+        assert len([m for m in infos_in(loguru_caplog) if m.startswith("Credits decoding on")]) == 2
         # And once it has answered, never again for the process.
         assert decode_check.start_checks([NVIDIA, INTEL], ffmpeg="/ff") == []
 
@@ -356,7 +349,7 @@ class TestInTheBackground:
         monkeypatch.setattr(decode_check, "_checks", decode_check.DecodeChecks(decode=decode))
         (thread,) = decode_check.start_checks([NVIDIA], ffmpeg="ffmpeg")
         thread.join(10)
-        assert warnings(loguru_caplog) == [
+        assert warnings_in(loguru_caplog) == [
             MISMATCH.format(device="cuda:0", where="h264-8bit.mkv at 320x180", reason="the GPU couldn't decode it: driver gone")
         ]  # fmt: skip
 

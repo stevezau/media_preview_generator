@@ -62,7 +62,7 @@
                 <div id="systemWorkerGroups"></div>
             </section>
 
-            {# The build version is in the navbar; this row only appears when there is an update note to show. #}
+            {# The build version is also in the navbar; this row repeats it and shows the update badge. #}
             <div class="dash-foot system-version-row">
                 <i class="bi bi-box-seam" aria-hidden="true"></i>
                 <span>Version</span>
@@ -155,10 +155,6 @@
 
 
 
-<!-- (Pending-webhooks indicator moved into the Job Queue card header
-     below — see ``pendingWebhooksChip``. Was previously a full-width
-     yellow banner; per-row countdown + Fire-now lives in the queue
-     itself now post-issue-237 UX consolidation.) -->
 
 <!-- Workers: occupancy meter, global Pause/Resume, the only Manage groups entry, then one column per group. -->
 <div id="dashboard-workers" class="dash-block">
@@ -168,7 +164,7 @@
                 <button type="button" class="info-icon ms-2" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
                         title="How worker groups behave" aria-label="How worker groups behave"
                         data-explain-title="How worker groups behave"
-                        data-explain-html="&lt;p&gt;A group holds one or more devices, each with its own worker count; use the + and − on a device row to change it. Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews. The global job limit still applies.&lt;/p&gt;">
+                        data-explain-html="&lt;p&gt;A group holds one or more devices, each with its own worker count; use the + and − on a device row to change it. Worker counts set simultaneous tasks, not CPU cores. Group hours and reduced capacity let current files finish; a global processing pause freezes work. GPU jobs may still use CPU stages or fallback. Chapter thumbnails are part of Video previews.&lt;/p&gt;">
                     <i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
             <span class="flex-fill"></span>
             <span class="dash-occupancy" title="Workers busy right now">
@@ -345,7 +341,6 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/newmanual_jobs.js') }}"></script>
-<script src="{{ url_for('static', filename='js/plex-auth.js') }}"></script>
 <script>
     // Initialize dashboard on load
     document.addEventListener('DOMContentLoaded', function() {

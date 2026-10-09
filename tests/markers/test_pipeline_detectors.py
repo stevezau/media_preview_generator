@@ -17,9 +17,9 @@ from media_preview_generator.markers.pipeline import DetectorUnavailableError, L
 from media_preview_generator.markers.probe import Chapter
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.servers.base import ServerType
-from tests.markers import test_pipeline
+from tests.markers import pipeline_helpers
 from tests.markers.fakes import ready_publisher, server_config
-from tests.markers.test_pipeline import (
+from tests.markers.pipeline_helpers import (
     DUR,
     INTRO_ONLY,
     TIDB_INTRO,
@@ -31,9 +31,8 @@ from tests.markers.test_pipeline import (
     _run,
 )
 
-# test_pipeline's fixtures, shared by name (an import of them reads as unused to the linter).
-media = test_pipeline.media
-store = test_pipeline.store
+# pipeline_helpers fixtures, shared by name (an import of them reads as unused to the linter).
+media = pipeline_helpers.media
 
 T = MarkerType
 AUDIO_INTRO = Candidate(T.INTRO, 126_000, 158_000, Source.SEASON_AUDIO, 1.0, "2/2")
@@ -262,7 +261,7 @@ class TestWhereItRuns:
         cancel = MagicMock(return_value=False)
         ctx = _ctx(store, reg, detectors=(_spec(detector, needs_worker=needs),), settings_raw=INTRO_ONLY)
         out, _ = _run(ctx, media, _pubs(), cancel_check=cancel)
-        # Season audio decides an intro alone (owner 2026-09-24): the file is done on the checking thread.
+        # Season audio decides an intro alone: the file is done on the checking thread.
         assert out is not None and out.outcome_key == FileOutcome.PUBLISHED.value
         kwargs = detector.call_args.kwargs
         assert (kwargs["gpu"], kwargs["gpu_device_path"], kwargs["pause_check"]) == (None, None, None)
@@ -337,8 +336,7 @@ class TestWhatTheWorkerHandsTheDetector:
 
     # Only a worker waits: the checking stage hands a file another job runs to a worker at once
     # (test_pipeline's test_the_checking_stage_hands_a_file_another_job_runs_to_a_worker_without_waiting).
-    @pytest.mark.parametrize("stage", ["process"])
-    def test_a_cancel_ends_the_wait_for_another_jobs_run_of_the_file(self, store, media, stage):
+    def test_a_cancel_ends_the_wait_for_another_jobs_run_of_the_file(self, store, media):
         # Another job's run holds the file; one frozen by its schedule's stop time holds it until the next start.
         from media_preview_generator.markers import pipeline
 
@@ -358,7 +356,7 @@ class TestWhatTheWorkerHandsTheDetector:
             assert holding.wait(5)
             threading.Timer(0.2, cancelled.set).start()
             started = time.monotonic()
-            out, _ = _run(ctx, media, _pubs(), stage=stage, cancel_check=cancelled.is_set)
+            out, _ = _run(ctx, media, _pubs(), stage="process", cancel_check=cancelled.is_set)
             assert time.monotonic() - started < 2
         finally:
             release.set()
@@ -464,69 +462,6 @@ class TestForcedRefresh:
         assert detector.call_count == 2
 
 
-class TestFollowups:
-    def test_requests_are_merged_sorted_and_taken_once(self, store, media):
-        ctx = _ctx(store, _registry(media, ServerType.PLEX))
-        ctx.request_followups(["/tv/b.mkv", "/tv/a.mkv"])
-        ctx.request_followups(["/tv/a.mkv"])
-        assert ctx.take_followups() == ["/tv/a.mkv", "/tv/b.mkv"]
-        assert ctx.take_followups() == []
-
-    def test_a_detector_can_request_followups_through_its_context(self, store, media):
-        reg = _registry(media, ServerType.PLEX)
-
-        def detect(rec, *, ctx, **_kw):
-            ctx.request_followups(["/tv/sibling.mkv"])
-            return []
-
-        ctx = _ctx(store, reg, detectors=(_spec(detect),), settings_raw=INTRO_ONLY)
-        _run(ctx, media, _pubs(), stage="process")
-        assert ctx.take_followups() == ["/tv/sibling.mkv"]
-
-    def test_the_followups_hook_is_asked_before_the_worker_handoff(self, store, media):
-        reg = _registry(media, ServerType.PLEX)
-        followups = MagicMock(return_value=["/tv/sibling.mkv"])
-        ctx = _ctx(
-            store, reg, detectors=(_spec(MagicMock(return_value=[]), followups=followups),), settings_raw=INTRO_ONLY
-        )
-        assert _run(ctx, media, _pubs())[0] is None  # handed to a worker
-        assert ctx.take_followups() == ["/tv/sibling.mkv"]
-        rec, passed_ctx = followups.call_args.args
-        assert rec.canonical_path == media and passed_ctx is ctx
-
-    def test_the_followups_hook_is_asked_when_every_type_is_decided(self, store, media):
-        reg = _registry(media, ServerType.PLEX)
-        followups = MagicMock(return_value=["/tv/sibling.mkv"])
-        detector = MagicMock(return_value=[AUDIO_INTRO])
-        clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
-        spec = _spec(detector, followups=followups)
-        ctx = _ctx(store, reg, detectors=(spec,), settings_raw=INTRO_ONLY, clients=clients)
-        _run(ctx, media, _pubs(), stage="process")
-        ctx.take_followups()
-        followups.reset_mock()
-        assert _run(ctx, media, _pubs())[0].outcome_key == FileOutcome.UP_TO_DATE.value
-        assert followups.call_count == 1 and ctx.take_followups() == ["/tv/sibling.mkv"]
-        assert detector.call_count == 1
-
-    def test_the_followups_hook_is_not_asked_for_a_file_without_the_detectors_types(self, store, tmp_path):
-        folder = tmp_path / "media" / "movies" / "Toy Story (1995) {tmdb-862}"
-        folder.mkdir(parents=True)
-        path = str(folder / "Toy Story (1995).mkv")
-        open(path, "wb").close()
-        followups = MagicMock(return_value=["/tv/sibling.mkv"])
-        ctx = _ctx(store, _registry(path, ServerType.PLEX), detectors=(_spec(MagicMock(), followups=followups),))
-        _run(ctx, path, _pubs())
-        followups.assert_not_called()
-
-    def test_the_followups_hook_is_not_asked_while_its_source_is_off(self, store, media):
-        followups = MagicMock(return_value=["/tv/sibling.mkv"])
-        raw = {**INTRO_ONLY, "sources": [{"id": "season_audio", "enabled": False}]}
-        spec = _spec(MagicMock(return_value=[]), followups=followups)
-        ctx = _ctx(store, _registry(media, ServerType.PLEX), detectors=(spec,), settings_raw=raw)
-        assert _run(ctx, media, _pubs())[0] is not None
-        followups.assert_not_called()
-
-
 class TestRunMemo:
     def test_a_run_memo_is_kept_for_the_run_of_the_file_on_its_own_thread(self, store, media):
         ctx = _ctx(store, _registry(media, ServerType.PLEX))
@@ -567,7 +502,7 @@ class TestAnotherJobsRunOfTheFile:
             holder = _ctx(store, reg, detectors=(_spec(blocking_detector),), settings_raw=INTRO_ONLY)
             holder.freeze_check = lambda: frozen
             thread = threading.Thread(
-                target=pipeline.process_item, args=(test_pipeline._item(media),), kwargs={"ctx": holder}, daemon=True
+                target=pipeline.process_item, args=(pipeline_helpers._item(media),), kwargs={"ctx": holder}, daemon=True
             )
             thread.start()
             threads.append(thread)
@@ -576,7 +511,7 @@ class TestAnotherJobsRunOfTheFile:
         def wait_for_it(waiter, **kwargs) -> tuple[list, threading.Thread]:
             out: list = []
             thread = threading.Thread(
-                target=lambda: out.append(pipeline.process_item(test_pipeline._item(media), ctx=waiter, **kwargs)),
+                target=lambda: out.append(pipeline.process_item(pipeline_helpers._item(media), ctx=waiter, **kwargs)),
                 daemon=True,
             )
             thread.start()
@@ -588,7 +523,7 @@ class TestAnotherJobsRunOfTheFile:
             return entry is not None and entry[1] >= 2  # the holder and the waiter
 
         with (
-            patch.object(pipeline, "probe_media", return_value=test_pipeline._probe()),
+            patch.object(pipeline, "probe_media", return_value=pipeline_helpers._probe()),
             patch.object(pipeline, "publisher_for", side_effect=lambda server, cfg, **kw: ready_publisher()),
         ):
             yield SimpleNamespace(reg=reg, hold=hold, wait_for_it=wait_for_it, release=release, waiting_now=waiting_now)
@@ -655,7 +590,7 @@ class TestAnotherJobsRunOfTheFile:
 
         scene.hold(frozen=True)
         waiter = self._waiter(store, scene, retries=True, cap=1)
-        assert pipeline.check_item(test_pipeline._item(media), ctx=waiter) is None
+        assert pipeline.check_item(pipeline_helpers._item(media), ctx=waiter) is None
         assert waiter.busy_promised() == set()
         assert waiter.may_promise_busy_retry("/media/other.mkv")
 
@@ -697,7 +632,7 @@ class TestAnotherJobsRunOfTheFile:
 
 
 class TestSeasonAudioChecksAnIntroChapter:
-    """Spec §5.5 rule 3 (2026-09-27): an intro chapter an online answer ends inside waits for season audio in the same
+    """An intro chapter an online answer ends inside waits for season audio in the same
     run; season audio and the online answer ending the intro inside the chapter overrule it, and season audio that
     failed on the file or found nothing leaves the chapter deciding, without being asked again for it."""
 

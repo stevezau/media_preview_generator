@@ -231,7 +231,7 @@ function escapeHtml(str) {
  * Allows the formatting tags the server uses in notifications (<br>, <strong>,
  * <em>, <code>, <span>, <div>, <ul>/<li>, <a>) and strips everything else —
  * including every event handler attribute (`onclick="..."`), inline-script
- * tags, <iframe>, and any `javascript:` URI. Defence in depth: the server
+ * tags, <iframe>, and any link scheme other than http, https and mailto. Defence in depth: the server
  * already escapes interpolated values via html.escape(), but a client-side
  * whitelist keeps the notification channel safe even if a future caller
  * forgets to escape something.
@@ -284,8 +284,10 @@ function sanitizeNotificationHtml(html) {
                 continue;
             }
             if (attr.name === 'href') {
-                var v = attr.value.trim().toLowerCase();
-                if (v.indexOf('javascript:') === 0 || v.indexOf('data:') === 0) {
+                // Browsers ignore tabs/newlines inside a scheme ("java&#9;script:"), so strip them before checking.
+                var v = attr.value.replace(/[\u0000-\u0020]/g, '').toLowerCase();
+                var hasScheme = /^[a-z][a-z0-9+.-]*:/.test(v);
+                if (hasScheme && !/^(https?|mailto):/.test(v)) {
                     el.removeAttribute('href');
                 }
             }
@@ -306,14 +308,9 @@ function sanitizeNotificationHtml(html) {
 }
 
 var _libraryTypeLabels = {movie: 'Movies', show: 'TV Shows', sports: 'Sports', other_videos: 'Other Videos'};
-var _libraryTypeIcons = {movie: 'bi-film', show: 'bi-tv', sports: 'bi-trophy', other_videos: 'bi-camera-video'};
 
 function libraryTypeLabel(lib) {
     return _libraryTypeLabels[lib.display_type] || _libraryTypeLabels[lib.type] || lib.type;
-}
-
-function libraryTypeIcon(lib) {
-    return _libraryTypeIcons[lib.display_type] || _libraryTypeIcons[lib.type] || 'bi-folder';
 }
 
 async function copyToClipboard(text, successMessage = 'Copied to clipboard', errorMessage = 'Failed to copy to clipboard') {
@@ -411,11 +408,17 @@ function initDashboard() {
 
     // Set up auto-refresh
     // System status includes cached GPU detection — poll less frequently
-    setInterval(refreshStatus, 120000);
-    setInterval(loadJobStats, 10000);
-    setInterval(loadJobs, 5000);
-    setInterval(loadWorkerStatuses, 1000);
-    setInterval(loadPendingWebhooks, 3000);
+    startPoller(refreshStatus, 120000);
+    startPoller(loadJobStats, 10000);
+    startPoller(loadJobs, 5000);
+    startPoller(loadWorkerStatuses, 1000);
+    startPoller(loadPendingWebhooks, 3000);
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) {
+            loadJobs();
+            loadWorkerStatuses();
+        }
+    });
     // tickPendingWebhookCountdowns retired with the issue-237 chip:
     // the chip shows count only, no per-batch live countdown. Per-row
     // countdowns tick on _updateElapsedTimers (in lockstep with the
@@ -436,6 +439,20 @@ function initDashboard() {
     });
 }
 
+// Polls fn every ms, skipping ticks while the tab is hidden or the previous call is still running.
+function startPoller(fn, ms) {
+    let running = false;
+    setInterval(async function () {
+        if (document.hidden || running) return;
+        running = true;
+        try {
+            await fn();
+        } finally {
+            running = false;
+        }
+    }, ms);
+}
+
 // SocketIO Connection
 function connectSocket() {
     // Polling-only — matches allow_upgrades=False on the server. WebSocket
@@ -450,15 +467,10 @@ function connectSocket() {
     });
 
     socket.on('connect', function() {
-        console.log('Connected to SocketIO');
         // Reload data on reconnect to get current state
         loadJobs();
         loadWorkerStatuses();
         loadJobStats();
-    });
-
-    socket.on('disconnect', function() {
-        console.log('Disconnected from SocketIO');
     });
 
     socket.on('connect_error', function(error) {
@@ -467,7 +479,6 @@ function connectSocket() {
 
     // Job events
     socket.on('job_created', function(job) {
-        console.log('Job created:', job);
         loadJobs();
         loadJobStats();
         if (!_isUserVisibleJob(job)) return;
@@ -479,7 +490,6 @@ function connectSocket() {
     });
 
     socket.on('job_started', function(job) {
-        console.log('Job started:', job);
         loadJobs();
         loadJobStats();
     });
@@ -498,7 +508,6 @@ function connectSocket() {
     });
 
     socket.on('job_completed', function(job) {
-        console.log('Job completed:', job);
         loadJobs();
         loadJobStats();
         loadWorkerStatuses();
@@ -514,7 +523,6 @@ function connectSocket() {
     });
 
     socket.on('job_failed', function(job) {
-        console.log('Job failed:', job);
         loadJobs();
         loadJobStats();
         loadWorkerStatuses();
@@ -525,7 +533,6 @@ function connectSocket() {
     });
 
     socket.on('job_cancelled', function(job) {
-        console.log('Job cancelled:', job);
         loadJobs();
         loadJobStats();
         loadWorkerStatuses();
@@ -535,13 +542,11 @@ function connectSocket() {
     });
 
     socket.on('job_paused', function(data) {
-        console.log('Job paused:', data);
         loadJobs();
         loadWorkerStatuses();
     });
 
     socket.on('job_resumed', function(data) {
-        console.log('Job resumed:', data);
         loadJobs();
         loadWorkerStatuses();
     });
@@ -602,10 +607,7 @@ async function apiGet(url) {
 async function apiPost(url, data = {}) {
     const response = await fetch(url, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': getCsrfToken()
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     });
     if (!response.ok) {
@@ -616,8 +618,7 @@ async function apiPost(url, data = {}) {
 
 async function apiDelete(url) {
     const response = await fetch(url, {
-        method: 'DELETE',
-        headers: { 'X-CSRFToken': getCsrfToken() }
+        method: 'DELETE'
     });
     if (!response.ok) {
         throw new Error(await _extractApiError(response));
@@ -628,10 +629,7 @@ async function apiDelete(url) {
 async function apiPut(url, data = {}) {
     const response = await fetch(url, {
         method: 'PUT',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': getCsrfToken()
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     });
     if (!response.ok) {
@@ -845,7 +843,7 @@ async function updateMediaServersStatus() {
         const dotClass = _MEDIA_SERVER_DOT_CLASS[s.status] ?? 'warn';
         const stateText = s.error || badge.label;
         // URL is reference info, not the primary anchor — mono and faint under the name.
-        const url = s.url ? `<div class="dash-server-host text-truncate" title="${escapeHtmlAttr(s.url)}">${escapeHtmlText(s.url)}</div>` : '';
+        const url = s.url ? `<div class="dash-server-host text-truncate" title="${escapeHtml(s.url)}">${escapeHtml(s.url)}</div>` : '';
         // Prefer the vendor SVG logo; fall back to the Bootstrap icon when
         // the server type is unknown (defensive — should never happen for
         // configured servers).
@@ -856,24 +854,15 @@ async function updateMediaServersStatus() {
             <div class="dash-server${failed ? ' is-failed' : ''}">
                 <span class="dash-server-logo">${logo}</span>
                 <div class="dash-server-text">
-                    <div class="dash-server-name text-truncate">${escapeHtmlText(s.name || typeLabel || 'Server')}</div>
+                    <div class="dash-server-name text-truncate">${escapeHtml(s.name || typeLabel || 'Server')}</div>
                     ${url}
                 </div>
-                <span class="dot ${dotClass}" role="img" aria-label="${escapeHtmlAttr(stateText)}" title="${escapeHtmlAttr(stateText)}"></span>
+                <span class="dot ${dotClass}" role="img" aria-label="${escapeHtml(stateText)}" title="${escapeHtml(stateText)}"></span>
             </div>
         `;
     }).join('');
 
     container.innerHTML = `<div class="dash-servers">${rows}</div>`;
-}
-
-// Kept for their callers: escapeHtml itself is safe in both places now.
-function escapeHtmlText(str) {
-    return escapeHtml(str);
-}
-
-function escapeHtmlAttr(str) {
-    return escapeHtml(str);
 }
 
 async function loadLibraries() {
@@ -992,14 +981,14 @@ async function _loadJobsPage(request) {
     } catch (error) {
         if (sequence !== _jobsLoadSequence) return;
         console.error('Failed to load jobs:', error);
-        // Show empty state instead of error - jobs list may just be unavailable temporarily
+        // A transient failure after a good load keeps the rows already on screen; the next poll retries.
         const tbody = document.getElementById('jobQueue');
-        if (tbody && !error.message.includes('Authentication')) {
-            // Show a less alarming message
+        if (tbody && !jobsLoadedOnce && !error.message.includes('Authentication')) {
             tbody.innerHTML = `
                 <tr>
                     <td colspan="8" class="text-center text-muted py-4">
-                        <i class="bi bi-hourglass-split me-2"></i>Loading job queue...
+                        <i class="bi bi-exclamation-triangle me-2"></i>Could not load the job queue.
+                        <button type="button" class="btn btn-sm btn-outline-secondary ms-2" onclick="loadJobs({force: true})">Retry</button>
                     </td>
                 </tr>
             `;
@@ -1551,6 +1540,12 @@ async function onScheduleServerChange() {
 // Phase H7: render the Schedules modal library checkbox group. Same group-by-
 // server pattern as the New Job modal (H6). When pinned to one server, render
 // flat. Each checkbox is disabled while "All Libraries" is checked.
+// Library ids repeat across servers (Plex numbers from "1" on each), so DOM ids carry the server too.
+function _libraryDomId(prefix, lib) {
+    const server = String(lib.server_id || '').replace(/[^A-Za-z0-9_-]/g, '_');
+    return escapeHtml(`${prefix}_${server ? server + '_' : ''}${lib.id}`);
+}
+
 function _renderScheduleLibraryList(libs, filterServerId) {
     const listEl = document.getElementById('scheduleLibraryList');
     if (!listEl) return;
@@ -1563,10 +1558,10 @@ function _renderScheduleLibraryList(libs, filterServerId) {
     const renderRow = (lib, indent) => `
         <div class="form-check ov-lib">
             <input class="form-check-input schedule-library-checkbox" type="checkbox"
-                   value="${lib.id}" id="schedLib_${lib.id}" ${allDisabled ? 'disabled' : ''}
+                   value="${lib.id}" id="${_libraryDomId('schedLib', lib)}" ${allDisabled ? 'disabled' : ''}
                    data-library-kind="${escapeHtml(lib.type || lib.kind || '')}"
                    onchange="MediaScanFilters.refresh('schedule')">
-            <label class="form-check-label" for="schedLib_${lib.id}">
+            <label class="form-check-label" for="${_libraryDomId('schedLib', lib)}">
                 ${escapeHtml(lib.name)} <span class="ov-lib-tag">${libraryTypeLabel(lib)}</span>
             </label>
         </div>
@@ -1745,7 +1740,7 @@ function _serverBadge(item) {
         // colour palette stays as the colour-blind-friendly fallback.
         const logoTag = _vendorLogo(stype, 12);
         const logo = logoTag ? logoTag.replace('margin-right: 4px;', 'margin-right: 3px; vertical-align: -2px;') : '';
-        return ` <span class="badge ${cls} ms-1" title="${escapeHtmlAttr(tooltip)}">${logo}${escapeHtmlText(label)}</span>`;
+        return ` <span class="badge ${cls} ms-1" title="${escapeHtml(tooltip)}">${logo}${escapeHtml(label)}</span>`;
     }
     // Fallback for non-server-pinned jobs: surface the trigger source (Sonarr,
     // Radarr, manual scan, schedule etc.) so the user can tell "what server it
@@ -1771,11 +1766,11 @@ function _serverBadge(item) {
     };
     if (src && triggerPalette[src]) {
         const t = triggerPalette[src];
-        return ` <span class="badge ${t.cls} ms-1" title="Triggered by ${escapeHtmlAttr(t.label)}">${escapeHtmlText(t.label)}</span>`;
+        return ` <span class="badge ${t.cls} ms-1" title="Triggered by ${escapeHtml(t.label)}">${escapeHtml(t.label)}</span>`;
     }
     if (src) {
         // Unknown source — render as-is so the user still sees something
-        return ` <span class="badge bg-secondary ms-1" title="Trigger: ${escapeHtmlAttr(src)}">${escapeHtmlText(src)}</span>`;
+        return ` <span class="badge bg-secondary ms-1" title="Trigger: ${escapeHtml(src)}">${escapeHtml(src)}</span>`;
     }
     return '';
 }
@@ -1925,7 +1920,7 @@ function _jobTypeTileHtml(job) {
         : ({intro_credits: 'bi-skip-forward', loudness: 'bi-soundwave'})[job.kind] || 'bi-film';
     const kind = JOB_KIND_LABELS[job.kind] || JOB_KIND_LABELS[JOB_KIND_PREVIEWS];
     const server = job.server_name ? ` · ${job.server_name}` : '';
-    return `<span class="tico ${failed ? 'bad' : tone}" title="${escapeHtmlAttr(kind + server)}" aria-hidden="true"><i class="bi ${icon}"></i></span>`;
+    return `<span class="tico ${failed ? 'bad' : tone}" title="${escapeHtml(kind + server)}" aria-hidden="true"><i class="bi ${icon}"></i></span>`;
 }
 
 // 'own' = paused on its own (it has handed its job slot back), 'all' = held by Pause all (keeps its slot), '' = neither.
@@ -1951,7 +1946,7 @@ function _libraryTagHtml(job, title) {
     if (!names.length || (names.length === 1 && names[0] === title)) return '';
     const label = names.length <= 2 ? names.join(' · ') : `${names.length} libraries`;
     const tip = (names.length === 1 ? 'Library: ' : 'Libraries: ') + names.join(', ');
-    return `<span class="badge border text-body-secondary fw-normal job-library-tag" title="${escapeHtmlAttr(tip)}">`
+    return `<span class="badge border text-body-secondary fw-normal job-library-tag" title="${escapeHtml(tip)}">`
         + `<i class="bi bi-collection me-1" aria-hidden="true"></i>${escapeHtml(label)}</span>`;
 }
 
@@ -1963,7 +1958,7 @@ function _versionRerunInfoHtml(job) {
     const tip = 'After an update, files whose intro or credits were found by an older version are checked again, '
         + (size > 0 ? `${size} at a time` : 'a batch at a time') + ', at low priority.';
     return `<button type="button" class="info-icon align-baseline job-rerun-info" tabindex="0" data-bs-toggle="tooltip" `
-        + `data-bs-placement="top" title="${escapeHtmlAttr(tip)}" aria-label="${escapeHtmlAttr(tip)}">`
+        + `data-bs-placement="top" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}">`
         + '<i class="bi bi-info-circle"></i></button>';
 }
 
@@ -2004,7 +1999,7 @@ function _queueFileRows(files) {
         const basename = String(file.name || path.split(/[\\/]/).pop() || file.title || 'File');
         const title = String(file.title || '');
         const inspector = /\.(mkv|mp4|avi|m4v|ts|wmv|mov|flv|webm)$/i.test(path) && (/^\//.test(path) || /^[a-z]:[\\/]/i.test(path) || /^\\\\/.test(path))
-            ? `<a class="ibtn queue-inspector" href="/inspector?path=${escapeHtmlAttr(encodeURIComponent(path))}" target="_blank" rel="noopener" title="Open in Inspector" aria-label="Inspect ${escapeHtmlAttr(basename)}"><i class="bi bi-eye" aria-hidden="true"></i></a>` : '';
+            ? `<a class="ibtn queue-inspector" href="/inspector?path=${escapeHtml(encodeURIComponent(path))}" target="_blank" rel="noopener" title="Open in Inspector" aria-label="Inspect ${escapeHtml(basename)}"><i class="bi bi-eye" aria-hidden="true"></i></a>` : '';
         return `<div class="queue-file-row"><div class="queue-file-text">${path
             ? `<details data-file-index="${index}"><summary>${escapeHtml(basename)}</summary><div class="queue-full-path">${escapeHtml(path)}</div></details>`
             : `<span>${escapeHtml(basename)}</span>`}${title && title !== basename ? `<span class="queue-file-title text-body-secondary">${escapeHtml(title)}</span>` : ''}</div>${inspector}</div>`;
@@ -2089,20 +2084,6 @@ function _statusMeta(key) {
 }
 window._statusMeta = _statusMeta;
 
-// Back-compat alias retained while older call sites still reference the
-// old name. New code should call _statusMeta() directly.
-const _PUBLISHER_STATUS_BADGES = STATUS_META;
-
-// Frame-provenance badges so users can see when one webhook's frames
-// were reused across a sibling-server publish (no second FFmpeg) vs
-// when this publisher's output was already on disk vs when FFmpeg
-// just ran for this dispatch.
-const _FRAME_SOURCE_BADGES = {
-    cache_hit:      { label: 'Frames reused', cls: 'bg-info text-dark', tip: 'Frames came from the cache — FFmpeg did not run for this dispatch' },
-    output_existed: { label: 'Already on disk', cls: 'bg-light text-dark border', tip: 'Output was already on disk and unchanged; nothing to re-publish' },
-    extracted:      null, // no badge for "extracted" — it's the boring default
-};
-
 // File-level issue footnote, rendered LIVE during a run (it rides the
 // job_progress event via progress.outcome, which the dispatcher pushes on the
 // progress cadence). Shows only outcomes that aren't attributable to a single
@@ -2122,9 +2103,9 @@ function _renderJobFileIssues(outcome) {
         const n = outcome[k];
         if (!n || n <= 0) return '';
         const meta = _statusMeta(k);
-        const tip = meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '';
+        const tip = meta.tip ? ` title="${escapeHtml(meta.tip)}"` : '';
         const tone = meta.cls.includes('danger') ? 'job-result-error' : meta.cls.includes('warning') ? 'job-result-warning' : 'job-result-muted';
-        return `<span class="job-result-item ${tone}"${tip}><span>${escapeHtmlText(meta.label)}</span> <strong>× ${n.toLocaleString()}</strong></span>`;
+        return `<span class="job-result-item ${tone}"${tip}><span>${escapeHtml(meta.label)}</span> <strong>× ${n.toLocaleString()}</strong></span>`;
     }).filter(Boolean).join(' ');
 }
 
@@ -2171,13 +2152,13 @@ function _renderMarkerSources(sources) {
         const ranked = Array.from(counts.entries())
             .sort(function (a, b) { return b[1] - a[1] || a[0].localeCompare(b[0]); });
         const shown = ranked.slice(0, MARKER_SOURCE_GROUPS_SHOWN).map(function ([label, n]) {
-            return `${escapeHtmlText(label)} <span class="fw-semibold">${n.toLocaleString()}</span>`;
+            return `${escapeHtml(label)} <span class="fw-semibold">${n.toLocaleString()}</span>`;
         });
         const rest = ranked.slice(MARKER_SOURCE_GROUPS_SHOWN);
         if (rest.length) {
             const total = rest.reduce(function (sum, entry) { return sum + entry[1]; }, 0);
             const tip = rest.map(function ([label, n]) { return `${label} ${n}`; }).join(' · ');
-            shown.push(`<span title="${escapeHtmlAttr(tip)}">other <span class="fw-semibold">${total.toLocaleString()}</span></span>`);
+            shown.push(`<span title="${escapeHtml(tip)}">other <span class="fw-semibold">${total.toLocaleString()}</span></span>`);
         }
         return `<div class="marker-sources-line"><span class="text-body">${MARKER_SOURCE_TYPE_LABELS[type]}:</span> `
             + `${shown.join(' · ')}</div>`;
@@ -2185,8 +2166,8 @@ function _renderMarkerSources(sources) {
     if (!lines.length) return '';
     return `<div class="mt-2 marker-sources"><strong class="me-1">Decided by</strong>`
         + `<button type="button" class="info-icon align-baseline" tabindex="0" data-bs-toggle="tooltip" `
-        + `data-bs-placement="top" title="${escapeHtmlAttr(MARKER_SOURCES_TIP)}" aria-label="What these counts mean" `
-        + `data-explain-title="Decided by" data-explain-html="${escapeHtmlAttr(MARKER_SOURCES_DETAIL)}">`
+        + `data-bs-placement="top" title="${escapeHtml(MARKER_SOURCES_TIP)}" aria-label="What these counts mean" `
+        + `data-explain-title="Decided by" data-explain-html="${escapeHtml(MARKER_SOURCES_DETAIL)}">`
         + `<i class="bi bi-info-circle"></i></button>`
         + `<div class="small text-muted mt-1">${lines.join('')}</div></div>`;
 }
@@ -2302,13 +2283,13 @@ function _renderPublishersBlock(job) {
         }
         if (!badgeSpecs.length) return '';
         const badges = badgeSpecs.map(function (b) {
-            const tip = b.tip ? ` title="${escapeHtmlAttr(b.tip)}"` : '';
-            const suffix = b.suffix ? ` · ${escapeHtmlText(b.suffix)}` : '';
+            const tip = b.tip ? ` title="${escapeHtml(b.tip)}"` : '';
+            const suffix = b.suffix ? ` · ${escapeHtml(b.suffix)}` : '';
             const tone = b.cls.includes('danger') ? 'job-result-error' : b.cls.includes('warning') ? 'job-result-warning'
                 : b.cls.includes('success') ? 'job-result-ok' : b.cls.includes('bg-info') ? 'job-result-info' : '';
-            return `<div class="job-result-item ${tone}"${tip}><span>${escapeHtmlText(b.label)}${suffix}</span> <strong>× ${b.count}</strong></div>`;
+            return `<div class="job-result-item ${tone}"${tip}><span>${escapeHtml(b.label)}${suffix}</span> <strong>× ${b.count}</strong></div>`;
         }).join(' ');
-        return `<section class="job-server-results"><h4 class="job-detail-heading">${logo}${escapeHtmlText(sname)}</h4><div class="job-result-list">${badges}</div></section>`;
+        return `<section class="job-server-results"><h4 class="job-detail-heading">${logo}${escapeHtml(sname)}</h4><div class="job-result-list">${badges}</div></section>`;
     }).filter(Boolean).join('');
     if (!lines && !fileIssues && !sourcesBlock && !cpuLine) return '';
     const cfg = (job && job.config) || {};
@@ -2364,7 +2345,7 @@ function _renderRetryChip(job) {
             ? 'Automatically checks loudness again when Plex or the source file becomes available; no review is needed'
             : 'Checks these files again: a server hadn\'t added them to its library yet';
         return ' <span class="badge bg-warning text-dark ms-1 markers-chain-retry-chip" '
-            + 'title="' + escapeHtmlAttr(retryTip) + '">'
+            + 'title="' + escapeHtml(retryTip) + '">'
             + '<i class="bi bi-arrow-clockwise me-1"></i>Retry ' + attempt + '/' + max + '</span>';
     }
     // Trailing info-icon opens the shared #globalInfoModal with the
@@ -2729,7 +2710,7 @@ function updateJobQueue(force) {
             const remaining = Math.max(0, Math.ceil((new Date(countdownTarget).getTime() - Date.now()) / 1000));
             const waitWord = _countdownWord(job, 'Retry starting');
             const label = remaining > 0 ? `${waitWord} ${_formatCountdown(remaining)}` : 'Queued for retry';
-            progressCell = `<span class="text-warning small" data-scheduled-at="${escapeHtml(countdownTarget)}" data-countdown-label="${escapeHtmlAttr(waitWord)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
+            progressCell = `<span class="text-warning small" data-scheduled-at="${escapeHtml(countdownTarget)}" data-countdown-label="${escapeHtml(waitWord)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
         } else if (isActiveRetryChain) {
             const processed = Number(job.progress.processed_items) || 0;
             const total = Number(job.progress.total_items) || 0;
@@ -2761,7 +2742,7 @@ function updateJobQueue(force) {
         const rowTitle = isMarkers ? _markersDisplayName(job.library_name) : job.kind === JOB_KIND_LOUDNESS
             ? (job.library_name || '').replace(/^((?:Retry|Verify): )?Plex loudness(?::| ·) (.+)$/, '$1$2') : (job.library_name || '');
         const nameHtml = (followsId
-            ? `<i class="bi bi-arrow-return-right job-follow-arrow" tabindex="0" data-bs-toggle="tooltip" title="${escapeHtmlAttr(followTip)}" aria-label="${escapeHtmlAttr(followTip)}"></i>` : '')
+            ? `<i class="bi bi-arrow-return-right job-follow-arrow" tabindex="0" data-bs-toggle="tooltip" title="${escapeHtml(followTip)}" aria-label="${escapeHtml(followTip)}"></i>` : '')
             + `<span class="queue-job-title">${escapeHtml(rowTitle) || 'All Libraries'}</span>` + _versionRerunInfoHtml(job);
         const wait = job.config?.resource_wait;
         const activityText = wait?.reason || (['running', 'pending'].includes(job.status) ? job.progress.current_item : '');
@@ -2771,19 +2752,19 @@ function updateJobQueue(force) {
             && ['Waiting for an available worker', 'Waiting for available worker'].includes(activityText);
         if (genericWait) {
             const total = Number(job.progress.total_items) || 0;
-            progressCell = `<span class="small text-body-secondary" tabindex="0" title="${escapeHtmlAttr(activityText)}">${total ? `${total.toLocaleString()} ${total === 1 ? 'item' : 'items'} · ` : ''}Awaiting worker</span>`;
+            progressCell = `<span class="small text-body-secondary" tabindex="0" title="${escapeHtml(activityText)}">${total ? `${total.toLocaleString()} ${total === 1 ? 'item' : 'items'} · ` : ''}Awaiting worker</span>`;
         }
         const phaseText = _dedupeActivityCount(activityText, job.progress.processed_items, job.progress.total_items);
         const queuedLine = job.status === 'pending' && !Number(job.progress.processed_items) && !Number(progress);
         if (queuedLine && phaseText && !genericWait && !isWaitingRetryRow && !isWaitingWebhookRow && !isActiveRetryChain) progressCell = '';
         const phase = !phaseText || genericWait ? ''
             : queuedLine
-                ? `<span class="queue-phase queue-phase-line text-body-secondary" tabindex="0" title="${escapeHtmlAttr(phaseText)}" aria-label="${escapeHtmlAttr(phaseText)}">${escapeHtml(_queueReasonShort(phaseText))}</span>`
+                ? `<span class="queue-phase queue-phase-line text-body-secondary" tabindex="0" title="${escapeHtml(phaseText)}" aria-label="${escapeHtml(phaseText)}">${escapeHtml(_queueReasonShort(phaseText))}</span>`
                 : `<span class="queue-phase text-body-secondary">${escapeHtml(phaseText)}</span>`;
         html += `
             <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}${isFilesExpanded ? ' open' : ''}">
-                <td class="queue-select" data-label="Select">${_isSelectableJob(job) ? `<input type="checkbox" class="form-check-input job-select-cb" aria-label="Select job ${escapeHtmlAttr(job.id.substring(0, 8))}" data-job-id="${escapeHtmlAttr(job.id)}" onclick="event.stopPropagation()"${selectedJobIds.has(String(job.id)) ? ' checked' : ''}>` : ''}</td>
-                <td class="queue-id" data-label="ID"><code class="jid" title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
+                <td class="queue-select" data-label="Select">${_isSelectableJob(job) ? `<input type="checkbox" class="form-check-input job-select-cb" aria-label="Select job ${escapeHtml(job.id.substring(0, 8))}" data-job-id="${escapeHtml(job.id)}" onclick="event.stopPropagation()"${selectedJobIds.has(String(job.id)) ? ' checked' : ''}>` : ''}</td>
+                <td class="queue-id" data-label="ID"><code class="jid" title="${escapeHtml(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
                 <td class="queue-job" data-label="Job">
                     <div class="queue-job-main">${filesToggleBtn}${_jobTypeTileHtml(job)}<div class="queue-job-copy"><div class="queue-title-line">${nameHtml}</div>
                     <div class="queue-metadata">${_queueMetadataHtml(job, rowTitle)}</div></div></div>
@@ -2791,14 +2772,14 @@ function updateJobQueue(force) {
                 <td class="queue-status" data-label="Status">${statusBadge}${retryLabel}</td>
                 <td class="queue-priority" data-label="Priority">${priorityCell}</td>
                 <td class="queue-progress-cell" data-label="Progress">${progressCell}${phase}</td>
-                <td class="queue-created text-body-secondary" data-label="Created"><time datetime="${escapeHtmlAttr(job.created_at)}" title="${escapeHtmlAttr(formatDate(job.created_at))}">${created}</time></td>
+                <td class="queue-created text-body-secondary" data-label="Created"><time datetime="${escapeHtml(job.created_at)}" title="${escapeHtml(formatDate(job.created_at))}">${created}</time></td>
                 <td class="queue-actions" data-label="Actions">${actionButtons}</td>
             </tr>`;
         const detailActions = `<div class="job-detail-actions"><button class="btn dash-btn-sm" onclick="openJobDetails('${escapeHtml(job.id)}')"><i class="bi bi-file-text" aria-hidden="true"></i>Open logs and files</button></div>`;
         const filesBlock = `<section class="job-detail-files">${_markersFilesBlock(job)}</section>`;
         const publishersBlock = _renderPublishersBlock(job);
         const currentItem = job.progress?.current_item;
-        const started = job.started_at ? `<span>Started <b>${escapeHtml(formatDate(job.started_at))}</b>${job.status === 'running' ? ` · Job elapsed <b data-elapsed-since="${escapeHtmlAttr(job.started_at)}">${formatElapsed(job.started_at)}</b>` : ''}${job.completed_at ? ` · Finished <b>${escapeHtml(formatDate(job.completed_at))}</b>` : ''}</span>` : '';
+        const started = job.started_at ? `<span>Started <b>${escapeHtml(formatDate(job.started_at))}</b>${job.status === 'running' ? ` · Job elapsed <b data-elapsed-since="${escapeHtml(job.started_at)}">${formatElapsed(job.started_at)}</b>` : ''}${job.completed_at ? ` · Finished <b>${escapeHtml(formatDate(job.completed_at))}</b>` : ''}</span>` : '';
         const nextEligible = wait?.next_eligible ? `<p class="small mb-0">Next eligible: ${escapeHtml(formatDate(wait.next_eligible))}</p>` : '';
         const activity = currentItem || started || wait?.reason
             ? `<section class="job-current-activity"><h3 class="job-detail-heading">${['running', 'pending'].includes(job.status) ? 'Current activity' : 'Last activity'}</h3>${currentItem || wait?.reason ? `<p class="mb-1 queue-full-path">${escapeHtml(wait?.reason || currentItem)}</p>` : ''}${nextEligible}${started ? `<div class="small text-body-secondary">${started}</div>` : ''}${detailActions}</section>` : `<section class="job-current-activity">${detailActions}</section>`;
@@ -2946,7 +2927,6 @@ function updateActiveJobs(runningJobs, force) {
             </div>
         `;
         _stopElapsedTimer();
-        refreshWorkerScaleButtons();
         return;
     }
 
@@ -2969,7 +2949,7 @@ function updateActiveJobs(runningJobs, force) {
         let statusBadge;
         if (isPaused) {
             const note = _markersPauseNote(markersPause, job);
-            statusBadge = `<span class="badge bg-warning text-dark"${note ? ` title="${escapeHtmlAttr(note)}"` : ''}>Paused</span>`;
+            statusBadge = `<span class="badge bg-warning text-dark"${note ? ` title="${escapeHtml(note)}"` : ''}>Paused</span>`;
         } else if (isRetryWaiting) {
             const waitText = _isMarkersVerifyJob(job) ? 'Waiting to check again' : 'Waiting to retry';
             statusBadge = `<span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>${waitText}</span>`;
@@ -3042,7 +3022,7 @@ function updateActiveJobs(runningJobs, force) {
                 : 'Backing off after a failure — will try again automatically.';
             progressBlock = `
             <div class="progress retry-countdown-bar" style="height: 24px;"
-                 data-retry-eta="${escapeHtml(retryEta)}" data-retry-wait-total="${totalSec}" data-countdown-label="${escapeHtmlAttr(waitWord)}">
+                 data-retry-eta="${escapeHtml(retryEta)}" data-retry-wait-total="${totalSec}" data-countdown-label="${escapeHtml(waitWord)}">
                 <div class="progress-bar bg-warning text-dark progress-bar-striped progress-bar-animated"
                      role="progressbar" style="width: ${fillPct}%"
                      id="activeJobProgress-${jid}">
@@ -3098,7 +3078,6 @@ function updateActiveJobs(runningJobs, force) {
     container.innerHTML = html;
     _initBootstrapTooltips(container);
     _ensureElapsedTimer();
-    refreshWorkerScaleButtons();
 }
 
 function removeActiveJob(jobId) {
@@ -3214,7 +3193,6 @@ function updateWorkerStatuses(workers, options = {}) {
         if (counts) {
             if (cpuWorkersEl) cpuWorkersEl.textContent = String(counts.cpu_threads);
         }
-        refreshWorkerScaleButtons();
         return;
     }
 
@@ -3301,7 +3279,6 @@ function updateWorkerStatuses(workers, options = {}) {
             col.remove();
         }
     }
-    refreshWorkerScaleButtons();
 }
 
 function _patchWorkerCard(col, worker) {
@@ -3654,11 +3631,11 @@ function _renderJobLibraryList(libs) {
         const rows = grp.libs.map(lib => `
             <div class="form-check ov-lib">
                 <input class="form-check-input job-library-checkbox" type="checkbox"
-                       value="${lib.id}" id="jobLib_${lib.id}"
+                       value="${lib.id}" id="${_libraryDomId('jobLib', lib)}"
                        data-server-id="${escapeHtml(lib.server_id || '')}"
                        data-server-name="${escapeHtml(lib.server_name || '')}"
                        data-library-kind="${escapeHtml(lib.type || lib.kind || '')}" disabled>
-                <label class="form-check-label" for="jobLib_${lib.id}">
+                <label class="form-check-label" for="${_libraryDomId('jobLib', lib)}">
                     ${escapeHtml(lib.name)} <span class="ov-lib-tag">${libraryTypeLabel(lib)}</span>
                 </label>
             </div>
@@ -4012,38 +3989,34 @@ function _buildPreviewsJob() {
 
     let selectedLibraryIds = [];
     let libraryName = 'All Libraries';
-    // Collect the ticked checkboxes' ``data-server-id`` so we can send
-    // ``server_id`` explicitly when every tick belongs to one server.
-    // Issue #244: relying on the backend's library-id-based inference
-    // mis-routes when two Plex servers share a library id (Plex assigns
-    // ids per-server starting at "1", so collisions are normal).
-    let selectedServerIds = new Set();
+    // Pin ``server_id`` when every tick belongs to one server (#244): Plex numbers libraries from "1" on each
+    // server, so the backend cannot infer the server from library ids alone.
+    const selectedServerIds = new Set();
+    // Exact {server_id, library_id} pairs, so library "1" on one server never selects library "1" on another.
+    let libraryPairs = [];
 
     if (!allLibrariesCheckbox.checked) {
-        // Get selected library checkboxes
-        const selectedCheckboxes = document.querySelectorAll('.job-library-checkbox:checked');
-        var selectedIdsLocal = Array.from(selectedCheckboxes).map(cb => cb.value);
-
-        if (selectedIdsLocal.length === 0) {
+        const selectedCheckboxes = Array.from(document.querySelectorAll('.job-library-checkbox:checked'));
+        if (selectedCheckboxes.length === 0) {
             _jobLibrariesMissing();
             return null;
         }
 
-        selectedLibraryIds = selectedIdsLocal;
+        selectedLibraryIds = [...new Set(selectedCheckboxes.map(cb => cb.value))];
         for (const cb of selectedCheckboxes) {
             const sid = (cb.getAttribute('data-server-id') || '').trim();
             if (sid) selectedServerIds.add(sid);
         }
-        // Build a display name from the looked-up library names so the
-        // Jobs page shows which libraries were picked, not just a count.
-        // Previously multi-library selections collapsed to "3 Libraries"
-        // with no way to tell them apart — a user running two scans in
-        // a row couldn't distinguish them.
-        const pickedNames = selectedIdsLocal
-            .map(id => (libraries.find(l => l.id === id) || {}).name)
+        libraryPairs = selectedCheckboxes
+            .map(cb => ({ server_id: (cb.getAttribute('data-server-id') || '').trim(), library_id: cb.value }))
+            .filter(pair => pair.server_id);
+        // A tick with no server can't be paired; fall back to flat ids for the whole request.
+        if (libraryPairs.length !== selectedCheckboxes.length) libraryPairs = [];
+        // Name lookup is by server + id so same-numbered libraries on two servers are not mixed up.
+        const pickedNames = selectedCheckboxes
+            .map(cb => (libraries.find(l => String(l.id) === cb.value && (l.server_id || '') === (cb.dataset.serverId || '')) || {}).name)
             .filter(Boolean);
-        // Some name lookups can miss (race with stale library cache): the label falls back to a count.
-        libraryName = _jobLibraryLabel(pickedNames, selectedIdsLocal.length);
+        libraryName = _jobLibraryLabel(pickedNames, selectedCheckboxes.length);
     }
 
     const priority = parseInt(document.getElementById('jobPriority').value, 10) || 2;
@@ -4068,6 +4041,9 @@ function _buildPreviewsJob() {
         priority: priority,
         config: jobConfig,
     };
+    if (libraryPairs.length > 0) {
+        jobPayload.libraries = libraryPairs;
+    }
     if (selectedServerIds.size === 1) {
         jobPayload.server_id = Array.from(selectedServerIds)[0];
     }
@@ -4113,111 +4089,6 @@ async function resumeJob(jobId) {
     }
 }
 
-async function scaleWorkers(jobId, workerType, delta) {
-    const endpoint = delta > 0 ? 'add' : 'remove';
-    const count = Math.abs(delta);
-
-    try {
-        const result = await apiPost(`/api/jobs/${jobId}/workers/${endpoint}`, {
-            worker_type: workerType,
-            count
-        });
-        await Promise.all([loadJobs(), loadWorkerStatuses(), refreshStatus()]);
-        if (endpoint === 'add') {
-            showToast('Workers Updated', `Added ${result.added} ${workerType} worker(s)`, 'success');
-        } else {
-            const scheduledRemoval = result.scheduled_removal || 0;
-            const unavailable = result.unavailable || 0;
-            if (scheduledRemoval > 0 || unavailable > 0) {
-                showToast(
-                    'Workers Updated',
-                    `Removed ${result.removed} ${workerType}; ${scheduledRemoval} scheduled after current tasks; ${unavailable} unavailable`,
-                    'warning'
-                );
-            } else {
-                showToast('Workers Updated', `Removed ${result.removed} ${workerType} worker(s)`, 'info');
-            }
-        }
-    } catch (error) {
-        showToast('Error', `Failed to ${endpoint} ${workerType} worker(s): ${error.message}`, 'danger');
-    }
-}
-
-function refreshWorkerScaleButtons() {
-    const buttons = document.querySelectorAll('.worker-scale-btn');
-    buttons.forEach((btn) => {
-        const direction = parseInt(btn.getAttribute('data-direction'), 10);
-        const workerType = btn.getAttribute('data-worker-type');
-        if (direction === 1) {
-            btn.disabled = getWorkerCountForType(workerType) >= getWorkerMaxForType(workerType);
-            return;
-        }
-        btn.disabled = getWorkerCountForType(workerType) <= 0;
-    });
-}
-
-function getWorkerCountForType(workerType) {
-    if (workerType !== 'CPU') return 0;
-    const el = document.getElementById('cpuWorkers');
-    if (!el) return 0;
-    const n = parseInt(el.textContent, 10);
-    return Number.isNaN(n) ? 0 : n;
-}
-
-function getWorkerMaxForType(workerType) {
-    if (workerType !== 'CPU') return Infinity;
-    return cachedWorkerConfigCounts?.cpu_threads_max ?? Infinity;
-}
-
-function settingsKeyForWorkerType(workerType) {
-    if (workerType === 'CPU') return 'cpu_threads';
-    return null;
-}
-
-async function scaleWorkersGlobal(workerType, direction) {
-    const currentCount = getWorkerCountForType(workerType);
-    const maxCount = getWorkerMaxForType(workerType);
-    let newCount = Math.max(0, currentCount + direction);
-    // A count saved above the maximum (before the cap existed) steps down to the maximum first.
-    if (direction < 0) newCount = Math.min(newCount, maxCount);
-    if (newCount === currentCount || (direction > 0 && newCount > maxCount)) return;
-
-    const settingsKey = settingsKeyForWorkerType(workerType);
-
-    try {
-        const saveResult = await apiPost('/api/settings', { [settingsKey]: newCount });
-        cachedWorkerConfigCounts = null;
-        await loadWorkerConfigCounts(true);
-
-        const badgeEl = workerType === 'CPU' ? document.getElementById('cpuWorkers') : null;
-        if (badgeEl) badgeEl.textContent = String(newCount);
-        refreshWorkerScaleButtons();
-
-        // The settings save resizes the live pool itself; a follow-up
-        // /api/workers/add|remove call would change a second worker.
-        await Promise.all([loadJobs(), loadWorkerStatuses(), refreshStatus()]);
-        const retiring = saveResult.cpu_workers_retiring || 0;
-        let busyNote = '';
-        if (retiring === 1) {
-            busyNote = '1 busy worker will stop after its current file.';
-        } else if (retiring > 1) {
-            busyNote = `${retiring} busy workers will stop after their current files.`;
-        }
-        if (saveResult.warning) {
-            showToast('Warning', busyNote ? `${saveResult.warning} ${busyNote}` : saveResult.warning, 'warning');
-        } else if (busyNote) {
-            showToast('Setting Saved', `${workerType} workers set to ${newCount}. ${busyNote}`, 'success');
-        } else {
-            showToast('Setting Saved', `${workerType} workers set to ${newCount}`, 'success');
-        }
-    } catch (error) {
-        const badgeEl = workerType === 'CPU' ? document.getElementById('cpuWorkers') : null;
-        if (badgeEl) badgeEl.textContent = String(currentCount);
-        refreshWorkerScaleButtons();
-        showToast('Error', `Failed to update ${workerType} workers: ${error.message}`, 'danger');
-    }
-}
-
 async function deleteJob(jobId) {
     if (!await appConfirm('Delete this job from the history? Logs and per-file results will also be removed.', { title: 'Delete job', confirmText: 'Delete' })) return;
 
@@ -4247,19 +4118,6 @@ async function reprocessJob(jobId) {
         } else {
             showToast('Error', 'Failed to reprocess job: ' + msg, 'danger');
         }
-    }
-}
-
-async function clearCompletedJobs() {
-    if (!await appConfirm('Clear all completed, failed, and cancelled jobs from the history?', { title: 'Clear job history', confirmText: 'Clear' })) return;
-
-    try {
-        const result = await apiPost('/api/jobs/clear');
-        loadJobs();
-        loadJobStats();
-        showToast('Jobs Cleared', `Cleared ${result.cleared} jobs`, 'info');
-    } catch (error) {
-        showToast('Error', 'Failed to clear jobs: ' + error.message, 'danger');
     }
 }
 
@@ -4314,13 +4172,13 @@ function getStatusBadge(status, paused, error, outcome, pauseNote, asPill) {
     var tooltipText = _buildOutcomeTooltip(outcome);
     if (error) {
         // The error can quote a file name or a server's words, so it's escaped for the title attribute.
-        var errorText = escapeHtmlAttr(error);
+        var errorText = escapeHtml(error);
         tooltipText = tooltipText
             ? tooltipText + '&#10;' + errorText
             : errorText;
     }
     if (pauseNote && status === 'running' && paused) {
-        tooltipText = escapeHtmlAttr(pauseNote) + (tooltipText ? '&#10;' + tooltipText : '');
+        tooltipText = escapeHtml(pauseNote) + (tooltipText ? '&#10;' + tooltipText : '');
     }
     var tooltipAttrs = tooltipText
         ? ' data-bs-toggle="tooltip" data-bs-placement="top" data-bs-html="false" title="' + tooltipText + '"'
@@ -4693,7 +4551,7 @@ async function checkWhatsNew() {
         modal.show();
 
         modalEl.addEventListener('hidden.bs.modal', async function () {
-            try { await fetch('/api/system/whats-new/dismiss', { method: 'POST', headers: { 'X-CSRFToken': getCsrfToken() } }); }
+            try { await fetch('/api/system/whats-new/dismiss', { method: 'POST' }); }
             catch (e) { console.warn('Failed to dismiss what\'s new:', e); }
         }, { once: true });
     } catch (e) {
@@ -4781,15 +4639,15 @@ async function refreshBackupsPanel() {
                     <div class="backup-controls">
                         <span class="backup-count">${backups.length} snapshot${backups.length === 1 ? '' : 's'}</span>
                         <select id="${selectId}" class="form-select form-select-sm"
-                                aria-label="Backup snapshot for ${escapeHtmlAttr(f.name)}">
+                                aria-label="Backup snapshot for ${escapeHtml(f.name)}">
                             ${backups.map((b) => {
-                                const label = escapeHtmlText(_formatBackupLabel(b))
+                                const label = escapeHtml(_formatBackupLabel(b))
                                     + (b.legacy ? ' (legacy)' : '');
-                                return `<option value="${escapeHtmlAttr(b.filename)}">${label}</option>`;
+                                return `<option value="${escapeHtml(b.filename)}">${label}</option>`;
                             }).join('')}
                         </select>
                         <button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0"
-                                data-restore-file="${escapeHtmlAttr(f.name)}"
+                                data-restore-file="${escapeHtml(f.name)}"
                                 data-restore-select="${selectId}">
                             <i class="bi bi-arrow-counterclockwise me-1"></i>Restore selected
                         </button>
@@ -4800,8 +4658,8 @@ async function refreshBackupsPanel() {
             return `
                 <div class="backup-row">
                     <div class="backup-file">
-                        <code>${escapeHtmlText(f.name)}</code>${headerBadge}
-                        <div class="backup-live">Live saved: ${escapeHtmlText(liveAge)}</div>
+                        <code>${escapeHtml(f.name)}</code>${headerBadge}
+                        <div class="backup-live">Live saved: ${escapeHtml(liveAge)}</div>
                     </div>
                     ${selectHtml}
                 </div>
@@ -4821,7 +4679,7 @@ async function refreshBackupsPanel() {
                 target.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Restoring…';
                 try {
                     await apiPost('/api/settings/backups/restore', { file, backup });
-                    showToast('Backup restored', `${file} restored from ${backup}. Reload the page for caches to pick it up.`, 'success');
+                    showToast('Backup restored', `${file} restored from ${backup}. The server is already using it; reload the page to see the restored values.`, 'success');
                     refreshBackupsPanel();
                 } catch (e) {
                     showToast('Restore failed', (e && e.message) || 'Unknown error', 'danger');
@@ -4831,7 +4689,7 @@ async function refreshBackupsPanel() {
             });
         });
     } catch (e) {
-        panel.innerHTML = `<div class="text-warning small"><i class="bi bi-exclamation-triangle me-1"></i>Could not list backups: ${escapeHtmlText((e && e.message) || 'unknown error')}</div>`;
+        panel.innerHTML = `<div class="text-warning small"><i class="bi bi-exclamation-triangle me-1"></i>Could not list backups: ${escapeHtml((e && e.message) || 'unknown error')}</div>`;
     }
 }
 
@@ -4892,7 +4750,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // clears once the user fixes permissions (no restart needed).
     if (document.getElementById('configHealthBanner')) {
         checkConfigHealth();
-        setInterval(checkConfigHealth, 60000);
+        startPoller(checkConfigHealth, 60000);
     }
 });
 
@@ -4974,7 +4832,7 @@ async function checkConfigHealth() {
             try {
                 await fetch('/api/system/config-health/dismiss', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ kind }),
                 });
             } catch (e) {

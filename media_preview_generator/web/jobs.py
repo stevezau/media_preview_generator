@@ -4,7 +4,7 @@ Provides JobManager class for tracking job state, emitting SocketIO events,
 and persisting job data to disk via SQLite.
 
 Storage moved from jobs.json (per-write whole-file rewrite, schema-fragile)
-to jobs.db (per-row upserts, schema-stable) in Phase J8 — see ``JobStorage``
+to jobs.db (per-row upserts, schema-stable) — see ``JobStorage``
 below. Free-form fields (progress, config, publishers) stay as JSON blobs
 inside their columns so adding a new field there is a no-op at the schema
 level. The first start of the new code imports any existing jobs.json then
@@ -453,7 +453,7 @@ class Job:
     config: dict[str, Any] = field(default_factory=dict)
     paused: bool = False
     priority: int = PRIORITY_NORMAL
-    # D20 — id of the schedule that spawned this job, or "" for manual /
+    # id of the schedule that spawned this job, or "" for manual /
     # webhook jobs. Used by execute_schedule_stop() to find which jobs
     # to pause when a schedule's stop_time fires, and by
     # execute_scheduled_job() to detect "is there an existing paused
@@ -797,7 +797,7 @@ class JobManager:
     def __init__(self, config_dir: str = "/config", socketio=None):
         """Initialize job manager with config directory and optional SocketIO instance."""
         self.config_dir = config_dir
-        # Pre-J8 path, kept on the instance only so the legacy-import code
+        # Legacy path, kept on the instance only so the legacy-import code
         # path can find any old jobs.json that's still on disk.
         self.jobs_file = os.path.join(config_dir, "jobs.json")
         self.jobs_db_path = os.path.join(config_dir, "jobs.db")
@@ -858,6 +858,9 @@ class JobManager:
         # via ``interrupted_retry_chains()``.
         self._interrupted_retry_chains: list[Job] = []
 
+        # Set when the saved jobs could not be read: an empty job list then says nothing about which logs are orphans.
+        self._jobs_load_failed = False
+
         # Load existing jobs from disk
         self._load_jobs()
         try:
@@ -899,6 +902,7 @@ class JobManager:
                 e,
             )
             self._storage = None
+            self._jobs_load_failed = True
             return
 
         self._maybe_import_legacy_json()
@@ -913,6 +917,7 @@ class JobManager:
                 type(e).__name__,
                 e,
             )
+            self._jobs_load_failed = True
             return
 
         needs_resave: list[Job] = []
@@ -1050,7 +1055,7 @@ class JobManager:
             logger.info("Found {} interrupted/pending job(s) from previous run", len(self._interrupted_jobs))
 
     def _maybe_import_legacy_json(self) -> None:
-        """One-shot import of pre-J8 jobs.json into the SQLite store.
+        """One-shot import of legacy jobs.json into the SQLite store.
 
         Only runs when the DB is empty (so a manually restored jobs.json
         doesn't double-import on top of an existing DB). After import, the
@@ -1302,6 +1307,9 @@ class JobManager:
                     self._storage._conn.execute("PRAGMA incremental_vacuum")
                 except Exception as exc:
                     logger.debug("incremental_vacuum after retention sweep failed: {}", exc)
+
+        if self._jobs_load_failed:
+            return
 
         # Clean orphaned job log files
         if os.path.isdir(self._job_logs_dir):
@@ -2760,30 +2768,31 @@ class JobManager:
             except OSError as e:
                 logger.debug("Could not append to job log {}: {}", log_path, e)
 
+    def _read_log_file(self, job_id: str) -> list[str] | None:
+        """Read a job's log file without holding the manager lock; ``None`` when it can't be read.
+
+        Reading a large file under the lock would stall every progress update and log append.
+        """
+        log_path = os.path.join(self._job_logs_dir, f"{job_id}.log")
+        if not os.path.isfile(log_path):
+            return None
+        try:
+            with open(log_path) as f:
+                return [line.rstrip("\n") for line in f if line]
+        except OSError:
+            return None
+
     def get_logs(self, job_id: str, last_n: int | None = None) -> list[str]:
         """Get logs for a job (file-first; falls back to in-memory deque).
 
-        D10 — pre-fix this short-circuited to the in-memory deque (capped
-        at ``_max_log_lines = 500``) when the job was still in memory,
-        only reading from the file once the deque was gone. For an
-        800-item library scan that meant the FIRST 300+ lines (job start,
-        config load, server connect, library enumeration) silently aged
-        out of the deque and the user saw the log starting mid-dispatch.
-        File is authoritative since add_log writes to both — read it
-        first; deque is the fallback for the rare case the file write
-        failed.
+        The in-memory deque is capped at ``_max_log_lines``, so a long scan's first lines age out of it;
+        the file has every line because ``add_log`` writes to both. The deque is the fallback for
+        when the file write failed.
         """
+        file_lines = self._read_log_file(job_id)
+        if file_lines is not None:
+            return file_lines[-last_n:] if last_n else file_lines
         with self._lock:
-            log_path = os.path.join(self._job_logs_dir, f"{job_id}.log")
-            if os.path.isfile(log_path):
-                try:
-                    with open(log_path) as f:
-                        logs = [line.rstrip("\n") for line in f if line]
-                    if last_n:
-                        return logs[-last_n:]
-                    return logs
-                except OSError:
-                    pass
             if job_id in self._job_logs:
                 logs = list(self._job_logs[job_id])
                 if last_n:
@@ -2810,23 +2819,17 @@ class JobManager:
     def get_logs_paginated(self, job_id: str, offset: int = 0, limit: int | None = None) -> dict[str, Any]:
         """Get a slice of log lines with total count for pagination.
 
-        D10 — same file-first preference as :meth:`get_logs` so paged
+        Same file-first preference as :meth:`get_logs` so paged
         readers can scroll back to the actual start of the job, not the
         deque-cap-truncated version.
         """
-        with self._lock:
-            log_path = os.path.join(self._job_logs_dir, f"{job_id}.log")
-            if os.path.isfile(log_path):
-                try:
-                    with open(log_path) as f:
-                        all_lines = [line.rstrip("\n") for line in f if line]
-                    total = len(all_lines)
-                    end = offset + limit if limit is not None else total
-                    sliced = all_lines[offset:end]
-                    return {"lines": sliced, "total_lines": total, "offset": offset}
-                except OSError:
-                    pass
+        all_lines = self._read_log_file(job_id)
+        if all_lines is not None:
+            total = len(all_lines)
+            end = offset + limit if limit is not None else total
+            return {"lines": all_lines[offset:end], "total_lines": total, "offset": offset}
 
+        with self._lock:
             if job_id in self._job_logs:
                 logs = list(self._job_logs[job_id])
                 total = len(logs)
@@ -2850,13 +2853,6 @@ class JobManager:
                     "offset": 0,
                 }
             return {"lines": [], "total_lines": 0, "offset": 0}
-
-    def clear_logs(self, job_id: str) -> None:
-        """Clear logs for a job (memory and file)."""
-        with self._lock:
-            self._delete_job_log_file(job_id)
-            if job_id in self._job_logs:
-                del self._job_logs[job_id]
 
     # ========================================================================
     # Per-File Result Tracking
@@ -2999,7 +2995,7 @@ class JobManager:
                         logger.debug("Could not append truncation marker to {}: {}", path, e)
                 return
 
-        # D8 — when no explicit reason was supplied (the worker's
+        # when no explicit reason was supplied (the worker's
         # success/skip path), synthesise one from the publisher messages
         # so the UI doesn't show a column of "(no reason)" rows. Picks
         # the first non-empty message; on multi-server fan-out the
@@ -3357,25 +3353,11 @@ class JobManager:
 _job_manager: JobManager | None = None
 _job_lock = threading.Lock()
 
-# Default config directory from environment. Kept as a module-level
-# constant for backwards compatibility — any caller already importing
-# this name keeps the import working. The actual resolution inside
-# ``get_job_manager`` uses ``_resolve_default_config_dir()`` below so
-# tests that do ``monkeypatch.setenv("CONFIG_DIR", ...)`` get the
-# right path. (Frozen-at-import-time was causing CI's ``test`` job to
-# fail with ``PermissionError: '/config'`` because the env var was
-# set AFTER the module loaded; ``DEFAULT_CONFIG_DIR`` captured the
-# pre-fixture value.)
-DEFAULT_CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
-
 
 def _resolve_default_config_dir() -> str:
-    """Re-read ``CONFIG_DIR`` on every call.
+    """Return ``CONFIG_DIR`` from the environment, read on every call.
 
-    Lazy resolution so pytest fixtures that set ``CONFIG_DIR`` via
-    ``monkeypatch.setenv`` after the module is loaded still take
-    effect. The frozen ``DEFAULT_CONFIG_DIR`` constant above is kept
-    only as a backwards-compatible export.
+    Read lazily rather than at import so a test that sets ``CONFIG_DIR`` after this module loads still takes effect.
     """
     return os.environ.get("CONFIG_DIR", "/config")
 

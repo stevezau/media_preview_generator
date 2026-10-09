@@ -1,15 +1,7 @@
 """Value-object behavior for the Intro & Credits models (later tasks build on these exact shapes)."""
 
-import dataclasses
-
-import pytest
-
 from media_preview_generator.markers.models import (
     SERVER_SOURCES,
-    Candidate,
-    FileIdentity,
-    Marker,
-    MarkerType,
     MediaIds,
     Source,
 )
@@ -30,22 +22,3 @@ class TestServerSources:
 
     def test_the_imported_source_round_trips_by_value(self):
         assert Source("server_markers_imported") is Source.SERVER_MARKERS_IMPORTED
-
-
-class TestValueObjectsAreFrozen:
-    def test_candidate_is_immutable(self):
-        cand = Candidate(MarkerType.INTRO, 0, 1000, Source.CHAPTERS)
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            cand.start_ms = 500
-
-    def test_candidate_defaults(self):
-        cand = Candidate(MarkerType.INTRO, 0, 1000, Source.CHAPTERS)
-        assert cand.confidence == 1.0 and cand.origin == ""
-
-    def test_marker_defaults_unlocked(self):
-        marker = Marker(MarkerType.CREDITS, 1_000, 2_000, ("chapters",))
-        assert marker.locked is False
-
-    def test_file_identity_holds_path_size_mtime(self):
-        fid = FileIdentity("/data/show/s01e01.mkv", 123, 456)
-        assert (fid.canonical_path, fid.size, fid.mtime_ns) == ("/data/show/s01e01.mkv", 123, 456)

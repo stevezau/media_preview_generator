@@ -26,7 +26,7 @@ from loguru import logger
 
 from ..auth import api_token_required
 from . import api
-from ._helpers import _param_to_bool
+from ._helpers import _param_to_bool, resolve_plex_credentials
 
 _SPORTS_AGENT_PATTERNS = ("sportarr", "sportscanner")
 
@@ -281,9 +281,7 @@ def get_libraries():
         # Track whether explicit overrides were provided (setup wizard)
         has_overrides = bool(plex_url or plex_token)
 
-        if not plex_url or not plex_token:
-            plex_url = plex_url or settings.plex_url
-            plex_token = plex_token or settings.plex_token
+        plex_url, plex_token = resolve_plex_credentials(plex_url, plex_token, settings)
 
         if not plex_url or not plex_token:
             try:

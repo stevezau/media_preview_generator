@@ -1,7 +1,7 @@
 # The crop, pre- and post-processing below are adapted from rapidocr_onnxruntime 1.4.4 (ch_ppocr_rec/text_recognize.py,
 # ch_ppocr_rec/utils.py and utils.py's get_rotate_crop_image): Copyright (c) 2020 PaddlePaddle Authors, Licensed under
 # the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0). See PP-OCRv5-rec-NOTICE.txt.
-"""Reading a credits card's words: PP-OCRv5's Latin recognition model on ONNX Runtime (spec §5.4, "A prose card").
+"""Reading a credits card's words: PP-OCRv5's Latin recognition model on ONNX Runtime.
 
 Each line the detection model boxes on a full-size frame is cropped, scaled to 48 px tall and read by greedy CTC over
 the model's own character list (stored in the model file). Only the credits detector's card reading uses it, on the
@@ -12,15 +12,14 @@ Imported only by the text detection helper process, the harness and tests: never
 
 from __future__ import annotations
 
-import hashlib
 import math
-import os
 
 import cv2
 import numpy as np
 import onnxruntime as ort
 
-from .textdet import ModelError, TextDetector, WebGpuSessionError, _session_options
+from . import textdet
+from .textdet import TextDetector, session_options, verify_pinned
 
 MODEL_FILE = "latin_PP-OCRv5_rec_mobile.onnx"
 MODEL_SHA256 = "b20bd37c168a570f583afbc8cd7925603890efbcdc000a59e22c269d160b5f5a"
@@ -28,15 +27,15 @@ MODEL_SIZE = 7_904_513
 LINE_HEIGHT = 48
 MIN_LINE_WIDTH = 320
 # A line read with a lower mean confidence than this is left out: text in a script the Latin model can't read comes out
-# as words at 0.5-0.8 (777 Charlie's Kannada crawl read as lower-case "prose"), while Latin lines, even cut short by
+# as words at 0.5-0.8 (a Kannada crawl read as lower-case "prose"), while Latin lines, even cut short by
 # their boxes, read at 0.95 or more.
 MIN_CONFIDENCE = 0.9
 
 
 def _options(intra_op_threads: int) -> ort.SessionOptions:
     # Basic graph optimisations on every device, so both run the same graph: the extended level fuses each Conv with
-    # its activation, a fused kernel ONNX Runtime's WebGPU provider can't build (EP_FAIL in conv.h on the P5000).
-    opts = _session_options(intra_op_threads)
+    # its activation, a fused kernel ONNX Runtime's WebGPU provider can't build (EP_FAIL in conv.h).
+    opts = session_options(intra_op_threads)
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
     return opts
 
@@ -47,19 +46,7 @@ def verify_model(path: str) -> None:
     Raises:
         ModelError: Missing, unreadable, or another file.
     """
-    if not os.path.isfile(path):
-        raise ModelError(f"Needs the text recognition model, which the Docker image includes; it isn't at {path}")
-    try:
-        if os.path.getsize(path) != MODEL_SIZE:
-            raise ModelError(f"The text recognition model at {path} isn't the expected file")
-        digest = hashlib.sha256()
-        with open(path, "rb") as fh:
-            for block in iter(lambda: fh.read(1 << 20), b""):
-                digest.update(block)
-    except OSError as exc:
-        raise ModelError(f"The text recognition model at {path} can't be read: {exc}") from exc
-    if digest.hexdigest() != MODEL_SHA256:
-        raise ModelError(f"The text recognition model at {path} isn't the expected file")
+    verify_pinned(path, MODEL_SIZE, MODEL_SHA256, "text recognition")
 
 
 def cpu_session(model_path: str, intra_op_threads: int) -> ort.InferenceSession:
@@ -68,12 +55,7 @@ def cpu_session(model_path: str, intra_op_threads: int) -> ort.InferenceSession:
     Raises:
         ModelError: The model is missing or not the pinned file.
     """
-    verify_model(model_path)
-    return ort.InferenceSession(
-        model_path,
-        sess_options=_options(intra_op_threads),
-        providers=[("CPUExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"})],
-    )
+    return textdet.cpu_session(model_path, intra_op_threads, verify=verify_model, options=_options)
 
 
 def webgpu_session(model_path: str, device, intra_op_threads: int) -> ort.InferenceSession:
@@ -83,16 +65,9 @@ def webgpu_session(model_path: str, device, intra_op_threads: int) -> ort.Infere
         ModelError: The model is missing or not the pinned file.
         WebGpuSessionError: The session came up without the WebGPU provider.
     """
-    verify_model(model_path)
-    opts = _options(intra_op_threads)
-    opts.add_provider_for_devices([device], {})
-    session = ort.InferenceSession(model_path, sess_options=opts)
-    providers = session.get_providers()
-    if device.ep_name not in providers:
-        raise WebGpuSessionError(
-            f"ONNX Runtime didn't start {device.ep_name} for text recognition (providers: {providers})"
-        )
-    return session
+    return textdet.webgpu_session(
+        model_path, device, intra_op_threads, verify=verify_model, options=_options, label="text recognition"
+    )
 
 
 def characters(session: ort.InferenceSession) -> list[str]:

@@ -1,15 +1,12 @@
 """Logging breadcrumbs for webhook path → canonical resolution.
 
-Born from job ``be0151d2`` (2026-05-21): a Sonarr webhook for a file that
-existed on disk failed as "missing on disk" for hours. The forensic dig was
-slow precisely because the resolver was SILENT — it expanded ``/data/...``
+A Sonarr webhook for a file that existed on disk once failed as "missing on
+disk" for hours. The diagnosis was slow because the resolver was SILENT — it expanded ``/data/...``
 into the three backing-disk candidates, found none on disk (the media volume
 was a stale bind-mount showing the empty local underlay), and quietly fell
 back to ``matching_candidates[0]`` with no log line. The operator saw only
 the wrong resolved path, never the candidate set nor the "none existed"
 signal that points at a mount problem rather than a mapping typo.
-
-See ``project_stale_bindmount_missing_on_disk`` memory.
 """
 
 from __future__ import annotations
@@ -17,35 +14,8 @@ from __future__ import annotations
 import logging as _std_logging
 from unittest.mock import patch
 
-import pytest
-from loguru import logger as _loguru_logger
-
 from media_preview_generator.jobs.orchestrator import _resolve_webhook_path_to_canonical
 from media_preview_generator.servers.registry import server_config_from_dict
-
-
-@pytest.fixture
-def loguru_caplog(caplog):
-    """Bridge loguru → pytest caplog at DEBUG so both the WARNING fallback
-    line and the DEBUG resolved line are inspectable."""
-    handler_id = _loguru_logger.add(
-        lambda msg: caplog.records.append(
-            _std_logging.LogRecord(
-                name="loguru",
-                level=msg.record["level"].no,
-                pathname="",
-                lineno=0,
-                msg=msg.record["message"],
-                args=(),
-                exc_info=None,
-            )
-        ),
-        level="DEBUG",
-    )
-    try:
-        yield caplog
-    finally:
-        _loguru_logger.remove(handler_id)
 
 
 def _plex_with_tv_library() -> object:

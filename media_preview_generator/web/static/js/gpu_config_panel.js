@@ -10,23 +10,13 @@
 // Callers read per-GPU state back via collectGpuConfig() which returns the
 // array shape expected by /api/settings (gpu_config[]).
 
-function _gpuPanelEscapeHtml(str) {
-    if (str == null) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
 // Vendor mark for the small caption under the GPU name. Uses the shared
 // helper from app.js (window.MPGShared.gpuVendorLogo) so the dashboard and
 // settings/setup panels stay visually in sync. Falls back to escaped text
 // (e.g. "ARM", "UNKNOWN") when we don't ship an icon for the vendor.
 function _gpuPanelVendorMark(type) {
-    const fallback = `${_gpuPanelEscapeHtml(type || 'UNKNOWN')} &mdash; `;
-    const logo = window.MPGShared && window.MPGShared.gpuVendorLogo
-        ? window.MPGShared.gpuVendorLogo(type, 14)
-        : null;
-    return logo || fallback;
+    const fallback = `${escapeHtml(type || 'UNKNOWN')} &mdash; `;
+    return window.MPGShared.gpuVendorLogo(type, 14) || fallback;
 }
 
 function renderGpuConfigPanel(detectedGpus, savedConfig) {
@@ -50,7 +40,7 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
             card.className = 'card mb-2 border-danger';
             card.style.opacity = '0.85';
             const errorHtml = gpu.error_detail
-                ? `<br><span class="text-muted mt-1 d-inline-block">${_gpuPanelEscapeHtml(gpu.error_detail)}</span>`
+                ? `<br><span class="text-muted mt-1 d-inline-block">${escapeHtml(gpu.error_detail)}</span>`
                 : '';
             card.innerHTML = `
             <div class="card-body py-2 px-3">
@@ -59,15 +49,15 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
                         <div class="form-check form-switch mb-0">
                             <input class="form-check-input" id="${failedToggleId}" type="checkbox" disabled>
                             <label class="form-check-label fw-semibold text-muted" for="${failedToggleId}">
-                                ${_gpuPanelEscapeHtml(gpu.name || 'Unknown GPU')}
+                                ${escapeHtml(gpu.name || 'Unknown GPU')}
                             </label>
                         </div>
                         <span class="badge bg-danger ms-2">failed</span>
                     </div>
-                    <small class="text-muted mb-2">${_gpuPanelVendorMark(gpu.type)}${_gpuPanelEscapeHtml(gpu.device || 'N/A')}</small>
+                    <small class="text-muted mb-2">${_gpuPanelVendorMark(gpu.type)}${escapeHtml(gpu.device || 'N/A')}</small>
                     <div class="alert alert-danger mb-0 py-2 px-3" style="font-size: 0.85em;">
                         <i class="bi bi-exclamation-triangle-fill me-1"></i>
-                        <strong>${_gpuPanelEscapeHtml(gpu.error || 'Acceleration test failed')}</strong>
+                        <strong>${escapeHtml(gpu.error || 'Acceleration test failed')}</strong>
                         ${errorHtml}
                         <br><small class="text-muted">Fix the issue and click <strong>Re-scan GPUs</strong> below.</small>
                     </div>
@@ -87,10 +77,10 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
         // system-controlled but can legitimately contain quotes ("MSI GTX
         // 1080 Ti 11 \"GAMING X\" 11G") that would otherwise break the
         // attributes. Mirrors the failed-GPU branch above.
-        const safeName = _gpuPanelEscapeHtml(gpu.name || 'GPU');
-        const safeType = _gpuPanelEscapeHtml(gpu.type || '');
-        const safeDevice = _gpuPanelEscapeHtml(gpu.device || '');
-        const safeDeviceOrNa = _gpuPanelEscapeHtml(gpu.device || 'N/A');
+        const safeName = escapeHtml(gpu.name || 'GPU');
+        const safeType = escapeHtml(gpu.type || '');
+        const safeDevice = escapeHtml(gpu.device || '');
+        const safeDeviceOrNa = escapeHtml(gpu.device || 'N/A');
         const card = document.createElement('div');
         card.className = 'card mb-2';
         card.innerHTML = `
@@ -139,9 +129,7 @@ function renderGpuConfigPanel(detectedGpus, savedConfig) {
     if (typeof window._initBootstrapTooltips === 'function') window._initBootstrapTooltips(container);
     // Apply −/+ stepper buttons to the per-GPU Workers + FFmpeg Threads
     // inputs. Safe no-op if the helper isn't loaded (older pages).
-    if (window.MPGShared && window.MPGShared.attachSteppersTo) {
-        window.MPGShared.attachSteppersTo(container);
-    }
+    window.MPGShared.attachSteppersTo(container);
 }
 
 function toggleGpuRow(deviceId) {
@@ -210,22 +198,21 @@ function collectGpuConfig() {
 function renderGpuTuningPanel(detectedGpus, savedConfig) {
     const container = document.getElementById('gpuConfigList');
     const saved = new Map((savedConfig || []).map(gpu => [gpu.device, gpu]));
-    const esc = _gpuPanelEscapeHtml;
     const rows = detectedGpus.map((gpu, index) => {
         const config = saved.get(gpu.device) || {};
         const failed = gpu.status === 'failed';
-        const failure = failed ? `<div class="hint-line hint-bad"><i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i><span><strong>${esc(gpu.error || 'Acceleration test failed')}</strong>${gpu.error_detail ? ' ' + esc(gpu.error_detail) : ''} Fix the issue and click Re-scan GPUs.</span></div>` : '';
+        const failure = failed ? `<div class="hint-line hint-bad"><i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i><span><strong>${escapeHtml(gpu.error || 'Acceleration test failed')}</strong>${gpu.error_detail ? ' ' + escapeHtml(gpu.error_detail) : ''} Fix the issue and click Re-scan GPUs.</span></div>` : '';
         return `<div class="gpu-row${failed ? ' is-failed' : ''}">
             <span class="gpu-ico" aria-hidden="true"><i class="bi bi-gpu-card"></i></span>
-            <div class="gpu-main"><strong class="gpu-name">${esc(gpu.name || 'GPU')}</strong><div class="gpu-id">${_gpuPanelVendorMark(gpu.type)}${esc(gpu.device || '')}</div>${failure}</div>
+            <div class="gpu-main"><strong class="gpu-name">${escapeHtml(gpu.name || 'GPU')}</strong><div class="gpu-id">${_gpuPanelVendorMark(gpu.type)}${escapeHtml(gpu.device || '')}</div>${failure}</div>
             <div class="gpu-control"><label for="gpuTuning${index}">FFmpeg threads per worker</label>
             <input id="gpuTuning${index}" type="number" min="0" max="32" class="form-control gpu-tuning-threads has-stepper"
-                data-device="${esc(gpu.device)}" data-name="${esc(gpu.name)}" data-type="${esc(gpu.type)}" value="${config.ffmpeg_threads ?? 2}"></div></div>`;
+                data-device="${escapeHtml(gpu.device)}" data-name="${escapeHtml(gpu.name)}" data-type="${escapeHtml(gpu.type)}" value="${config.ffmpeg_threads ?? 2}"></div></div>`;
     }).join('');
     container.innerHTML = rows + `<div class="hint-line"><i class="bi bi-info-circle" aria-hidden="true"></i><span>CPU threads each GPU worker may use. 0 = no limit. Set worker counts in Worker groups.<button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="About FFmpeg threads" data-explain-title="FFmpeg threads per worker" data-explain-html="The GPU decodes the video, but FFmpeg still uses some CPU threads for filtering and scaling. This caps how many CPU threads each GPU worker uses, so several workers don&#39;t fight over your cores. 0 means no cap: FFmpeg picks its own. Default 2. Raise it only if the GPU sits idle while CPU cores are free. This does not change how many workers run; that is set per group in Worker groups. CPU workers always use as many threads as FFmpeg chooses." aria-label="About FFmpeg threads"><i class="bi bi-info-circle"></i></button></span></div>`;
     window._initBootstrapTooltips?.(container);
     container.querySelectorAll('input').forEach(input => input.addEventListener('change', () => {
         if (typeof markDirty === 'function') markDirty();
     }));
-    if (window.MPGShared && window.MPGShared.attachSteppersTo) window.MPGShared.attachSteppersTo(container);
+    window.MPGShared.attachSteppersTo(container);
 }

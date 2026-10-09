@@ -81,7 +81,7 @@ function applyPlexWebhookStatus(data) {
         warnBox.classList.add('d-none');
         warnBox.textContent = '';
         if (data.warning) {
-            warnBox.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>' + data.warning;
+            warnBox.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>' + escapeHtml(data.warning);
             warnBox.classList.remove('d-none');
         }
     }

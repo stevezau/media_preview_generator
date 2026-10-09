@@ -77,8 +77,7 @@ jobs:
           NVIDIA_VISIBLE_DEVICES: all
           NVIDIA_DRIVER_CAPABILITIES: all
         run: |
-          /home/data/.venv/bin/python -m pytest -m gpu -n 0 --no-cov -o addopts='' --tb=short -v \
-            || pytest -m gpu -n 0 --no-cov -o addopts='' --tb=short -v
+          python -m pytest -m gpu -n 0 --no-cov -o addopts='' --tb=short -v
 
       - name: Comment on PR (success)
         if: ${{ success() && github.event_name == 'pull_request' }}

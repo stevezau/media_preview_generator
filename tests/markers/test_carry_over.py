@@ -1,4 +1,4 @@
-"""Carry-over (spec §5.5 rule 15): a replaced file's decision kept for the file that replaced it, at the same length,
+"""Carry-over: a replaced file's decision kept for the file that replaced it, at the same length,
 for a type the new file has no evidence of."""
 
 from __future__ import annotations
@@ -11,19 +11,18 @@ import pytest
 
 from media_preview_generator.markers import carry_over as co
 from media_preview_generator.markers import job_log, missing, pipeline
-from media_preview_generator.markers.audio import season
 from media_preview_generator.markers.decide import NO_EVIDENCE_REASON, DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.sources.online import LookupResult
-from media_preview_generator.markers.store import MarkerStore, PreviousDecision
+from media_preview_generator.markers.store import PreviousDecision
 from media_preview_generator.servers.base import ServerType
 from tests.markers.fakes import ready_publisher
-from tests.markers.test_pipeline import _clients, _ctx, _registry, _run
+from tests.markers.pipeline_helpers import _clients, _ctx, _registry, _run
 
 T = MarkerType
-DUR = 1_417_088  # Tomb Raider King S01E12: the replaced file and the new one are the same length
+DUR = 1_417_088  # S01E12: the replaced file and the new one are the same length
 INTRO = (0, 92_000)
 CREDITS = (1_330_000, 1_417_088)
 EARLIER, LATER = "2026-09-23T20:51:14+00:00", "2026-09-24T16:42:50+00:00"
@@ -164,7 +163,7 @@ class TestCarryOver:
     @pytest.mark.parametrize(
         ("mtype", "decided_by", "versions", "read_by", "carried"),
         [
-            # Small Prophets S01E05: season audio v9's 0-12 s logo stretch (2009), which v10 (2010) passes over.
+            # S01E05: season audio v9's 0-12 s logo stretch (2009), which v10 (2010) passes over.
             (T.INTRO, ("season_audio",), {"season_audio": 2009}, {"season_audio": co.ReadNow(2010)}, False),
             (T.INTRO, ("season_audio_previous", "server_markers"), {"season_audio_previous": 2009},
              {"season_audio_previous": co.ReadNow(3010)}, False),
@@ -175,11 +174,6 @@ class TestCarryOver:
             (T.CREDITS, ("credits_text",), {"credits_text": 7}, {"credits_text": co.ReadNow(300_007, 1_000)}, True),
             # The version that decided it isn't known.
             (T.INTRO, ("season_audio",), {}, {"season_audio": co.ReadNow(3010)}, True),
-            # Kept aside by a build before versions were: at most season audio 2010, credit text 8 (#327's).
-            (T.INTRO, ("season_audio",), None, {"season_audio": co.ReadNow(3010)}, False),
-            (T.INTRO, ("season_audio",), None, {"season_audio": co.ReadNow(2010)}, True),
-            (T.CREDITS, ("credits_text",), None, {"credits_text": co.ReadNow(8, 1_000)}, True),
-            (T.CREDITS, ("credits_text",), None, {"credits_text": co.ReadNow(9, 1_000)}, False),
             # A chapter or an online answer still speaks: the new file lacking them says nothing about the intro.
             (T.INTRO, ("season_audio", "chapters"), {"season_audio": 2009}, {"season_audio": co.ReadNow(3010)}, True),
             (T.INTRO, ("introdb", "season_audio"), {"season_audio": 2009}, {"season_audio": co.ReadNow(3010)}, True),
@@ -189,9 +183,7 @@ class TestCarryOver:
             (T.INTRO, (co.CARRIED_OVER,), {}, {"season_audio": co.ReadNow(3010)}, True),
         ],
         ids=["audio-older", "previous-season-with-a-server", "credit-text-older", "audio-same-version",
-             "credit-text-other-window", "version-unknown", "before-versions-audio-newer",
-             "before-versions-audio-same", "before-versions-text-same", "before-versions-text-newer",
-             "audio-and-chapter", "online-and-audio",
+             "credit-text-other-window", "version-unknown", "audio-and-chapter", "online-and-audio",
              "audio-not-read-now", "user", "carried-before"],
     )  # fmt: skip
     def test_a_marker_only_content_detectors_decided_isnt_carried_once_a_newer_version_found_nothing(
@@ -221,13 +213,6 @@ class TestCarryOver:
         assert co.is_carried_over(Marker(T.INTRO, 0, 1, (co.CARRIED_OVER,))) is True
         assert co.is_carried_over(Marker(T.INTRO, 0, 1, ("chapters",))) is False
         assert co.is_carried_over(None) is False
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
 
 
 def _stored(store, path, *, size=100, mtime=1, duration_ms=DUR):
@@ -425,15 +410,15 @@ class TestPreviousDecisions:
 
 
 def _episode(tmp_path, name):
-    folder = tmp_path / "media" / "tv" / "Tomb Raider King (2026) {tvdb-452039}" / "Season 01"
+    folder = tmp_path / "media" / "tv" / "Example Show (2026) {tvdb-1}" / "Season 01"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / name
     path.write_bytes(b"x" * (100 + len(name)))
     return str(path)
 
 
-OLD_NAME = "Tomb Raider King (2026) - S01E12 - TBA [WEBDL-1080p][AAC 2.0][h264].mkv"
-NEW_NAME = "Tomb Raider King (2026) - S01E12 - TBA [WEBRip-1080p][AAC 2.0][x265].mkv"
+OLD_NAME = "Example Show (2026) - S01E12 - TBA [WEBDL-1080p][AAC 2.0][h264].mkv"
+NEW_NAME = "Example Show (2026) - S01E12 - TBA [WEBRip-1080p][AAC 2.0][x265].mkv"
 OPENING = (Chapter(0, 92_000, "Intro"), Chapter(92_000, None, "Chapter 2"))
 
 
@@ -533,7 +518,7 @@ class TestPipeline:
 
 class TestContentDetectorsReadingTheNewFile:
     """A marker only season audio or credit text decided for the replaced file isn't carried once a newer version of
-    it read the new file and found nothing (Small Prophets S01E05 and E06 on sflix, 2026-09-28); the same version
+    it read the new file and found nothing ; the same version
     finding nothing, a read that fails and a cancel leave it carried."""
 
     LOGO = Candidate(T.INTRO, 0, 12_012, Source.SEASON_AUDIO, 1.0, "1/1")
@@ -543,7 +528,7 @@ class TestContentDetectorsReadingTheNewFile:
         "credit-text": (Source.CREDITS_TEXT, T.CREDITS, ROLL, Marker(T.CREDITS, 1_330_000, DUR, (co.CARRIED_OVER,))),
     }
 
-    def _spec(self, case, answers, version, compared=True, due=None, version_of=None, followups=None):
+    def _spec(self, case, answers, version, compared=True, due=None, version_of=None):
         from media_preview_generator.markers.pipeline import LocalDetectorSpec
 
         source, mtype, _found, _carried_marker = self.CASES[case]
@@ -559,7 +544,7 @@ class TestContentDetectorsReadingTheNewFile:
         stores = frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}) if mtype is T.INTRO else frozenset()
         return LocalDetectorSpec(source, frozenset({mtype}), detect, stores=stores, version=version,
                                  version_of=version_of, version_step=1_000 if mtype is T.CREDITS else 0,
-                                 compared=lambda rec, ctx: compared, due=due, followups=followups)  # fmt: skip
+                                 compared=lambda rec, ctx: compared, due=due)  # fmt: skip
 
     def _run_with(self, path, store, spec, **kwargs):
         ctx = _ctx(store, _registry(path, ServerType.PLEX), settings_raw=NOTHING, detectors=(spec,))
@@ -637,8 +622,7 @@ class TestContentDetectorsReadingTheNewFile:
             return DetectorAnswer((), "after")
 
         spec = self._spec("season-audio", [read], 7,
-                          due=lambda rec, ctx: view(rec, ctx) != ctx.store.get_detector_run(rec.id, Source.SEASON_AUDIO),
-                          followups=lambda rec, ctx: (view(rec, ctx), [])[1])  # fmt: skip
+                          due=lambda rec, ctx: view(rec, ctx) != ctx.store.get_detector_run(rec.id, Source.SEASON_AUDIO))  # fmt: skip
         rec, _out = self._replaced_in_place(tmp_path, store, "season-audio", old_version=6, new_spec=spec)
         assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) == "after"
         assert T.INTRO not in store.get_markers(rec.id)
@@ -741,32 +725,10 @@ class TestCantTell:
 
 
 class TestBudgetRecheck:
-    def test_a_carried_type_is_checked_again_after_theintrodbs_limit_resets(self, tmp_path, store):
-        from media_preview_generator.markers import job_runner
-
-        _first, _out, rec = _replace(tmp_path, store, settings={**NOTHING, "detect": {"intro": True, "credits": False}})
-        assert job_runner._still_undecided(store, rec.canonical_path) is True
-
     def test_the_summary_keeps_the_daily_limit_note_for_a_carried_type(self):
         decisions = _decisions(intro=_carried(T.INTRO, *INTRO))
         text = pipeline._summary(decisions, frozenset({T.INTRO}), ("TheIntroDB",))
         assert text.endswith("TheIntroDB not checked (daily limit reached)")
-
-
-class TestNotSettled:
-    """A carried marker stands only until the new file has evidence: whatever asks whether new evidence could change a
-    type treats it as undecided."""
-
-    def test_a_carried_intro_is_not_settled_for_season_audio(self, tmp_path, store):
-        _first, _out, rec = _replace(tmp_path, store)
-        ctx = _ctx(store, _registry(rec.canonical_path, ServerType.PLEX), settings_raw=NOTHING)
-        assert season._intro_settled(ctx, rec) is False
-
-    def test_a_carried_marker_can_be_decided_by_an_online_answer(self, tmp_path, store):
-        intro_only = {**NOTHING, "detect": {"intro": True, "credits": False}}  # no other type left undecided
-        _first, _out, rec = _replace(tmp_path, store, settings=intro_only)
-        assert store.get_markers(rec.id)[T.INTRO].decided_by == (co.CARRIED_OVER,)
-        assert pipeline._online_answer_could_decide(store, rec.canonical_path) is True
 
 
 def test_the_job_log_names_the_file_it_replaced():

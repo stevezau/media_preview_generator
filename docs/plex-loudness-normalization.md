@@ -43,7 +43,7 @@ matches the file's size and Plex bundle hash before analysis. Inside the write t
 stream snapshot again. A changed source is left unwritten and checked again later.
 
 Enabled files get a loudness follow-up after their previews and any relevant Intro & Credits jobs, including
-webhooks, manual library runs and scheduled preview scans. Recently Added processing uses the same follow-up flow.
+webhooks and scheduled preview scans. Recently Added processing uses the same follow-up flow.
 Chapter thumbnails remain part of the Previews job; Intro & Credits and loudness are separate jobs. Follow-ups can
 appear in the queue together while waiting for the preceding jobs' first passes; they do not wait through every
 retry of those jobs. For a loudness-only backfill,

@@ -87,7 +87,7 @@ def test_settings_post_partial_markers_block_keeps_everything_it_doesnt_name(cli
 
 @pytest.mark.parametrize("posted", ["high", "medium", "sometimes"])
 def test_a_posted_or_stored_publish_when_is_dropped_on_save(client, posted):
-    # The High/Medium choice was removed (2026-09-24): an older client's value is ignored and an older settings.json's
+    # The High/Medium choice was removed: an older client's value is ignored and an older settings.json's
     # is dropped by the next save, with everything else kept.
     stored = _post_markers(client, {"publish_when": posted}, stored={**STORED_GLOBAL, "publish_when": "high"})
     assert stored == STORED_GLOBAL
@@ -281,7 +281,7 @@ def test_jellyfin_enable_saves(client):
 
 
 def test_plex_enabled_confirmed_carries_forward_without_markers_key(client):
-    """LOW regression: the carry-forward path must also work for an enabled, confirmed Plex block
+    """The carry-forward path must also work for an enabled, confirmed Plex block
     (the existing carry-forward test only covered a disabled block)."""
     from media_preview_generator.web.settings_manager import get_settings_manager
 
@@ -298,7 +298,7 @@ def test_plex_enabled_confirmed_carries_forward_without_markers_key(client):
 
 
 def test_partial_plex_disable_keeps_confirmation_and_library_choice(client):
-    """MED regression: PUT {"markers": {"enabled": false}} must not wipe db_write_confirmed_at,
+    """PUT {"markers": {"enabled": false}} must not wipe db_write_confirmed_at,
     library_ids, or on_plex_redetect just because the client only meant to flip `enabled`.
     Re-enabling afterwards must not re-require confirmation, since it was never actually lost.
     """
@@ -359,7 +359,7 @@ def test_partial_jellyfin_update_keeps_library_ids(client):
 
 
 def test_partial_plex_update_non_dict_plex_is_400(client):
-    """MED regression: a non-dict posted `plex` (e.g. a plain string) must 400 through
+    """A non-dict posted `plex` (e.g. a plain string) must 400 through
     validate_server's own "markers.plex must be an object" check, not crash the merge helper with
     a TypeError trying to spread a non-mapping."""
     from media_preview_generator.web.settings_manager import get_settings_manager
@@ -378,7 +378,7 @@ def test_partial_plex_update_non_dict_plex_is_400(client):
 
 
 def test_partial_plex_update_explicit_null_plex_clears_confirmation(client):
-    """MED regression: an explicit `"plex": null` must win over the stored `plex` dict (clearing
+    """An explicit `"plex": null` must win over the stored `plex` dict (clearing
     the confirmation), not be silently ignored by the merge helper."""
     from media_preview_generator.web.settings_manager import get_settings_manager
 
@@ -396,7 +396,7 @@ def test_partial_plex_update_explicit_null_plex_clears_confirmation(client):
 
 
 def test_partial_plex_clear_confirmation_alone_while_enabled_is_400(client):
-    """LOW: clearing db_write_confirmed_at without also disabling is refused (safe — it would
+    """Clearing db_write_confirmed_at without also disabling is refused (safe — it would
     otherwise leave the server enabled with no confirmation on record) — and nothing is saved."""
     from media_preview_generator.web.settings_manager import get_settings_manager
 
@@ -414,7 +414,7 @@ def test_partial_plex_clear_confirmation_alone_while_enabled_is_400(client):
 
 
 def test_partial_plex_clear_confirmation_with_disable_succeeds(client):
-    """LOW: the same confirmation-clearing edit succeeds once paired with `enabled: false`."""
+    """The same confirmation-clearing edit succeeds once paired with `enabled: false`."""
     from media_preview_generator.web.settings_manager import get_settings_manager
 
     confirmed_block = {

@@ -66,10 +66,7 @@ done
 # 4. Capture credentials
 echo
 echo "==> setup_servers.py"
-PYTHON="${PYTHON:-/home/data/.venv/bin/python}"
-if [[ ! -x "${PYTHON}" ]]; then
-    PYTHON="$(command -v python3 || command -v python)"
-fi
+PYTHON="${PYTHON:-$(command -v python3 || command -v python)}"
 "${PYTHON}" "${HERE}/setup_servers.py"
 
 echo

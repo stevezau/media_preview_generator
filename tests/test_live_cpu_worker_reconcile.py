@@ -157,11 +157,6 @@ def _fake_detected_gpu():
     return patch.dict(_helpers._gpu_cache, {"result": [{"type": "nvidia", "device": GPU_DEVICE, "name": "Fake GPU"}]})
 
 
-def _gpu_workers_in(value) -> int | None:
-    entries = value if isinstance(value, list) else []
-    return next((e.get("workers") for e in entries if isinstance(e, dict) and e.get("device") == GPU_DEVICE), None)
-
-
 class TestSaveSettingsReconcilesCpuWorkers:
     def test_live_pool_resized_when_cpu_threads_saved(self, app):
         pool = _live_pool(app, cpu=2)

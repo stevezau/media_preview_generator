@@ -319,7 +319,7 @@ class TestPlexWebhookRoutesToOriginatingServer:
             f"media_servers[0]), got {mock_resolve.call_args.kwargs!r}"
         )
 
-    def test_disabled_pin_falls_through_with_warning(self, client, caplog):
+    def test_disabled_pin_falls_through_to_payload_uuid(self, client):
         """A ``?server_id=`` pin pointing at a DISABLED Plex must not
         be silently honoured — ``derive_legacy_plex_view`` would then
         fail to match and return the first enabled Plex's view, the
@@ -370,7 +370,7 @@ class TestPlexWebhookRoutesToOriginatingServer:
             f"disabled pin must NOT be honoured; payload uuid should win, got {mock_resolve.call_args.kwargs!r}"
         )
 
-    def test_non_plex_pin_falls_through_with_warning(self, client):
+    def test_non_plex_pin_falls_through_to_payload_uuid(self, client):
         """``?server_id=`` pointing at an Emby/Jellyfin entry by mistake
         must not be accepted. Same first-Plex-ghost concern as the
         disabled case."""
@@ -411,7 +411,7 @@ class TestPlexWebhookRoutesToOriginatingServer:
             f"got {mock_resolve.call_args.kwargs!r}"
         )
 
-    def test_identity_collision_warns_and_falls_back(self, client, caplog):
+    def test_identity_collision_warns_and_falls_back(self, client):
         """Two Plex servers sharing the same machineIdentifier (cloned-
         VM edge case) — the resolver can't pick one, logs a warning,
         and returns None so the downstream lookup falls back to

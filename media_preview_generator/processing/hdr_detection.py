@@ -109,9 +109,8 @@ def detect_dolby_vision_rpu_error(stderr_lines: list[str]) -> bool:
     # Known fatal Dolby Vision parsing signatures (extend as new cases are reported).
     # Keep these specific to avoid triggering on benign informational/warning messages.
     fatal_signatures = [
+        # Some FFmpeg builds append more context after this core message.
         "multiple dolby vision rpus found in one au",
-        # Some FFmpeg builds append additional context after the core message.
-        "multiple dolby vision rpus found in one au. skipping previous.",
     ]
 
     stderr_text = " ".join(stderr_lines).lower()

@@ -177,18 +177,6 @@ hr {
   margin: 2.5rem 0;
 }
 
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
 .skip-link {
   position: absolute;
   left: 0.5rem;
@@ -2177,10 +2165,6 @@ figcaption {
 }
 
 /* ---------------------------------------------------------------- utils -- */
-
-.stack-lg > * + * {
-  margin-top: clamp(1.75rem, 1rem + 2.5vw, 2.75rem);
-}
 
 .center {
   text-align: center;

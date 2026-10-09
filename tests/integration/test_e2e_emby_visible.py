@@ -27,7 +27,6 @@ the timeline, and confirm thumbnails appear.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import requests
@@ -39,39 +38,7 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
-
-_JPEG_SOI = bytes([0xFF, 0xD8, 0xFF])
-
-
-@pytest.fixture
-def emby_visible_config(tmp_path):
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = ""
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
+from tests.integration.conftest import JPEG_SOI
 
 
 @pytest.fixture
@@ -102,7 +69,7 @@ class TestEmbyBifFormatSpec:
     """Strict format compliance: filename pattern + BIF magic + index + JPEG SOI on every frame."""
 
     def test_published_bif_is_format_spec_compliant(
-        self, emby_visible_registry, emby_visible_config, media_root, emby_credentials
+        self, emby_visible_registry, live_config, media_root, emby_credentials
     ):
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
         sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
@@ -113,7 +80,7 @@ class TestEmbyBifFormatSpec:
             result = process_canonical_path(
                 canonical_path=canonical,
                 registry=emby_visible_registry,
-                config=emby_visible_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
             )
@@ -150,7 +117,7 @@ class TestEmbyBifFormatSpec:
             raw = sidecar.read_bytes()
             for idx, offset in enumerate(meta.frame_offsets):
                 soi = raw[offset : offset + 3]
-                assert soi == _JPEG_SOI, f"Frame {idx} at offset {offset} doesn't start with JPEG SOI: {soi.hex()}"
+                assert soi == JPEG_SOI, f"Frame {idx} at offset {offset} doesn't start with JPEG SOI: {soi.hex()}"
 
             # ----- Emby accepts a refresh trigger for the same library -----
             # Proves the file is at least visible to Emby's scanner —
@@ -186,7 +153,7 @@ class TestEmbyBifNamingMatchesEmbyConvention:
         ],
     )
     def test_filename_includes_width_and_interval(
-        self, width, interval, expected_suffix, emby_credentials, media_root, emby_visible_config
+        self, width, interval, expected_suffix, emby_credentials, media_root, live_config
     ):
         """Different (width, interval) → different filename. Multiple resolutions
         can coexist next to one source file."""

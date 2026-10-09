@@ -1095,22 +1095,6 @@ html[data-bs-theme="light"] .card-header {
     font-weight: 500;
 }
 
-/* Stat callouts on the dashboard. */
-.stat-value {
-    font-size: 1.6rem;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    line-height: 1.05;
-}
-
-.stat-label {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--bs-secondary-color);
-    font-weight: 600;
-}
-
 /* Progress bars */
 .progress {
     height: 1.5rem;
@@ -1146,28 +1130,6 @@ html[data-bs-theme="dark"] .table-hover tbody tr:hover {
 .btn-warning:hover {
     background-color: #c98b0b;
     border-color: #c98b0b;
-    color: #000;
-}
-
-/* Job status badges */
-.badge-pending {
-    background-color: #6c757d;
-}
-
-.badge-running {
-    background-color: #0d6efd;
-}
-
-.badge-completed {
-    background-color: #198754;
-}
-
-.badge-failed {
-    background-color: #dc3545;
-}
-
-.badge-cancelled {
-    background-color: #ffc107;
     color: #000;
 }
 
@@ -1493,7 +1455,6 @@ html[data-bs-theme="light"] ::-webkit-scrollbar-thumb:hover {
 
 /* Responsive adjustments */
 @media (max-width: 768px) {
-    .stat-value { font-size: 1.25rem; }
     .table-responsive { font-size: 0.875rem; }
 
     /* Tighter card padding on phones so the cards don't waste a third
@@ -2156,31 +2117,6 @@ html[data-bs-theme="light"] .gpu-card {
     border-color: #cbd5e1;
 }
 
-/* Legacy `.badge-*` family — predates the `.bg-*` Bootstrap overhaul
- * and hardcoded saturated colors that bypass the tinted-bg pattern.
- * Mirror the tinted treatment so light-mode badges are calm DATA, not
- * "alert!" stripes. */
-html[data-bs-theme="light"] .badge-pending {
-    background-color: var(--bs-secondary-bg-subtle);
-    color: var(--bs-secondary-text-emphasis);
-}
-html[data-bs-theme="light"] .badge-running {
-    background-color: var(--bs-primary-bg-subtle);
-    color: var(--bs-primary-text-emphasis);
-}
-html[data-bs-theme="light"] .badge-completed {
-    background-color: var(--bs-success-bg-subtle);
-    color: var(--bs-success-text-emphasis);
-}
-html[data-bs-theme="light"] .badge-failed {
-    background-color: var(--bs-danger-bg-subtle);
-    color: var(--bs-danger-text-emphasis);
-}
-html[data-bs-theme="light"] .badge-cancelled {
-    background-color: var(--bs-warning-bg-subtle);
-    color: var(--bs-warning-text-emphasis);
-}
-
 /* Priority dots — drop saturation so they read as labels, not alarms. */
 
 /* Log search-result highlight. The 30%-opacity orange reads as candy
@@ -2467,13 +2403,9 @@ html[data-bs-theme="light"] #logsContent {
     float: none;
     margin-left: 0;
 }
-/* Jobs queue: the ↳ of a follow-up explains itself on hover, and an Intro & Credits row's file list keeps each file to
- * one line, its title before its file name. */
+/* Jobs queue: the ↳ of a follow-up explains itself on hover. */
 .job-follow-arrow {
     cursor: help;
-}
-.job-file-list .job-file {
-    max-width: 100%;
 }
 
 /* Notification bell badge: a 16px count pill ringed in the navbar colour (set per theme below). */
@@ -2647,7 +2579,7 @@ html[data-bs-theme="light"] .card-header { border-bottom-color: var(--surface-bo
 }
 
 /* Numbers that change are tabular so a ticking count does not shimmer. */
-.stat, .stat-value, .queue-progress, .queue-created, .wh-time, .occ-chip, input[type="number"] { font-variant-numeric: tabular-nums; }
+.stat, .queue-progress, .queue-created, .wh-time, .occ-chip, input[type="number"] { font-variant-numeric: tabular-nums; }
 @media (pointer: coarse) {
     .navbar-brand, .navbar-version { display: inline-flex; align-items: center; min-height: 44px; }
 }

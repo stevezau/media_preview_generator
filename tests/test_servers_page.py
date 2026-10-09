@@ -11,7 +11,6 @@ from media_preview_generator.web.settings_manager import get_settings_manager
 def mock_auth_config(tmp_path, monkeypatch):
     auth_file = str(tmp_path / "auth.json")
     monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", auth_file)
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
     from media_preview_generator.web.settings_manager import reset_settings_manager
 
     reset_settings_manager()

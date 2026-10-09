@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Capture Plex, Jellyfin and Emby web players mid-scrub, showing thumbnails this app generated.
 
-    /home/data/.venv/bin/python tests/e2e/snapshots/lab_players.py --server all
-    /home/data/.venv/bin/python tests/e2e/snapshots/lab_players.py --server emby --at 0.55 --dump
+    python tests/e2e/snapshots/lab_players.py --server all
+    python tests/e2e/snapshots/lab_players.py --server emby --at 0.55 --dump
 
-Runs against the site lab (docs/design/site-redesign-lab/, Task 4): the same film on every server,
+Runs against the site lab (docs/design/site-redesign-lab/lab_setup.py): the same film on every server,
 paused, with the pointer held over the seek bar at --at (a fraction of its width). A capture only
 counts if the browser fetched the server's preview data while hovering (Plex: /indexes/sd, Jellyfin:
 /Trickplay/), which is the proof the thumbnail on screen came from those files. Emby's thumbnail URLs
@@ -36,7 +36,7 @@ import lab_setup  # noqa: E402  (the lab's API helpers and constants)
 
 from media_preview_generator.bif_reader import read_bif_frame, read_bif_metadata  # noqa: E402
 
-CAPTURES = Path(os.environ.get("OPENFILMS_DIR", "/home/data/mlab-openfilms")) / "captures"
+CAPTURES = Path(os.environ.get("OPENFILMS_DIR", "openfilms")) / "captures"
 FILM = "Tears of Steel"
 VIEWPORT = {"width": 1280, "height": 720}
 LAB_USER = ("lab", "lab")

@@ -1,6 +1,6 @@
 """Tests for the core processing workflow in processing.py.
 
-Covers run_processing() with mocked Plex, WorkerPool, and config
+Covers run_processing() with mocked Plex, dispatcher, and config
 to exercise the library scan flow, webhook flow, cancellation,
 error handling, callbacks, and cleanup paths.
 """
@@ -33,8 +33,43 @@ def _make_config(tmp_path, **overrides):
     return SimpleNamespace(**defaults)
 
 
+@contextmanager
+def fake_dispatch():
+    """Replace the shared dispatcher with a recorder.
+
+    ``run_processing`` hands its ProcessableItems to ``_dispatch_processable_items``. This stub forwards them to
+    ``runner.return_value.dispatch_items(items, config, registry, library_name=...)`` so a test can set the
+    tracker-style result it gets back and assert on exactly what was dispatched.
+    """
+    runner = MagicMock()
+
+    def bridge(items, *, config, registry, library_name="", return_result=False, **kwargs):
+        runner.dispatch_kwargs = kwargs
+        result = runner.return_value.dispatch_items(
+            [item for _server_cfg, item in items], config, registry, library_name=library_name
+        )
+        return result if return_result else result["outcome"]
+
+    with patch(f"{MODULE}._dispatch_processable_items", side_effect=bridge):
+        yield runner
+
+
+@contextmanager
+def _real_dispatch_with_mock_dispatcher(result):
+    """Run the real ``_dispatch_processable_items`` against a dispatcher whose tracker returns ``result``."""
+    tracker = MagicMock(completed=result["completed"])
+    tracker.get_result.return_value = result
+    dispatcher = MagicMock()
+    dispatcher.submit_items.return_value = tracker
+    with (
+        patch("media_preview_generator.jobs.dispatcher.get_dispatcher", return_value=dispatcher),
+        patch("media_preview_generator.web.jobs.PRIORITY_NORMAL", 2, create=True),
+    ):
+        yield dispatcher
+
+
 def _pool_result(completed=0, failed=0, cancelled=False, outcome=None):
-    """Build a dict matching WorkerPool.process_items_headless return value."""
+    """Build the tracker-style result dict the dispatcher returns for one dispatch."""
     if outcome is None:
         outcome = {r.value: 0 for r in ProcessingResult}
         outcome["generated"] = completed
@@ -45,10 +80,6 @@ def _pool_result(completed=0, failed=0, cancelled=False, outcome=None):
         "cancelled": cancelled,
         "outcome": outcome,
     }
-
-
-def _make_section(title):
-    return SimpleNamespace(title=title)
 
 
 def _processable(key, title, *, canonical_path=None, server_id="plex-1", library_id="lib-1"):
@@ -72,26 +103,6 @@ def _processable(key, title, *, canonical_path=None, server_id="plex-1", library
 def _processables(items, *, server_id="plex-1", library_id="lib-1"):
     """Bulk version of :func:`_processable` — converts ``[(key, title, _media)]``."""
     return [_processable(key, title, server_id=server_id, library_id=library_id) for key, title, *_ in items]
-
-
-def _webhook_resolution_payload(items=None, unresolved=None, skipped=None, path_hints=None):
-    """Build a webhook-resolution stand-in that includes ``items_with_locations``.
-
-    ``run_processing`` reads ``items_with_locations`` (4-tuples with the Plex
-    side's locations) to build ProcessableItems for dispatch, while the
-    legacy ``items`` field stays the 3-tuple shape callers historically used.
-    """
-    items = items or []
-    items_with_locations = [
-        (key, [f"/data/{title.replace(' ', '_')}_{key}.mkv"], title, mt) for key, title, mt in items
-    ]
-    return SimpleNamespace(
-        items=list(items),
-        unresolved_paths=unresolved or [],
-        skipped_paths=skipped or [],
-        path_hints=path_hints or [],
-        items_with_locations=items_with_locations,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -140,13 +151,11 @@ def _isolate(tmp_path):
 
 
 class TestMultiServerGuards:
-    """Tests for the multi-server full-scan path (Phase D of the multi-server
-    completion).
+    """Tests for the multi-server full-scan path.
 
-    Originally these were "no-op skip" guards that bailed when no Plex was
-    configured; Phase D wires up the per-vendor processor + ThreadPoolExecutor
-    so non-Plex full-scans actually run instead. The tests now assert the
-    multi-server path is invoked.
+    With no Plex configured, or a scan pinned to a non-Plex server, the
+    per-vendor processor path runs the full scan instead of skipping it.
+    The tests assert the multi-server path is invoked.
     """
 
     def test_no_plex_full_scan_routes_through_multi_server_scan(self, tmp_path):
@@ -189,7 +198,7 @@ class TestMultiServerGuards:
         """No-Plex install routes webhook_paths through the worker pool.
 
         Confirms the unified webhook phase builds ProcessableItems and
-        runs them through ``WorkerPool`` for any path an enabled
+        dispatches them to the shared dispatcher for any path an enabled
         non-Plex server claims (Emby in this case).
         """
         config = _make_config(
@@ -199,10 +208,10 @@ class TestMultiServerGuards:
             webhook_paths=["/data/movies/Foo.mkv"],
         )
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
             mock_sm.return_value.get.return_value = [
                 {
                     "id": "emby-1",
@@ -220,10 +229,9 @@ class TestMultiServerGuards:
             ]
             result = run_processing(config, selected_gpus=[])
 
-        # WorkerPool.process_items_headless ran exactly once for the
-        # single webhook path — proving the worker pool is engaged.
-        MockPool.return_value.process_items_headless.assert_called_once()
-        items_arg = MockPool.return_value.process_items_headless.call_args.args[0]
+        # The dispatcher ran exactly once for the single webhook path.
+        MockPool.return_value.dispatch_items.assert_called_once()
+        items_arg = MockPool.return_value.dispatch_items.call_args.args[0]
         assert len(items_arg) == 1
         assert items_arg[0].canonical_path == "/data/movies/Foo.mkv"
         assert result is not None
@@ -231,7 +239,7 @@ class TestMultiServerGuards:
 
     def test_webhook_dispatches_to_all_owning_servers(self, tmp_path):
         """Unified peer-equal dispatch: every webhook path runs through
-        a single ``WorkerPool`` call. ``process_canonical_path`` then
+        a single dispatch. ``process_canonical_path`` then
         fans out to every owning server (Plex, Emby, Jellyfin) in
         parallel — the orchestrator no longer pre-resolves through Plex
         and falls back to a "K4" stage for the rest.
@@ -242,10 +250,10 @@ class TestMultiServerGuards:
         )
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=3)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=3)
             # Both servers own /data/* — unified dispatch builds one
             # ProcessableItem per webhook path and lets process_canonical_path
             # publish to whichever servers own each path.
@@ -267,7 +275,7 @@ class TestMultiServerGuards:
 
         # Exactly one dispatch_items call carrying all three webhook
         # paths — there's no K4 fallback split.
-        all_calls = MockPool.return_value.process_items_headless.call_args_list
+        all_calls = MockPool.return_value.dispatch_items.call_args_list
         webhook_calls = [
             c
             for c in all_calls
@@ -286,16 +294,16 @@ class TestMultiServerGuards:
         """
         from loguru import logger
 
-        config = _make_config(tmp_path, webhook_paths=["/data_16tb/Movies/x.mkv"])
+        config = _make_config(tmp_path, webhook_paths=["/data_disk/Movies/x.mkv"])
 
         captured: list[str] = []
         sink_id = logger.add(lambda msg: captured.append(str(msg)), level="INFO")
         try:
             with (
-                patch(f"{MODULE}.WorkerPool") as MockPool,
+                fake_dispatch() as MockPool,
                 patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
             ):
-                MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
+                MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
                 mock_sm.return_value.get.return_value = [
                     {
                         "id": "plex-a",
@@ -308,7 +316,7 @@ class TestMultiServerGuards:
                             {
                                 "id": "1",
                                 "name": "Movies",
-                                "remote_paths": ["/data_16tb/Movies"],
+                                "remote_paths": ["/data_disk/Movies"],
                                 "enabled": True,
                             }
                         ],
@@ -336,10 +344,10 @@ class TestMultiServerGuards:
         config.webhook_item_id_hints = {"/data/movies/Foo.mkv": {"plex-1": "k1"}}
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
             mock_sm.return_value.get.return_value = [
                 {
                     "id": "plex-1",
@@ -350,8 +358,8 @@ class TestMultiServerGuards:
             ]
             run_processing(config, selected_gpus=[])
 
-        MockPool.return_value.process_items_headless.assert_called_once()
-        items = MockPool.return_value.process_items_headless.call_args.args[0]
+        MockPool.return_value.dispatch_items.assert_called_once()
+        items = MockPool.return_value.dispatch_items.call_args.args[0]
         assert len(items) == 1
         assert items[0].canonical_path == "/data/movies/Foo.mkv"
         assert items[0].item_id_by_server == {"plex-1": "k1"}
@@ -373,10 +381,10 @@ class TestMultiServerGuards:
         config = _make_config(tmp_path, webhook_paths=["/data/Movies/X.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
             mock_sm.return_value.get.return_value = [
                 {
                     "id": "plex-a",
@@ -415,10 +423,10 @@ class TestMultiServerGuards:
         # important: in production the dispatcher's downstream
         # ownership check would now find BOTH Plex and Emby as owners
         # — so process_canonical_path will fan out to both. Without
-        # the P2 fix, only the first candidate's owner (Plex) survived
+        # aggregation across candidates, only the first candidate's owner (Plex) survived
         # and Emby was silently dropped.
-        MockPool.return_value.process_items_headless.assert_called_once()
-        items = MockPool.return_value.process_items_headless.call_args.args[0]
+        MockPool.return_value.dispatch_items.assert_called_once()
+        items = MockPool.return_value.dispatch_items.call_args.args[0]
         assert len(items) == 1
         # The canonical_path picked must be one of the matching
         # candidates — either /plex-mount/Movies/X.mkv or
@@ -434,7 +442,7 @@ class TestMultiServerGuards:
         """Production regression — a Sonarr webhook for ``/data/TV Shows/X.mkv``
         was being fast-skipped as "no enabled server claims" even though
         Plex/Emby/Jellyfin all owned the path via their library
-        ``/data_16tb/TV Shows`` plus a configured
+        ``/data_disk/TV Shows`` plus a configured
         ``webhook_prefixes=['/data']`` translation.
 
         The fast-skip gate must apply ``apply_webhook_prefixes`` before
@@ -450,14 +458,14 @@ class TestMultiServerGuards:
         config = _make_config(tmp_path, webhook_paths=["/data/TV Shows/Show/S01E01.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
-            # Plex library at /data_16tb/TV Shows; webhook_prefixes
-            # tells the resolver "/data" maps to "/data_16tb" for
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
+            # Plex library at /data_disk/TV Shows; webhook_prefixes
+            # tells the resolver "/data" maps to "/data_disk" for
             # webhook payload translation. Webhook payload arrives with
-            # /data/... — must translate to /data_16tb/... before the
+            # /data/... — must translate to /data_disk/... before the
             # ownership check.
             mock_sm.return_value.get.return_value = [
                 {
@@ -468,14 +476,14 @@ class TestMultiServerGuards:
                         {
                             "id": "1",
                             "name": "TV",
-                            "remote_paths": ["/data_16tb/TV Shows"],
+                            "remote_paths": ["/data_disk/TV Shows"],
                             "enabled": True,
                         }
                     ],
                     "path_mappings": [
                         {
-                            "plex_prefix": "/data_16tb",
-                            "local_prefix": "/data_16tb",
+                            "plex_prefix": "/data_disk",
+                            "local_prefix": "/data_disk",
                             "webhook_prefixes": ["/data"],
                         }
                     ],
@@ -486,8 +494,8 @@ class TestMultiServerGuards:
         # The headline assertion: the path was DISPATCHED, not fast-skipped.
         # Without the webhook-prefix translation, this call_count would
         # be 0.
-        MockPool.return_value.process_items_headless.assert_called_once()
-        items = MockPool.return_value.process_items_headless.call_args.args[0]
+        MockPool.return_value.dispatch_items.assert_called_once()
+        items = MockPool.return_value.dispatch_items.call_args.args[0]
         assert len(items) == 1, f"Expected one dispatched item; got {len(items)}"
         # And the canonical_path on the ProcessableItem is the
         # SERVER-VIEW form, not the raw webhook-view form. This is
@@ -497,7 +505,7 @@ class TestMultiServerGuards:
         # ``/data/...`` would let the orchestrator gate pass while
         # the downstream worker bails NO_OWNERS — the precise live
         # regression caught in job 6eca6721.
-        assert items[0].canonical_path == "/data_16tb/TV Shows/Show/S01E01.mkv", (
+        assert items[0].canonical_path == "/data_disk/TV Shows/Show/S01E01.mkv", (
             f"canonical_path must be translated to the server-view form so "
             f"process_canonical_path's ownership check finds the owner; got {items[0].canonical_path!r}"
         )
@@ -515,10 +523,10 @@ class TestMultiServerGuards:
         config = _make_config(tmp_path, webhook_paths=["/mnt/data/Movies/X.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=0)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=0)
             # Server's library at /data/Movies appears as a path-
             # boundary substring of the webhook's /mnt/data/Movies/X.mkv;
             # extra prefix is /mnt — that's the gap a path mapping
@@ -559,10 +567,10 @@ class TestMultiServerGuards:
         config = _make_config(tmp_path, webhook_paths=["/tv/Show/S01E01.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=0)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=0)
             mock_sm.return_value.get.return_value = [
                 {
                     "id": "plex-a",
@@ -600,10 +608,10 @@ class TestMultiServerGuards:
         config.server_id_filter = "plex-a"
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
             mock_sm.return_value.get.return_value = [
                 {
                     "id": "plex-a",
@@ -620,18 +628,16 @@ class TestMultiServerGuards:
             ]
             run_processing(config, selected_gpus=[])
 
-        MockPool.return_value.process_items_headless.assert_called_once()
-        items = MockPool.return_value.process_items_headless.call_args.args[0]
+        MockPool.return_value.dispatch_items.assert_called_once()
+        items = MockPool.return_value.dispatch_items.call_args.args[0]
         assert len(items) == 1
-        # ProcessableItem.server_id is empty (no vendor hint) but the
-        # Config.server_id_filter pin propagates separately through to
-        # process_canonical_path (verified via a downstream contract test
-        # in test_jobs.py / test_dispatcher_*).
+        # The item carries no vendor hint; the pin travels beside it as server_id_filter.
+        assert MockPool.dispatch_kwargs["server_id_filter"] == "plex-a"
 
     def test_failed_dispatch_returns_raw_webhook_path_not_canonical(self, tmp_path):
         """Audit A3/A4 — when a webhook arrives in source view
         (``/data/Movies/X.mkv``), gets translated to a server-view
-        canonical (``/data_16tb/Movies/X.mkv``), and dispatch reports
+        canonical (``/data_disk/Movies/X.mkv``), and dispatch reports
         a FAILED outcome, the unresolved_paths list must store the
         RAW webhook input (``/data/...``), not the translated
         canonical. Retry jobs key webhook_item_id_hints by the raw
@@ -640,12 +646,12 @@ class TestMultiServerGuards:
         config = _make_config(tmp_path, webhook_paths=["/data/Movies/X.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
             # Simulate dispatch returning FAILED for the item, named by its
             # (server-view) canonical path as the pool reports it.
-            MockPool.return_value.process_items_headless.side_effect = lambda items, *a, **kw: {
+            MockPool.return_value.dispatch_items.side_effect = lambda items, *a, **kw: {
                 **_pool_result(completed=0, failed=1),
                 "failed_paths": [item.canonical_path for item in items],
             }
@@ -655,12 +661,12 @@ class TestMultiServerGuards:
                     "type": "plex",
                     "enabled": True,
                     "libraries": [
-                        {"id": "1", "name": "Movies", "remote_paths": ["/data_16tb/Movies"], "enabled": True}
+                        {"id": "1", "name": "Movies", "remote_paths": ["/data_disk/Movies"], "enabled": True}
                     ],
                     "path_mappings": [
                         {
-                            "plex_prefix": "/data_16tb",
-                            "local_prefix": "/data_16tb",
+                            "plex_prefix": "/data_disk",
+                            "local_prefix": "/data_disk",
                             "webhook_prefixes": ["/data"],
                         }
                     ],
@@ -669,7 +675,7 @@ class TestMultiServerGuards:
             result = run_processing(config, selected_gpus=[])
 
         # The orchestrator translated the webhook path to
-        # ``/data_16tb/Movies/X.mkv`` for the ProcessableItem, but the
+        # ``/data_disk/Movies/X.mkv`` for the ProcessableItem, but the
         # FAILED outcome must be reported against the RAW input
         # ``/data/Movies/X.mkv`` so retry hint keying still works.
         resolution = result.get("webhook_resolution") or {}
@@ -681,7 +687,7 @@ class TestMultiServerGuards:
         )
         # And the canonical (translated) form must NOT be in the list
         # — that's the namespace-mixing bug the audit flagged.
-        assert "/data_16tb/Movies/X.mkv" not in unresolved, (
+        assert "/data_disk/Movies/X.mkv" not in unresolved, (
             f"Server-view canonical leaked into unresolved_paths; namespace mixing. got {unresolved!r}"
         )
 
@@ -707,10 +713,10 @@ class TestMultiServerGuards:
         config.webhook_item_id_hints = {"/data/freshly_added_library/X.mkv": {"plex-1": "k1"}}
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
             # Plex configured but its libraries don't cover the
             # webhook path — staleness simulated by an unrelated
             # library entry.
@@ -728,8 +734,8 @@ class TestMultiServerGuards:
         # The path was DISPATCHED despite no library coverage. The
         # ProcessableItem carries the hint so the dispatcher can
         # publish via plex-1's adapter directly.
-        MockPool.return_value.process_items_headless.assert_called_once()
-        items = MockPool.return_value.process_items_headless.call_args.args[0]
+        MockPool.return_value.dispatch_items.assert_called_once()
+        items = MockPool.return_value.dispatch_items.call_args.args[0]
         assert len(items) == 1, (
             f"Expected one dispatched item; got {len(items)}. Audit A2: a vendor hint "
             "for a path with no library coverage must STILL dispatch — the dispatcher's "
@@ -805,10 +811,10 @@ class TestMultiServerGuards:
         config = _make_config(tmp_path, webhook_paths=["/data/Sports/Match.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=0)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=0)
             # Plex configured but with /data/Movies — no library claims
             # /data/Sports/* so the path has no owners.
             mock_sm.return_value.get.return_value = [
@@ -822,7 +828,7 @@ class TestMultiServerGuards:
             result = run_processing(config, selected_gpus=[])
 
         # No worker dispatch for the unowned path.
-        for call in MockPool.return_value.process_items_headless.call_args_list:
+        for call in MockPool.return_value.dispatch_items.call_args_list:
             for item in call.args[0]:
                 assert item.canonical_path != "/data/Sports/Match.mkv", (
                     "Unowned path was dispatched to a worker — should fast-skip with no pickup."
@@ -846,17 +852,17 @@ class TestLibraryScanFlow:
                 f"{MODULE}._enumerate_plex_full_scan_items",
                 return_value=iter(items_a + items_b),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
             pool_inst = MockPool.return_value
-            pool_inst.process_items_headless.return_value = _pool_result(completed=3)
+            pool_inst.dispatch_items.return_value = _pool_result(completed=3)
 
             result = run_processing(config, selected_gpus=[])
 
         assert result is not None
         assert result["outcome"]["generated"] == 3
-        pool_inst.process_items_headless.assert_called_once()
-        dispatched_items = pool_inst.process_items_headless.call_args[0][0]
+        pool_inst.dispatch_items.assert_called_once()
+        dispatched_items = pool_inst.dispatch_items.call_args[0][0]
         assert len(dispatched_items) == 3
 
     def test_skips_empty_library(self, tmp_path):
@@ -868,12 +874,12 @@ class TestLibraryScanFlow:
                 f"{MODULE}._enumerate_plex_full_scan_items",
                 return_value=iter([]),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
             result = run_processing(config, selected_gpus=[])
 
-        assert result is not None
-        MockPool.return_value.process_items_headless.assert_not_called()
+        assert result == {"outcome": {r.value: 0 for r in ProcessingResult}}
+        MockPool.return_value.dispatch_items.assert_not_called()
 
     def test_no_libraries_returns_empty_outcome(self, tmp_path):
         """When get_library_sections yields nothing, result is still returned."""
@@ -881,7 +887,7 @@ class TestLibraryScanFlow:
 
         with (
             patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([])),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
             result = run_processing(config, selected_gpus=[])
 
@@ -889,11 +895,11 @@ class TestLibraryScanFlow:
         assert "outcome" in result
         # Audit fix — original test only checked that ``result`` had an
         # "outcome" key. With no items the dispatcher must NEVER call
-        # ``process_items_headless`` (no work to dispatch) and every
+        # dispatch anything (no work to dispatch) and every
         # outcome counter must be zero. Without these pins, a regression
         # that dispatched empty lists (wasting a worker round-trip) or
         # leaked outcome counts from a previous run would slip through.
-        MockPool.return_value.process_items_headless.assert_not_called()
+        MockPool.return_value.dispatch_items.assert_not_called()
         outcome = result["outcome"]
         assert all(v == 0 for v in outcome.values()), (
             f"With no libraries, every outcome counter must be 0; got {outcome!r}"
@@ -917,12 +923,12 @@ class TestLibraryScanFlow:
                 return_value=iter(items_a + items_b),
             ),
             patch(f"{MODULE}.random.Random", return_value=_RevShuffler()),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=10)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=10)
             run_processing(config, selected_gpus=[])
 
-        dispatched = MockPool.return_value.process_items_headless.call_args[0][0]
+        dispatched = MockPool.return_value.dispatch_items.call_args[0][0]
         assert dispatched == list(reversed(original_order))
 
     def test_sort_by_non_random_preserves_order(self, tmp_path):
@@ -935,12 +941,12 @@ class TestLibraryScanFlow:
                 f"{MODULE}._enumerate_plex_full_scan_items",
                 return_value=iter(items),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=3)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=3)
             run_processing(config, selected_gpus=[])
 
-        dispatched = MockPool.return_value.process_items_headless.call_args[0][0]
+        dispatched = MockPool.return_value.dispatch_items.call_args[0][0]
         assert dispatched == items
 
     def test_progress_callback_invoked(self, tmp_path):
@@ -954,24 +960,18 @@ class TestLibraryScanFlow:
                 f"{MODULE}._enumerate_plex_full_scan_items",
                 return_value=iter(items),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            _real_dispatch_with_mock_dispatcher(_pool_result(completed=2)),
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=2)
             run_processing(config, selected_gpus=[], progress_callback=progress)
 
-        # Pre-task #49 the orchestrator emitted "Connecting to Plex…"
-        # as the first progress event from the eager pre-connection.
-        # That eager connection is gone (it was vestigial — the result
-        # was a dead parameter on _run_webhook_paths_phase). The
-        # remaining contract is that progress IS reported during the
-        # job — and specifically that the dispatch tick fires with the
-        # total item count.
         assert progress.call_args_list, "progress_callback must be invoked at least once during a scan"
         # Dispatch tick carries the total item count.
         dispatch_calls = [
-            call for call in progress.call_args_list if call.args and call.args[1] == 2 and "Starting" in call.args[2]
+            call
+            for call in progress.call_args_list
+            if call.args and call.args[1] == 2 and "Dispatching 2 item" in call.args[2]
         ]
-        assert dispatch_calls, "expected a 'Starting <library>' progress call with total=2"
+        assert dispatch_calls, "expected a 'Dispatching 2 item(s)' progress call with total=2"
 
 
 # ---------------------------------------------------------------------------
@@ -1001,10 +1001,10 @@ class TestWebhookFlow:
         config = _make_config(tmp_path, webhook_paths=["/data/movie.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=1)
             mock_sm.return_value.get.return_value = self._webhook_settings()
             result = run_processing(config, selected_gpus=[])
 
@@ -1021,13 +1021,13 @@ class TestWebhookFlow:
         config = _make_config(tmp_path, webhook_paths=["/data/no_match.mkv"])
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
             mock_sm.return_value.get.return_value = self._webhook_settings(lib_root="/somewhere/else")
             result = run_processing(config, selected_gpus=[])
 
-        MockPool.return_value.process_items_headless.assert_not_called()
+        MockPool.return_value.dispatch_items.assert_not_called()
         assert result is not None
         assert result["webhook_resolution"]["resolved_count"] == 0
         assert result["webhook_resolution"]["unresolved_paths"] == ["/data/no_match.mkv"]
@@ -1038,19 +1038,20 @@ class TestWebhookFlow:
         progress = MagicMock()
 
         with (
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            _real_dispatch_with_mock_dispatcher(_pool_result(completed=1)),
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=1)
             mock_sm.return_value.get.return_value = self._webhook_settings()
             run_processing(config, selected_gpus=[], progress_callback=progress)
 
         messages = [call.args[2] for call in progress.call_args_list if call.args]
         assert any("Resolving 1 webhook path" in m for m in messages), messages
         dispatch_calls = [
-            call for call in progress.call_args_list if call.args and call.args[1] == 1 and "Starting" in call.args[2]
+            call
+            for call in progress.call_args_list
+            if call.args and call.args[1] == 1 and "Dispatching 1 item" in call.args[2]
         ]
-        assert dispatch_calls, "expected a 'Starting Webhook Targets' dispatch tick"
+        assert dispatch_calls, "expected a 'Dispatching 1 item(s)' dispatch tick"
 
 
 # ---------------------------------------------------------------------------
@@ -1064,7 +1065,6 @@ class TestCancellation:
     def test_cancel_during_enumeration(self, tmp_path):
         """Cancellation during library enumeration stops further scanning."""
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         items = [("k1", "M1", "movie")]
         call_count = 0
 
@@ -1076,14 +1076,14 @@ class TestCancellation:
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
+                return_value=iter(_processables(items)),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
             result = run_processing(config, selected_gpus=[], cancel_check=cancel_after_first)
 
-        assert result is not None
-        MockPool.return_value.process_items_headless.assert_not_called()
+        assert result == {"outcome": {r.value: 0 for r in ProcessingResult}}
+        MockPool.return_value.dispatch_items.assert_not_called()
 
     def test_cancel_before_dispatch(self, tmp_path):
         """When cancel_check returns True before dispatch, nothing is dispatched."""
@@ -1091,7 +1091,7 @@ class TestCancellation:
 
         with (
             patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([])),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
             result = run_processing(
                 config,
@@ -1099,8 +1099,8 @@ class TestCancellation:
                 cancel_check=lambda: True,
             )
 
-        assert result is not None
-        MockPool.return_value.process_items_headless.assert_not_called()
+        assert result == {"outcome": {r.value: 0 for r in ProcessingResult}}
+        MockPool.return_value.dispatch_items.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1114,7 +1114,6 @@ class TestSummaryAndWarnings:
     def test_summary_includes_all_outcome_types(self, tmp_path):
         """All non-zero outcome types appear in the returned data."""
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         items = [("k1", "M1", "movie")]
 
         outcome = {r.value: 0 for r in ProcessingResult}
@@ -1125,13 +1124,11 @@ class TestSummaryAndWarnings:
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
+                return_value=iter(_processables(items)),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(
-                completed=3, failed=1, outcome=outcome
-            )
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=3, failed=1, outcome=outcome)
             result = run_processing(config, selected_gpus=[])
 
         assert result["outcome"]["generated"] == 2
@@ -1155,13 +1152,13 @@ class TestSummaryAndWarnings:
             with (
                 patch(
                     f"{MODULE}._enumerate_plex_full_scan_items",
-                    return_value=iter([(_make_section("Movies"), [("k1", "M1", "movie")])]),
+                    return_value=iter(_processables([("k1", "M1", "movie")])),
                 ),
-                patch(f"{MODULE}.WorkerPool") as MockPool,
+                fake_dispatch() as MockPool,
                 patch(f"{MODULE}.log_failure_summary", generator.log_failure_summary),
                 patch.object(generator, "get_failures", return_value=[failure]),
             ):
-                MockPool.return_value.process_items_headless.return_value = _pool_result(failed=1, outcome=outcome)
+                MockPool.return_value.dispatch_items.return_value = _pool_result(failed=1, outcome=outcome)
                 run_processing(config=_make_config(tmp_path), selected_gpus=[])
         finally:
             loguru_logger.remove(sink_id)
@@ -1175,7 +1172,6 @@ class TestSummaryAndWarnings:
     def test_path_mapping_warning_on_all_not_found(self, tmp_path):
         """Warning is logged when every item is skipped_file_not_found."""
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         items = [("k1", "M1", "movie")]
 
         outcome = {r.value: 0 for r in ProcessingResult}
@@ -1186,14 +1182,14 @@ class TestSummaryAndWarnings:
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
+                return_value=iter(_processables(items)),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
             patch(f"{MODULE}.logger") as mock_logger,
         ):
             mock_logger.warning = lambda msg, *a, **kw: captured.append(msg)
             mock_logger.info = MagicMock()
-            MockPool.return_value.process_items_headless.return_value = {
+            MockPool.return_value.dispatch_items.return_value = {
                 "completed": 0,
                 "failed": 3,
                 "cancelled": False,
@@ -1208,16 +1204,15 @@ class TestSummaryAndWarnings:
         from loguru import logger as _loguru_logger
 
         config = _make_config(tmp_path)
-        section = _make_section("TV Shows")
         items = [("k1", "E1", "episode"), ("k2", "E2", "episode"), ("k3", "E3", "episode")]
         outcome = {r.value: 0 for r in ProcessingResult}
         outcome["skipped_bif_exists"] = 3
         records: list[tuple[str, str]] = []
         with (
-            patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([(section, items)])),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter(_processables(items))),
+            fake_dispatch() as MockPool,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=3, outcome=outcome)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=3, outcome=outcome)
             sink = _loguru_logger.add(
                 lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG"
             )
@@ -1246,17 +1241,16 @@ class TestSummaryAndWarnings:
         Capture the loguru sink and pin the cancellation phrase.
         """
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         items = [("k1", "M1", "movie")]
 
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
+                return_value=iter(_processables(items)),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=0, cancelled=True)
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=0, cancelled=True)
             with loguru_lines() as logs:
                 result = run_processing(config, selected_gpus=[])
 
@@ -1340,51 +1334,6 @@ class TestErrorHandling:
 class TestCleanup:
     """Tests for the finally block: pool shutdown, callback, temp cleanup."""
 
-    def test_worker_pool_shutdown_called(self, tmp_path):
-        """Worker pool is shut down in the finally block when no job_id."""
-        config = _make_config(tmp_path)
-        section = _make_section("Movies")
-        items = [("k1", "M1", "movie")]
-
-        with (
-            patch(
-                f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
-            ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
-        ):
-            pool_inst = MockPool.return_value
-            pool_inst.process_items_headless.return_value = _pool_result(completed=1)
-            run_processing(config, selected_gpus=[])
-
-        pool_inst.shutdown.assert_called_once()
-
-    def test_worker_pool_callback_receives_pool_and_none(self, tmp_path):
-        """worker_pool_callback is called with the pool on create and None on cleanup."""
-        config = _make_config(tmp_path)
-        section = _make_section("Movies")
-        items = [("k1", "M1", "movie")]
-        wp_callback = MagicMock()
-
-        with (
-            patch(
-                f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
-            ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
-        ):
-            pool_inst = MockPool.return_value
-            pool_inst.process_items_headless.return_value = _pool_result(completed=1)
-            run_processing(
-                config,
-                selected_gpus=[],
-                worker_pool_callback=wp_callback,
-            )
-
-        assert wp_callback.call_count == 2
-        wp_callback.assert_any_call(pool_inst)
-        wp_callback.assert_any_call(None)
-
     def test_temp_folder_cleaned_up(self, tmp_path):
         """working_tmp_folder is removed in the finally block."""
         work_dir = tmp_path / "work"
@@ -1392,10 +1341,7 @@ class TestCleanup:
         (work_dir / "temp_file.jpg").touch()
         config = _make_config(tmp_path, working_tmp_folder=str(work_dir))
 
-        with (
-            patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([])),
-            patch(f"{MODULE}.WorkerPool"),
-        ):
+        with patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([])):
             run_processing(config, selected_gpus=[])
 
         assert not work_dir.exists()
@@ -1416,19 +1362,6 @@ class TestCleanup:
 
         assert not work_dir.exists()
 
-    def test_no_shutdown_when_job_id_set(self, tmp_path):
-        """With job_id, worker pool shutdown is skipped (dispatcher owns it)."""
-        config = _make_config(tmp_path)
-
-        with (
-            patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([])),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
-            patch(f"{MODULE}.get_dispatcher", create=True),
-        ):
-            run_processing(config, selected_gpus=[], job_id="job-123")
-
-        MockPool.return_value.shutdown.assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # Job dispatcher branch (job_id path)
@@ -1441,7 +1374,6 @@ class TestJobDispatcherPath:
     def test_dispatcher_existing_pool(self, tmp_path):
         """When dispatcher already exists, reuses its worker_pool."""
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         items = [("k1", "M1", "movie")]
         on_start = MagicMock()
 
@@ -1456,7 +1388,7 @@ class TestJobDispatcherPath:
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
+                return_value=iter(_processables(items)),
             ),
             patch(
                 "media_preview_generator.jobs.orchestrator.get_dispatcher",
@@ -1501,7 +1433,6 @@ class TestJobDispatcherPath:
         dispatcher first. This job must register the dispatcher's pool as its active pool, not its own unused one,
         or saves during the job resize a pool nothing runs on."""
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         tracker = MagicMock()
         tracker.get_result.return_value = _pool_result(completed=1)
         winners_pool = MagicMock(name="winners_pool")
@@ -1514,7 +1445,9 @@ class TestJobDispatcherPath:
             return None if worker_pool is None else winner
 
         with (
-            patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([(section, [("k1", "M1", "movie")])])),
+            patch(
+                f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter(_processables([("k1", "M1", "movie")]))
+            ),
             patch(f"{MODULE}.WorkerPool") as MockPool,
             patch("media_preview_generator.jobs.dispatcher.get_dispatcher", side_effect=get_dispatcher),
         ):
@@ -1554,7 +1487,6 @@ class TestJobDispatcherPath:
     def test_dispatcher_creates_new_pool(self, tmp_path):
         """When no existing dispatcher, a new worker_pool is created."""
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         items = [("k1", "M1", "movie")]
 
         mock_tracker = MagicMock()
@@ -1577,7 +1509,7 @@ class TestJobDispatcherPath:
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
+                return_value=iter(_processables(items)),
             ),
             patch(f"{MODULE}.WorkerPool") as MockPool,
         ):
@@ -1631,7 +1563,6 @@ class TestSummaryBranches:
     def test_excluded_and_invalid_hash_in_outcome(self, tmp_path):
         """excluded and invalid_hash outcomes appear in result."""
         config = _make_config(tmp_path)
-        section = _make_section("Movies")
         items = [("k1", "M1", "movie")]
 
         outcome = {r.value: 0 for r in ProcessingResult}
@@ -1642,13 +1573,11 @@ class TestSummaryBranches:
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
+                return_value=iter(_processables(items)),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
-            MockPool.return_value.process_items_headless.return_value = _pool_result(
-                completed=0, failed=0, outcome=outcome
-            )
+            MockPool.return_value.dispatch_items.return_value = _pool_result(completed=0, failed=0, outcome=outcome)
             result = run_processing(config, selected_gpus=[])
 
         assert result["outcome"]["skipped_excluded"] == 4
@@ -1664,52 +1593,14 @@ class TestSummaryBranches:
 class TestCleanupEdgeCases:
     """Cover error handling within the finally block."""
 
-    def test_shutdown_error_is_logged(self, tmp_path, caplog):
-        """Error during worker_pool.shutdown() is caught AND surfaced in the log.
-
-        Originally this test asserted only ``result is not None`` — proving
-        the function didn't crash but NOT that the error was actually
-        logged (the test name lied). A regression that silently swallowed
-        the exception with no log line would have passed. Audit fix —
-        capture the log and assert the failure mode is recorded.
-        """
-        config = _make_config(tmp_path)
-        section = _make_section("Movies")
-        items = [("k1", "M1", "movie")]
-
-        with (
-            patch(
-                f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section, items)]),
-            ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
-        ):
-            pool_inst = MockPool.return_value
-            pool_inst.process_items_headless.return_value = _pool_result(completed=1)
-            pool_inst.shutdown.side_effect = RuntimeError("shutdown failed")
-
-            with loguru_lines() as logs:
-                result = run_processing(config, selected_gpus=[])
-
-        assert result is not None
-        assert any("shutdown failed" in line.lower() or "shutdown" in line.lower() for line in logs), (
-            f"shutdown error was swallowed silently — no log line mentions 'shutdown'. logs={logs!r}"
-        )
-
     def test_temp_cleanup_error_is_logged(self, tmp_path):
-        """Error removing temp folder is caught AND surfaced in the log.
-
-        Same fix as ``test_shutdown_error_is_logged`` — original asserted
-        only "didn't crash"; now also asserts the cleanup-failure log
-        line was emitted so an operator can debug a stuck temp folder.
-        """
+        """Error removing temp folder is caught AND surfaced in the log, so an operator can debug a stuck folder."""
         work_dir = tmp_path / "work"
         work_dir.mkdir()
         config = _make_config(tmp_path, working_tmp_folder=str(work_dir))
 
         with (
             patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([])),
-            patch(f"{MODULE}.WorkerPool"),
             patch(f"{MODULE}.shutil.rmtree", side_effect=OSError("perm denied")),
         ):
             with loguru_lines() as logs:
@@ -1723,8 +1614,6 @@ class TestCleanupEdgeCases:
     def test_cancel_during_enumeration_with_items_queued(self, tmp_path):
         """Cancel fires after first lib is queued; second lib is skipped."""
         config = _make_config(tmp_path)
-        section_a = _make_section("Movies")
-        section_b = _make_section("TV Shows")
         items_a = [("k1", "M1", "movie")]
         items_b = [("k2", "S1", "episode")]
 
@@ -1738,9 +1627,9 @@ class TestCleanupEdgeCases:
         with (
             patch(
                 f"{MODULE}._enumerate_plex_full_scan_items",
-                return_value=iter([(section_a, items_a), (section_b, items_b)]),
+                return_value=iter(_processables(items_a + items_b)),
             ),
-            patch(f"{MODULE}.WorkerPool") as MockPool,
+            fake_dispatch() as MockPool,
         ):
             result = run_processing(
                 config,
@@ -1748,5 +1637,5 @@ class TestCleanupEdgeCases:
                 cancel_check=cancel_on_second_check,
             )
 
-        assert result is not None
-        MockPool.return_value.process_items_headless.assert_not_called()
+        assert result == {"outcome": {r.value: 0 for r in ProcessingResult}}
+        MockPool.return_value.dispatch_items.assert_not_called()

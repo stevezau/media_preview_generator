@@ -1,5 +1,5 @@
 codecov:
-  # Require codecov to succeed for PRs (but allow version bumps to pass)
+  # Require codecov to succeed for PRs
   require_ci_to_pass: yes
 
 coverage:

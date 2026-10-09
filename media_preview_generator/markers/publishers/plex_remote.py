@@ -1,4 +1,4 @@
-"""The Plex marker agent's wire protocol, and the transport that speaks it (spec §3.1, §6.3; plan phase 4 Task 10).
+"""The Plex marker agent's wire protocol, and the transport that speaks it.
 
 Plex's database can only be written from the machine Plex runs on (SQLite's WAL locks are not shared over a network
 filesystem), so an app on another machine has no way in. The **Plex marker agent** is a small container the user runs

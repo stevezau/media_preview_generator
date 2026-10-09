@@ -1,61 +1,30 @@
 """Integration tests covering real webhook payload shapes.
 
 Fires representative payloads from each source through the universal
-``/api/webhooks/incoming`` endpoint and verifies the dispatcher does
-the right thing end-to-end against the live Emby container.
+``/api/webhooks/incoming`` endpoint and verifies each one is classified
+and queued as a Job for the right file. The Job itself is not run here
+(the full-pipeline tests cover publishing).
 
 Sources covered:
 * Sonarr ``Download`` event (episodeFile.path nested in series envelope)
 * Radarr ``Download`` event (movieFile.path nested in movie envelope)
-* Plex multipart envelope with non-relevant event (skipped)
+* Plex multipart envelope for a server that isn't configured (ignored)
 * Generic ``{"path": "..."}`` payload
-* Concurrent duplicate webhooks (frame cache should coalesce)
+* Concurrent duplicate webhooks (de-duplicated into one Job)
 """
 
 from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-
-@pytest.fixture
-def real_config(tmp_path):
-    """Minimal Config for the webhook dispatcher."""
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = ""
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
+from tests.integration.conftest import assert_webhook_queued
 
 
 @pytest.fixture
-def webhook_app(emby_credentials, media_root, tmp_path, monkeypatch, real_config):
+def webhook_app(emby_credentials, media_root, tmp_path, monkeypatch, live_config):
     """Live Flask app wired to the live Emby container, ready for webhook tests."""
     from media_preview_generator.web.app import create_app
     from media_preview_generator.web.settings_manager import (
@@ -104,10 +73,6 @@ def webhook_app(emby_credentials, media_root, tmp_path, monkeypatch, real_config
     )
     settings.complete_setup()
 
-    monkeypatch.setattr(
-        "media_preview_generator.web.webhook_router._load_config_or_minimal",
-        lambda: real_config,
-    )
     return app
 
 
@@ -132,15 +97,10 @@ def _post(app, payload, headers=None, content_type="application/json"):
 
 
 @pytest.mark.integration
-@pytest.mark.slow
 class TestSonarrWebhook:
     def test_sonarr_download_event_dispatches(self, webhook_app, media_root):
         """Sonarr's Download event has episodeFile.path nested in the series envelope."""
         canonical = str(media_root / "TV Shows" / "Test Show" / "Season 01" / "Test Show - S01E01 - Pilot.mkv")
-        # The Sonarr-style ownership requires a TV library; the webhook
-        # app currently only configures Movies. This test verifies
-        # routing/parsing works (the publisher list will be empty
-        # because no library covers the path → status NO_OWNERS).
         sonarr_payload = {
             "eventType": "Download",
             "instanceName": "Sonarr",
@@ -165,27 +125,13 @@ class TestSonarrWebhook:
             },
             "release": {"releaseTitle": "Test.Show.S01E01.Pilot.x264"},
         }
-        response = _post(webhook_app, sonarr_payload)
-        assert response.status_code == 200, response.get_data(as_text=True)
-        body = response.get_json()
-        # Sonarr-style payloads classify as path-first (the router
-        # extracts episodeFile.path / movieFile.path).
-        assert body["kind"] in ("sonarr", "path"), body
-        assert body["canonical_path"] == canonical, body
-        # No library covers TV Shows → no_owners is fine.
-        assert body["status"] in ("no_owners", "published", "skipped"), body
+        assert_webhook_queued(_post(webhook_app, sonarr_payload), "sonarr", canonical)
 
 
 @pytest.mark.integration
-@pytest.mark.slow
 class TestRadarrWebhook:
     def test_radarr_download_event_dispatches(self, webhook_app, media_root):
-        """Radarr's Download event has movieFile.path nested in the movie envelope."""
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
-        if sidecar.exists():
-            sidecar.unlink()
-
         radarr_payload = {
             "eventType": "Download",
             "instanceName": "Radarr",
@@ -203,18 +149,7 @@ class TestRadarrWebhook:
             },
             "release": {"releaseTitle": "Test.Movie.H264.2024.1080p.x264"},
         }
-
-        try:
-            response = _post(webhook_app, radarr_payload)
-            assert response.status_code == 200, response.get_data(as_text=True)
-            body = response.get_json()
-            assert body["kind"] in ("radarr", "path"), body
-            assert body["canonical_path"] == canonical, body
-            assert body["status"] in ("published", "skipped"), body
-            assert sidecar.exists(), f"sidecar BIF missing at {sidecar}"
-        finally:
-            if sidecar.exists():
-                sidecar.unlink()
+        assert_webhook_queued(_post(webhook_app, radarr_payload), "radarr", canonical)
 
 
 @pytest.mark.integration
@@ -222,20 +157,8 @@ class TestGenericPathWebhook:
     def test_path_only_payload_dispatches(self, webhook_app, media_root):
         """The simplest custom webhook shape: ``{"path": ...}``."""
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
-        if sidecar.exists():
-            sidecar.unlink()
-
-        try:
-            response = _post(webhook_app, {"path": canonical, "trigger": "manual"})
-            assert response.status_code == 200, response.get_data(as_text=True)
-            body = response.get_json()
-            assert body["kind"] == "path", body
-            assert body["canonical_path"] == canonical, body
-            assert sidecar.exists()
-        finally:
-            if sidecar.exists():
-                sidecar.unlink()
+        response = _post(webhook_app, {"path": canonical, "trigger": "manual"})
+        assert_webhook_queued(response, "path", canonical)
 
     def test_unknown_payload_returns_400(self, webhook_app):
         """Random JSON should be rejected, not dispatched."""
@@ -245,12 +168,11 @@ class TestGenericPathWebhook:
 
 @pytest.mark.integration
 class TestPlexWebhookMultipart:
-    def test_plex_playback_event_classified_but_ignored(self, webhook_app, emby_credentials):
-        """Plex's playback events should classify as plex but return ignored.
+    def test_plex_event_for_unconfigured_server_is_ignored(self, webhook_app):
+        """A Plex multipart payload is parsed and classified as plex, then ignored.
 
-        This verifies the multipart parser does its job even when the
-        event isn't actionable. The configured registry has no Plex
-        server so any item-id resolution skips entirely.
+        The configured registry has no Plex server, so the payload can't be
+        matched to one and nothing is queued.
         """
         plex_payload = {
             "event": "media.play",
@@ -266,69 +188,32 @@ class TestPlexWebhookMultipart:
             {"payload": json.dumps(plex_payload)},
             content_type="multipart/form-data",
         )
-        # Either the parser classified it as plex (and ignored
-        # media.play because we only act on library.new) or rejected
-        # it as unknown — both acceptable. The CRITICAL thing is no
-        # 5xx.
-        assert response.status_code in (200, 202), response.get_data(as_text=True)
+        assert response.status_code == 202, response.get_data(as_text=True)
+        body = response.get_json()
+        assert body["status"] == "ignored", body
+        assert body["kind"] == "plex", body
 
 
 @pytest.mark.integration
-@pytest.mark.slow
 class TestConcurrentWebhookCoalescing:
-    def test_five_concurrent_webhooks_run_ffmpeg_once(self, webhook_app, media_root):
-        """Fire 5 webhooks for the same file at the same time; FFmpeg runs once.
-
-        The frame cache TTL is the coalescing mechanism — second-and-
-        later requests for the same canonical path within the TTL
-        window get the cached frame dir.
-        """
+    def test_five_concurrent_webhooks_queue_one_job(self, webhook_app, media_root):
+        """Five simultaneous webhooks for one file create a single Job; the rest are de-duplicated."""
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
-        if sidecar.exists():
-            sidecar.unlink()
+        client = webhook_app.test_client()
 
-        # Spy on FFmpeg invocations.
-        from media_preview_generator.processing import multi_server as ms_module
+        def _fire(_):
+            return client.post(
+                "/api/webhooks/incoming",
+                headers={
+                    "X-Auth-Token": "integration-secret",
+                    "Content-Type": "application/json",
+                },
+                data=json.dumps({"path": canonical, "trigger": "concurrent"}),
+            )
 
-        original_generate = ms_module.generate_images
-        ffmpeg_call_count = 0
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            responses = list(pool.map(_fire, range(5)))
 
-        def _spy(*args, **kwargs):
-            nonlocal ffmpeg_call_count
-            ffmpeg_call_count += 1
-            return original_generate(*args, **kwargs)
-
-        ms_module.generate_images = _spy
-
-        try:
-            # Use a thread pool so the requests fire concurrently.
-            client = webhook_app.test_client()
-
-            def _fire(_):
-                return client.post(
-                    "/api/webhooks/incoming",
-                    headers={
-                        "X-Auth-Token": "integration-secret",
-                        "Content-Type": "application/json",
-                    },
-                    data=json.dumps({"path": canonical, "trigger": "concurrent"}),
-                )
-
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                responses = list(pool.map(_fire, range(5)))
-
-            # All 5 returned 200 (or 202 / 200 mix when one was first
-            # and four hit cache).
-            statuses = [r.status_code for r in responses]
-            assert all(s == 200 for s in statuses), statuses
-
-            # FFmpeg ran exactly ONCE despite 5 webhooks.
-            assert ffmpeg_call_count == 1, f"expected 1 FFmpeg call, got {ffmpeg_call_count}"
-
-            # The sidecar should be present (one of the dispatches won).
-            assert sidecar.exists()
-        finally:
-            ms_module.generate_images = original_generate
-            if sidecar.exists():
-                sidecar.unlink()
+        assert [r.status_code for r in responses] == [202] * 5
+        statuses = sorted(r.get_json()["status"] for r in responses)
+        assert statuses == ["ignored_duplicate"] * 4 + ["queued"], statuses

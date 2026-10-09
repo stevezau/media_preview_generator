@@ -178,6 +178,17 @@ class TestServerConfigRoundTrip:
 
 
 class TestServerRegistryFromSettings:
+    def test_bad_timeout_and_auth_in_one_entry_do_not_abort_the_registry(self):
+        registry = ServerRegistry.from_settings(
+            [
+                {"id": "a", "type": "emby", "name": "A", "url": "http://a", "timeout": "soon", "auth": "oops"},
+                {"id": "b", "type": "jellyfin", "name": "B", "url": "http://b", "auth": {"api_key": "k"}},
+            ]
+        )
+        assert {s.id for s in registry.servers()} == {"a", "b"}
+        assert registry.get_config("a").timeout == 30
+        assert registry.get_config("a").auth == {}
+
     def test_loads_plex_server_with_legacy_config(self, mock_config):
         registry = ServerRegistry.from_settings(
             [

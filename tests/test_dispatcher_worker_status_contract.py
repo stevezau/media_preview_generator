@@ -15,12 +15,9 @@ and speed" was caused by this method silently dropping
 the UI stays in its pre-FFmpeg "Working…" branch *forever* and
 hides the speed/ETA chips even though FFmpeg is actively encoding.
 
-The legacy ``WorkerPool.process_items_headless`` path emitted both
-fields (worker.py:1239-1240); only the dispatcher path dropped them
-— which is the dominant path. These contract tests pin both fields
-on the busy AND idle branch so any future field drop (or the
-inverse: dropping a field in the headless path) fails fast at
-unit-test time, not as a "stuck Working…" UI bug shipped to prod.
+These contract tests pin both fields on the busy AND idle branch so
+any future field drop fails fast at unit-test time, not as a
+"stuck Working…" UI bug shipped to prod.
 """
 
 import pytest

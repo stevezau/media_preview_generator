@@ -20,12 +20,8 @@ from media_preview_generator.processing import (
     CancellationError,
     CodecNotSupportedError,
     _detect_codec_error,
-    _detect_dolby_vision_rpu_error,
     _detect_hwaccel_runtime_error,
-    _detect_zscale_colorspace_error,
     _diagnose_ffmpeg_exit_code,
-    _is_dolby_vision,
-    _is_dv_no_backward_compat,
     _save_ffmpeg_failure_log,
     _verify_tmp_folder_health,
     build_dv5_vf,
@@ -37,6 +33,14 @@ from media_preview_generator.processing import (
     parse_ffmpeg_progress_line,
     record_failure,
 )
+from media_preview_generator.processing.hdr_detection import (
+    detect_dolby_vision_rpu_error as _detect_dolby_vision_rpu_error,
+)
+from media_preview_generator.processing.hdr_detection import (
+    detect_zscale_colorspace_error as _detect_zscale_colorspace_error,
+)
+from media_preview_generator.processing.hdr_detection import is_dolby_vision as _is_dolby_vision
+from media_preview_generator.processing.hdr_detection import is_dv_no_backward_compat as _is_dv_no_backward_compat
 from media_preview_generator.processing.hdr_detection import is_hdr_transfer
 
 
@@ -628,9 +632,9 @@ class TestGenerateImages:
         )
 
         assert success is False
-        # First run (with skip_frame) and retry (without) both hit stall timeout
-        assert mock_proc.kill.call_count == 2
-        assert mock_proc.wait.call_count == 2
+        # The stall ends the cascade: no rerun without skip_frame on the same stuck mount
+        assert mock_proc.kill.call_count == 1
+        assert mock_proc.wait.call_count == 1
 
     @patch("media_preview_generator.processing.generator.MediaInfo")
     @patch("subprocess.Popen")
@@ -769,7 +773,7 @@ class TestGenerateImages:
         assert args[args.index("-hwaccel") + 1] == "vaapi", (
             f"-hwaccel must be followed by 'vaapi'; got {args[args.index('-hwaccel') + 1]!r}"
         )
-        # The SUT (ffmpeg_runner.py:323-328) uses the modern -hwaccel_device
+        # The SUT (ffmpeg_runner.py) uses the modern -hwaccel_device
         # (NOT the deprecated -vaapi_device) to carry the device path.
         assert "-hwaccel_device" in args, f"AMD path missing -hwaccel_device: {args!r}"
         assert args[args.index("-hwaccel_device") + 1] == "/dev/dri/renderD128", (
@@ -2881,11 +2885,16 @@ class TestSaveFFmpegFailureLog:
         log_files = list(ffmpeg_log_dir.glob("*.log"))
         assert len(log_files) <= 501  # 500 cap + new file (oldest removed)
 
-    def test_handles_oserror_gracefully(self, monkeypatch) -> None:
+    def test_handles_oserror_gracefully(self, monkeypatch, tmp_path) -> None:
         """OSError during directory creation is swallowed."""
-        monkeypatch.setenv("CONFIG_DIR", "/nonexistent/readonly/path")
-        # Should not raise
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file, so no directory can be created beneath it")
+        monkeypatch.setenv("CONFIG_DIR", str(blocker / "config"))
+
         _save_ffmpeg_failure_log("/media/test.mkv", 1, ["error"])
+
+        assert blocker.read_text() == "a file, so no directory can be created beneath it"
+        assert not (blocker / "config").exists()
 
 
 class TestDiagnoseFFmpegExitCode:

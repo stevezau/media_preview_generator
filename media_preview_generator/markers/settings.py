@@ -1,7 +1,7 @@
 """Intro & Credits settings: defaults, validation and typed accessors.
 
 Global detection settings live in ``settings.json["markers"]``; what each server receives lives in
-``media_servers[].markers`` (spec §8). Validation normalises both blocks so readers never see partial shapes.
+``media_servers[].markers``. Validation normalises both blocks so readers never see partial shapes.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ _CREDITS_WINDOW_KEYS: tuple[str, ...] = ("tv_s", "movie_s")
 SECRET_MASK = "****"
 _API_KEY_MAX_LEN = 200
 _AGENT_URL_MAX_LEN = 500
-# Sports libraries are excluded by default: no source covers them (spec §4). Name-based because no vendor
+# Sports libraries are excluded by default: no source covers them. Name-based because no vendor
 # exposes a "sports" library kind; an explicit library_ids choice always wins.
 _SPORTS_NAME_RE = re.compile(r"\bsports?\b", re.IGNORECASE)
 
@@ -132,8 +132,7 @@ class GlobalMarkersSettings:
         credits answer, so decisions made on another window are made again.
 
         Locks are not part of it, and that is not an oversight. A lock is applied after the rules have run —
-        ``decide()`` takes it as a separate argument and a locked marker wins whatever the evidence says (spec §5.5
-        rule 1) — so it changes nothing this hash is for: whether a file's *stored decision* was reached under
+        ``decide()`` takes it as a separate argument and a locked marker wins whatever the evidence says — so it changes nothing this hash is for: whether a file's *stored decision* was reached under
         different rules and has to be reached again.
 
         Returns:

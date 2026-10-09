@@ -130,7 +130,7 @@ class TestTestConnection:
 
         # Production format: "Jellyfin URL is required".
         assert not result.ok
-        req.assert_not_called(), "missing-URL must short-circuit before any HTTP call"
+        req.assert_not_called()
         assert re.search(r"\bURL\b", result.message), (
             f"missing-URL error must mention 'URL' as a word, got {result.message!r}"
         )
@@ -143,7 +143,7 @@ class TestTestConnection:
 
         # Production format: "Jellyfin access token / API key is required".
         assert not result.ok
-        req.assert_not_called(), "missing-token must short-circuit before any HTTP call"
+        req.assert_not_called()
         assert re.search(r"\b(token|API key)\b", result.message, re.IGNORECASE), (
             f"missing-token error must mention 'token' or 'API key', got {result.message!r}"
         )
@@ -765,7 +765,7 @@ class TestResolveRemotePathToItemIdViaPlugin:
         ids=["Timeout", "ConnectTimeout", "ReadTimeout", "ConnectionError"],
     )
     def test_skips_base_fallback_when_plugin_times_out(self, jelly, transport_exc):
-        """Task #51 regression pin — when the plugin call raises a
+        """Regression pin — when the plugin call raises a
         transport-level exception (Timeout / ConnectionError), the
         Jellyfin server is unreachable or overloaded. The base
         resolver hits the SAME server with the SAME symptoms — a
@@ -852,7 +852,7 @@ class TestResolveOnePathCacheSemantics:
     """
 
     def test_negative_result_is_not_cached(self, jelly):
-        path = "/data_16tb2/Movies/Foo (2024)/Foo (2024).mkv"
+        path = "/disk2/Movies/Foo (2024)/Foo (2024).mkv"
         with patch.object(JellyfinServer, "_uncached_resolve_remote_path_to_item_id") as uncached:
             uncached.return_value = None
 
@@ -883,7 +883,7 @@ class TestResolveOnePathCacheSemantics:
         ``None`` from cache; post-fix it must return the freshly
         resolved id.
         """
-        path = "/data_16tb2/Movies/Jonestown (2006)/Jonestown (2006).mkv"
+        path = "/disk2/Movies/Jonestown (2006)/Jonestown (2006).mkv"
         with patch.object(JellyfinServer, "_uncached_resolve_remote_path_to_item_id") as uncached:
             uncached.side_effect = [None, "ecaae1ad830f417baa6c521237e86a64"]
 
@@ -910,7 +910,7 @@ class TestResolveOnePathCacheSemantics:
         fix would regress the 200K-item-Jellyfin full-scan path the
         original caching policy was written for.
         """
-        path = "/data_16tb2/Movies/Foo (2024)/Foo (2024).mkv"
+        path = "/disk2/Movies/Foo (2024)/Foo (2024).mkv"
         with patch.object(JellyfinServer, "_uncached_resolve_remote_path_to_item_id") as uncached:
             uncached.return_value = "item-42"
 
@@ -2184,21 +2184,6 @@ class TestPreviewsReadinessJellyfin:
         assert row["severity"] == "info"
         assert "boom" in (row["reason"] or "")
         assert row["current"] == "unknown (probe failed)"
-
-    def test_legacy_trickplay_readiness_alias_still_works(self, jelly):
-        """External tools that pin /trickplay-readiness must keep working.
-        The alias must still return the legacy shape (plugin.mode,
-        trickplay_options, library_settings.issues, etc.)."""
-        with patch.object(JellyfinServer, "_request", side_effect=self._wire_healthy(jelly)):
-            payload = jelly.trickplay_readiness()
-
-        # Legacy shape: top-level version/plugin/library_settings/trickplay_options.
-        assert "version" in payload
-        assert "plugin" in payload
-        assert payload["plugin"]["mode"] == "plugin_instant"
-        assert "library_settings" in payload
-        assert "trickplay_options" in payload
-        assert payload["overall_ok"] is True
 
     def test_skips_non_video_collection_types(self, jelly):
         """Issue #237: music / musicvideos / photos / books / audiobooks
@@ -3567,7 +3552,7 @@ class TestBridgeAccess:
 
 
 class TestJellyfinMarkersReadiness:
-    """Intro & Credits on Jellyfin's Setup Health card (plan phase 4 Task 9 Step 2).
+    """Intro & Credits on Jellyfin's Setup Health card.
 
     Jellyfin already has a plugin row and the install controls key on ``section.id === 'plugin'`` reading its
     FIRST check's ``current``. So the feature escalates that row rather than adding a second one, and only

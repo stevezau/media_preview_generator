@@ -35,7 +35,6 @@ after publish, then deleted by the upgrade dispatch's cleanup pass.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -44,37 +43,6 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
-
-
-@pytest.fixture
-def upgrade_safety_config(tmp_path):
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = ""
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
 
 
 @pytest.fixture
@@ -129,7 +97,7 @@ class TestInPlaceUpgradeDoesNotDeleteLivePreviews:
     def test_dispatch_with_deletedfiles_echoing_new_path_preserves_artifacts(
         self,
         upgrade_safety_registry,
-        upgrade_safety_config,
+        live_config,
         media_root,
     ):
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
@@ -151,7 +119,7 @@ class TestInPlaceUpgradeDoesNotDeleteLivePreviews:
             initial = process_canonical_path(
                 canonical_path=canonical,
                 registry=upgrade_safety_registry,
-                config=upgrade_safety_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
             )
@@ -173,7 +141,7 @@ class TestInPlaceUpgradeDoesNotDeleteLivePreviews:
             upgrade = process_canonical_path(
                 canonical_path=canonical,
                 registry=upgrade_safety_registry,
-                config=upgrade_safety_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
                 deleted_paths=[canonical],

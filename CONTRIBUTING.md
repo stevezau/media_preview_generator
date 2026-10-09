@@ -66,8 +66,12 @@ gunicorn \
   --workers 1 \
   "media_preview_generator.web.wsgi:app"
 
-# Web UI with dev server (Flask reload)
-python -m media_preview_generator.web.app
+# Same, with gunicorn live reload for development (what DEV_RELOAD=true does in the container)
+gunicorn --reload \
+  --bind 127.0.0.1:8080 \
+  --worker-class gthread \
+  --workers 1 \
+  "media_preview_generator.web.wsgi:app"
 ```
 
 ---
@@ -138,26 +142,34 @@ def test_config_loads_from_env(monkeypatch, mock_config):
 ```
 media_preview_generator/
 ├── config/               # Config dataclass, paths, validation
-├── gpu/                  # GPU discovery + FFmpeg capability probing
-├── jobs/                 # Orchestrator, dispatcher, worker pool
-├── processing/           # Multi-server dispatcher, FFmpeg runner, HDR
+├── gpu/                  # GPU discovery, VAAPI/Vulkan probes, FFmpeg capability probing
+├── jobs/                 # Orchestrator, dispatcher, worker pool, admission, GPU fallback
+├── processing/           # Per-file preview pipeline
 │   ├── multi_server.py     # Routes one canonical path to every owning server (single FFmpeg pass per file)
 │   ├── frame_cache.py      # Cross-server frame reuse cache
 │   ├── retry_queue.py      # Slow-backoff retry for not-yet-indexed items
 │   ├── plex.py / emby.py / jellyfin.py  # Per-vendor library enumeration (read-only)
-│   └── generator.py / ffmpeg_runner.py  # FFmpeg invocation
-├── servers/              # Per-vendor server clients (live API access — auth, refresh, libraries)
+│   └── generator.py / ffmpeg_runner.py / hdr_detection.py  # FFmpeg invocation and HDR handling
+├── servers/              # Per-vendor server clients (live API access: auth, refresh, libraries)
 │   ├── plex.py / emby.py / jellyfin.py  # MediaServer interface implementations
-│   ├── ownership.py        # Path → owning servers/libraries
+│   ├── ownership.py        # Path -> owning servers/libraries
 │   └── registry.py         # ServerRegistry (loads media_servers[] from settings)
 ├── output/               # Per-vendor preview format publishers
 │   ├── plex_bundle.py      # Plex bundle BIF
 │   ├── emby_sidecar.py     # Emby -WIDTH-INTERVAL.bif sidecar
 │   ├── jellyfin_trickplay.py  # Jellyfin tile sheets + manifest
-│   └── journal.py          # .meta sidecar — fingerprints last publish
-├── plex_client.py        # Legacy Plex API client (still used by Plex enum)
+│   └── journal.py          # .meta sidecar: fingerprints last publish
+├── markers/              # Intro & Credits detection, decisions, per-vendor marker publishers
+├── loudness/             # Loudness analysis jobs (EBU R128), resume and undo
+├── inspector/            # Per-file previews / markers / loudness status for the Inspector page
+├── search/               # Library search query parsing and ranking
+├── job_kinds.py          # Job kinds (previews, markers, loudness) and their settings
+├── worker_groups.py      # Worker groups and their members
+├── quiet_hours.py        # Quiet-hours windows
+├── scan_filters.py       # Library scan filters
+├── plex_client.py        # Plex API client used by Plex enumeration
 ├── bif_reader.py         # BIF parsing (used by the viewer)
-├── upgrade.py            # Settings migrations / schema upgrades (v1 → v11)
+├── upgrade.py            # Settings migrations / schema upgrades (currently v23)
 ├── utils.py              # Path sanitization, Docker detection, atomic save
 ├── logging_config.py     # Loguru + Rich console setup
 ├── version_check.py      # GitHub release version check
@@ -166,7 +178,10 @@ media_preview_generator/
     ├── app.py               # App factory, SocketIO init
     ├── auth.py              # Token authentication
     ├── jobs.py              # Job state + SQLite persistence + SocketIO
+    ├── job_gate.py          # Start-up slot gate for jobs
+    ├── job_details.py       # Per-job detail payloads
     ├── settings_manager.py  # Persistent settings (settings.json)
+    ├── config_health.py     # Setup health checks
     ├── scheduler.py         # APScheduler cron/interval jobs
     ├── webhooks.py          # Radarr/Sonarr/Plex/custom webhook handlers
     ├── webhook_router.py    # Universal /api/webhooks/incoming dispatcher
@@ -178,11 +193,16 @@ media_preview_generator/
         ├── api_servers.py        # media_servers CRUD + per-vendor probes + readiness/health-check + plugin install
         ├── api_server_auth.py    # Emby/Jellyfin password + Jellyfin Quick Connect
         ├── api_jobs.py           # Job CRUD + worker scaling + global pause
+        ├── api_worker_groups.py  # Worker group CRUD
         ├── api_schedules.py      # Schedule CRUD + quiet-hours policy
         ├── api_system.py         # /system/status, browse, version, notifications, whats-new, log history
         ├── api_libraries.py      # Aggregated library list across all configured servers
+        ├── api_inspector.py      # Inspector lookups
+        ├── api_markers.py        # Intro & Credits endpoints
+        ├── api_loudness.py       # Loudness endpoints
         ├── api_plex.py           # Plex OAuth PIN flow
         ├── api_plex_webhook.py   # Plex Direct webhook register/unregister/test
+        ├── api_vendor_webhook.py # Emby/Jellyfin webhook endpoints
         ├── api_bif.py            # BIF + Jellyfin trickplay viewer
         ├── api_vulkan.py         # Vulkan ICD probing diagnostics
         ├── job_runner.py         # Background job execution thread
@@ -200,7 +220,7 @@ A few internal invariants worth knowing when modifying the web tier:
 - **WebSocket transport** is Flask-SocketIO with the `threading` async mode, which is what lets a single Gunicorn worker serve both REST and WebSocket from the same process without an event-loop framework like eventlet.
 - **Long-running jobs** (a full library scan can take hours) survive the default reverse-proxy timeouts because the dashboard polls progress over WebSocket — there's no long-lived HTTP request to time out.
 
-If you need shared state across multiple processes (e.g. for horizontal scaling), you'd swap the in-memory job store for SQLite + Redis Pub/Sub for SocketIO. We don't currently need that.
+If you need shared state across multiple processes (e.g. for horizontal scaling), you'd move the in-process state (frame cache, scheduler, SocketIO) to shared services such as Redis. We don't currently need that.
 
 ---
 
@@ -257,10 +277,10 @@ builds the real site (host Bundler, or the `ruby` Docker image when there is no 
 
 ```bash
 # Build image
-docker build -t plex-previews:dev .
+docker build -t media-preview-generator:dev .
 
 # Run development image
-docker run --rm -p 8080:8080 -v $(pwd)/config:/config plex-previews:dev
+docker run --rm -p 8080:8080 -v $(pwd)/config:/config media-preview-generator:dev
 
 # Multi-architecture build
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -271,29 +291,37 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 ## Customizing CI/CD for Forks
 
-The repository has three GitHub Actions workflows:
+The repository's GitHub Actions workflows live in `.github/workflows/`:
 
 | Workflow | Purpose | Fork action |
 |---|---|---|
-| `.github/workflows/ci.yml` | Lint, test, and build/push Docker images for `main`, `dev`, and tags | Change `DOCKER_IMAGE` (line 30) to your Docker Hub namespace |
-| `.github/workflows/docker-pr.yml` | Builds per-PR Docker previews | Works as-is |
-| `.github/workflows/docker-pr-cleanup.yml` | Removes PR-preview images when PRs close | Works as-is |
+| `ci.yml` | Lint (ruff, actionlint), unit and e2e tests, integration tests, Docker image build/push for `main`, `dev` and tags | Change `DOCKER_IMAGE` (top of the file) to your Docker Hub namespace |
+| `docker-pr.yml` | Builds per-PR Docker previews on GHCR (needs the `build-docker` label) | Works as-is |
+| `docker-pr-cleanup.yml` | Removes PR-preview images when PRs close | Works as-is |
+| `docs.yml`, `docs-check.yml` | Build and publish the Jekyll docs site; check docs-only PRs | Works as-is |
+| `emby-plugin.yml`, `jellyfin-plugin.yml`, `plugins-ci.yml` | Build and release the Emby and Jellyfin plugins | Works as-is |
+| `marker-agent.yml` | Builds and publishes the Plex marker agent image to GHCR on `marker-agent-v*` tags | Works as-is |
+| `gpu-tests.yml` | GPU-marker tests; needs a self-hosted runner labelled `gpu` | Skip unless you run one |
 
-Required repository secrets (**Settings → Secrets and variables → Actions**):
+Repository secrets (**Settings → Secrets and variables → Actions**):
 
 | Secret | Used by | Purpose |
 |---|---|---|
-| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | `ci.yml`, `docker-pr.yml` | Push to Docker Hub |
-| `DOCKERHUB_TOKEN` | `ci.yml` (main only) | Sync `DOCKERHUB_README.md` to the Docker Hub description |
+| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | `ci.yml` | Push the app image to Docker Hub |
+| `DOCKERHUB_TOKEN` | `ci.yml` (tag pushes) | Sync `DOCKERHUB_README.md` to the Docker Hub description |
 | `CODECOV_TOKEN` | `ci.yml` | Upload test coverage to Codecov (drives the README coverage badge) |
+| `PLEX_CLAIM_TOKEN` | `ci.yml` | Optional: claims the Plex container used by the real-vendor tests (those tests skip without it) |
+
+`docker-pr.yml`, `docker-pr-cleanup.yml` and `marker-agent.yml` publish to GHCR with the built-in `GITHUB_TOKEN`.
 
 ---
 
 ## Debugging
 
+Set the log level to DEBUG in **Settings**, then open a shell in the container if you need one:
+
 ```bash
-LOG_LEVEL=DEBUG python -m media_preview_generator.web.app  # Debug logging
-docker exec -it media-preview-generator /bin/bash   # Inspect container
+docker exec -it media-preview-generator /bin/bash
 ```
 
 Check detected GPUs in the web UI (**Settings** or **Setup**).

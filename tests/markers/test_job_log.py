@@ -10,7 +10,7 @@ import dataclasses
 import os
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -30,10 +30,8 @@ from media_preview_generator.markers.job_log import (
     ALREADY_DECIDED,
     EPISODE_ONLY_SOURCES,
     RunNotes,
-    SeasonEpisode,
     ServerResult,
     clock,
-    decide_again_line,
     display_name,
     done_line,
     duration,
@@ -42,10 +40,8 @@ from media_preview_generator.markers.job_log import (
     last_seasons_audio_line,
     make_source_view,
     nothing_was_sent,
-    online_recheck_line,
     read_result_line,
     reading_line,
-    season_line,
     server_result_line,
     server_source_line,
     source_line,
@@ -54,7 +50,6 @@ from media_preview_generator.markers.job_log import (
     type_phrase,
     worker_completed_line,
     worker_device,
-    write_lines,
 )
 from media_preview_generator.markers.models import (
     STALE_SERVER_MARKERS_DETAIL,
@@ -73,13 +68,22 @@ from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.store import EvidenceRow
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerType
-from tests.markers import test_pipeline
-from tests.markers.fakes import FakeClient, ready_publisher
-from tests.markers.test_pipeline import DUR, NO_DATA, TIDB_CREDITS, TIDB_INTRO, _clients, _ctx, _probe, _registry, _run
+from tests.markers import pipeline_helpers
+from tests.markers.fakes import FakeClient, ready_publisher, wait_for
+from tests.markers.pipeline_helpers import (
+    DUR,
+    NO_DATA,
+    TIDB_CREDITS,
+    TIDB_INTRO,
+    _clients,
+    _ctx,
+    _probe,
+    _registry,
+    _run,
+)
 
-# test_pipeline's fixtures, shared by name (an import of them reads as unused to the linter).
-media = test_pipeline.media
-store = test_pipeline.store
+# pipeline_helpers fixtures, shared by name (an import of them reads as unused to the linter).
+media = pipeline_helpers.media
 
 T = MarkerType
 TEXT_CREDITS = Candidate(T.CREDITS, 1_291_000, None, Source.CREDITS_TEXT)
@@ -183,7 +187,7 @@ def _job(store, path, reg, *, theintrodb=NO_DATA, found=(TEXT_CREDITS,), on_work
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# The two layouts the owner approved, built from fixtures and asserted line for line.
+# The two layouts, built from fixtures and asserted line for line.
 # ---------------------------------------------------------------------------------------------------------------------
 
 MOVIE_SETTINGS = {
@@ -262,7 +266,7 @@ def _accused_job(store, reg, clock):
 
 class TestApprovedLayouts:
     def test_a_film_whose_credits_chapter_a_gpu_worker_checked(self, tmp_path, store, job_log):
-        # Credit text reads a film a "Credits" chapter decided alone (spec §5.5 rule 3, 2026-09-27): here the chapter
+        # Credit text reads a film a "Credits" chapter decided alone: here the chapter
         # sits 39 s into the roll, so credit text moves its start to the first card.
         folder = tmp_path / "media" / "movies" / "32 Frames A 9 11 Mystery (2026)"
         folder.mkdir(parents=True)
@@ -463,7 +467,7 @@ class TestFileBlocks:
 
         plex.write.side_effect = keeps_plexs_credits
         ctx = _job(store, media, _plex(media, keeps_own_credits=True))
-        out, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(test_pipeline.CHAPTERS_BOTH))
+        out, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(pipeline_helpers.CHAPTERS_BOTH))
 
         assert _messages(job_log) == [
             HEAD,
@@ -983,36 +987,6 @@ class TestConcurrentWorkers:
                 f"{title} · [Plex] Added credits 21:31–22:01",
                 f"CPU Worker {n} completed: {title} (success, 0 s)",
             ]
-
-    def test_write_lines_logs_each_line_as_its_own_record_in_order(self):
-        # No lock, no block: write_lines is just write_line per line, so two callers' lines can interleave -- each
-        # caller's own lines still come out in the order it gave them.
-        records: list[str] = []
-
-        def slow_sink(message):
-            records.append(message.record["message"])
-            time.sleep(0.001)
-
-        handler = logger.add(slow_sink, level="INFO", format="{message}", filter=lambda r: r["module"] == "job_log")
-        start = threading.Barrier(2, timeout=10)
-
-        def write(tag):
-            start.wait()
-            write_lines([f"{tag} {n}" for n in range(20)])
-
-        try:
-            threads = [threading.Thread(target=write, args=(tag,)) for tag in ("a", "b")]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=10)
-        finally:
-            logger.remove(handler)
-
-        assert len(records) == 40
-        for tag in ("a", "b"):
-            own = [line for line in records if line.startswith(f"{tag} ")]
-            assert own == [f"{tag} {n}" for n in range(20)]
 
 
 def _publisher_by_item(publishers, paths):
@@ -1873,7 +1847,7 @@ class TestTitles:
         if failure == "times-out":
             # The answer that came after the wait is kept: a later job names the film by it, without asking.
             assert answered.wait(5)
-            assert _wait_for(lambda: titles.TITLE_CACHE.get(movie) == ("Heat", "1995"))
+            assert wait_for(lambda: titles.TITLE_CACHE.get(movie) == ("Heat", "1995"), timeout=5.0)
         job_log.clear()
         self._check(self._quiet_job(store, reg), item)
         assert server.get_external_ids.call_count == 1
@@ -1888,15 +1862,6 @@ class TestTitles:
             f"{name} · [Plex] Already up to date (credits 21:35–22:01)",
             f"{name} · done in 0 s (nothing new to send)",
         ]
-
-
-def _wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return False
 
 
 class TestTitleTellApart:
@@ -2090,15 +2055,6 @@ class TestStartLine:
             ({"source": "emby", "follows_job_id": "d1e2f3a4-bbbb"}, "follow-up to preview job d1e2f3a4 (Emby webhook)"),
             ({"source": "recently_added", "follows_job_id": "d1e2f3a4-bbbb"},
              "follow-up to preview job d1e2f3a4 (Recently Added scan)"),
-            ({"source": "season", "file_paths": ["/tv/Accused/Season 02/Accused - S02E01.mkv",
-                                                 "/tv/Accused/Season 02/Accused - S02E03.mkv"]},
-             "Season job for Accused S02"),
-            ({"source": "season", "file_paths": ["/tv/A/Season 01/A - S01E01.mkv", "/tv/B/Season 02/B - S02E01.mkv"]},
-             "Season job for 2 seasons"),
-            ({"source": "version_rerun", "version_rerun": True}, "re-checking files after an update"),
-            ({"source": "decide_again", "decide_again": True}, "deciding files again after the update"),
-            ({"source": "online_recheck", "online_recheck": True}, "weekly online re-check"),
-            ({"source": "theintrodb_recheck"}, "checking files again after TheIntroDB's daily limit reset"),
             ({"source": "reconcile", "reconcile": True}, "Check servers"),
             ({"source": "inspector", "force": True}, "manual Re-detect"),
             ({"source": "inspector", "force": False}, "publishing your saved markers"),
@@ -2109,9 +2065,8 @@ class TestStartLine:
             ({"source": "sonarr", "verify": True}, "checking again files published just after they were replaced"),
             ({"source": "schedule"}, "scheduled"),
         ],
-        ids=["radarr", "sonarr", "vendor-webhook", "recently-added", "season", "seasons", "version-rerun",
-             "decide-again", "online-recheck", "budget-recheck", "check-servers", "redetect", "publish-retry",
-             "season-view", "manual", "retry", "verify", "schedule-gone"],
+        ids=["radarr", "sonarr", "vendor-webhook", "recently-added", "check-servers", "redetect", "publish-retry",
+             "season-view", "manual", "retry", "verify", "schedule"],
     )  # fmt: skip
     def test_each_trigger_in_plain_words(self, cfg, trigger):
         job = SimpleNamespace(parent_schedule_id="")
@@ -2126,290 +2081,6 @@ class TestStartLine:
         job = SimpleNamespace(parent_schedule_id="s-1")
         assert job_runner.trigger_words(job, {"source": "schedule"}) == 'scheduled "Nightly"'
         assert start_line("0123456789", 1, 'scheduled "Nightly"').endswith('started: 1 file, scheduled "Nightly"')
-
-
-class TestSeasonJob:
-    def test_unchanged_episodes_get_full_blocks_too_and_the_season_total_comes_last(self, store, tmp_path, job_log):
-        folder = tmp_path / "media" / "tv" / "Rick and Morty (2013) {tvdb-275274}" / "Season 01"
-        folder.mkdir(parents=True)
-        paths = []
-        for episode in (1, 2, 3, 4):
-            f = folder / f"Rick and Morty (2013) - S01E{episode:02d} - Episode.mkv"
-            f.write_bytes(b"x" * 100)
-            paths.append(str(f))
-        reg = _plex(paths[0])
-
-        def run(ctx, path, chapters=()):
-            hints = {"plex-1": f"item-{paths.index(path)}"}  # each episode its own Plex item
-            return _run(ctx, path, {"plex-1": ready_publisher()}, probe=_probe(chapters), hints=hints)[0]
-
-        # Credit text decides every episode's credits alone; TheIntroDB has no entry for any of them.
-        first = _job(store, paths[0], reg)
-        for path in paths:
-            assert run(first, path).outcome_key == FileOutcome.PUBLISHED.value
-        os.utime(paths[1], ns=(5, 5))  # E02 was replaced by a file with an intro chapter
-        job_log.clear()
-
-        season = _job(store, paths[0], reg)
-        season.season_recheck = True
-        outcomes = [run(season, path, INTRO_CHAPTERS if path == paths[1] else ()).outcome_key for path in paths]
-
-        # The first job's 4 "no entry" answers paused TheIntroDB for the show, so the replaced E02 isn't asked again.
-        paused_until = store.series_lookups_paused_until(
-            Source.THEINTRODB, "tvdb:275274", pause=pipeline.SERIES_NO_ENTRY_PAUSE
-        )
-        # The store's own clock (real time, not the job's fixed one): whatever day the first job actually ran on.
-        saved = store.evidence_rows(store.get_file(paths[0]).id)[0].fetched_at[:10]
-        skip_note = f"skipped (no data for this show; asked again after {paused_until:%Y-%m-%d})"
-
-        def unchanged_block(episode: int, *, theintrodb: str) -> list[str]:
-            title = f"Rick and Morty (2013) S01E{episode:02d}"
-            return [
-                f"{title}: checking intro and credits",
-                f"{title} · Checking chapters… none (saved {saved})",
-                f"{title} · Checking TheIntroDB… {theintrodb}",
-                f"{title} · Checking credit text… credits start at 21:31 (saved {saved})",
-                f"{title} · Checking Plex's own markers… none (saved {saved})",
-                f"{title} · Decided: intro nothing found · credits 21:31–22:01 (credit text)",
-                f"{title} · [Plex] Already up to date (credits 21:31–22:01)",
-                f"{title} · done in 0 s (nothing new to send)",
-            ]
-
-        changed_block = [
-            "Rick and Morty (2013) S01E02: checking intro and credits",
-            'Rick and Morty (2013) S01E02 · Checking chapters… "Intro" chapter at 2:06–2:37 (asked now)',
-            f"Rick and Morty (2013) S01E02 · Checking TheIntroDB… {skip_note}",
-            "Rick and Morty (2013) S01E02 · Reading credit text on the CPU…",
-            "Rick and Morty (2013) S01E02 · Credit text: credits start at 21:31 (0 s)",
-            "Rick and Morty (2013) S01E02 · Checking Plex's own markers… not read (this server shows our markers)",
-            'Rick and Morty (2013) S01E02 · Decided: intro 2:06–2:37, from the "Intro" chapter · credits 21:31–22:01 '
-            "(credit text)",
-            "Rick and Morty (2013) S01E02 · [Plex] Added intro 2:06–2:37; unchanged credits 21:31–22:01",
-            "Rick and Morty (2013) S01E02 · done in 0 s",
-        ]
-        # E01/E03 aren't due for anything, so TheIntroDB's stored "no entry" is reused; E04 is still due (nothing else
-        # about it changed) and finds the pause in place, same as the replaced E02.
-        expected = [
-            *unchanged_block(1, theintrodb=f"no entry (saved {saved})"),
-            *changed_block,
-            *unchanged_block(3, theintrodb=f"no entry (saved {saved})"),
-            *unchanged_block(4, theintrodb=skip_note),
-        ]
-        assert _messages(job_log) == expected
-
-        counts = {key: outcomes.count(key) for key in set(outcomes)}
-        assert counts == {FileOutcome.UP_TO_DATE.value: 3, FileOutcome.PUBLISHED.value: 1}
-        assert season.summary_lines(counts) == [
-            "Season re-check, Rick and Morty (2013) S01 (4 episodes): E02 changed (logged above); no change for "
-            "E01/E03/E04",
-            "Done: 4 files · 1 sent to Plex · 0 nothing found · 3 already up to date",
-        ]
-
-    @pytest.mark.parametrize(
-        ("episodes", "expected"),
-        [
-            (
-                [SeasonEpisode("E03", False), SeasonEpisode("E01", False)],
-                "Season re-check, Show S01 (2 episodes): no change",
-            ),
-            ([SeasonEpisode("E01", False)], "Season re-check, Show S01 (1 episode): no change"),
-            ([SeasonEpisode("E01", True)], "Season re-check, Show S01 (1 episode): E01 changed (logged above)"),
-            (
-                [SeasonEpisode("E02", True), SeasonEpisode("E01", False), SeasonEpisode("E03", False)],
-                "Season re-check, Show S01 (3 episodes): E02 changed (logged above); no change for E01/E03",
-            ),
-        ],
-        ids=["none-changed", "one-episode", "only-changed", "changed-and-unchanged"],
-    )
-    def test_season_line_wording(self, episodes, expected):
-        assert season_line("Show S01", episodes) == expected
-
-
-class TestDecideAgainJob:
-    """The one job after settings v16 decides files again, reusing answers that aren't due: like a Season job, it logs
-    every file's full block, changed or not, then its own one summary line of totals."""
-
-    def test_changed_and_unchanged_files_both_get_full_blocks(self, store, media, job_log, monkeypatch):
-        monkeypatch.setattr(pipeline, "APP_PUBLISH_WHEN", "high")  # how an older build left credit text alone
-        out, _ = _run(_job(store, media, _plex(media)), media, {"plex-1": ready_publisher()}, probe=_probe())
-        assert out.outcome_key == FileOutcome.NO_MARKERS.value
-        credits = store.get_decisions(store.get_file(media).id)[T.CREDITS]
-        assert (credits.status, credits.proposed_start_ms, credits.proposed_end_ms, credits.decided_by) == (
-            DecisionStatus.NO_EVIDENCE,
-            1_291_000,
-            DUR,
-            ("credits_text",),
-        )
-        monkeypatch.undo()
-        job_log.clear()
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-
-        again = _job(store, media, _plex(media))
-        again.decide_again = True
-        out, _ = _run(again, media, {"plex-1": ready_publisher()})
-        assert out.outcome_key == FileOutcome.PUBLISHED.value
-        assert _messages(job_log) == [
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (saved {today})",
-            f"{EPISODE} · Checking TheIntroDB… no entry (saved {today})",
-            f"{EPISODE} · Checking credit text… credits start at 21:31 (saved {today})",
-            f"{EPISODE} · Checking Plex's own markers… none (saved {today})",
-            f"{EPISODE} · Decided: intro nothing found · credits 21:31–22:01 (credit text)",
-            f"{EPISODE} · [Plex] Added credits 21:31–22:01",
-            DONE,
-        ]
-        assert again.summary_lines({FileOutcome.PUBLISHED.value: 1}) == [
-            "Decided again after the update (1 file): 1 changed (logged above)",
-            "Done: 1 file · 1 sent to Plex · 0 nothing found",
-        ]
-
-        job_log.clear()
-        quiet = _job(store, media, _plex(media))
-        quiet.decide_again = True
-        _run(quiet, media, {"plex-1": ready_publisher()})
-        assert _messages(job_log) == [
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (saved {today})",
-            f"{EPISODE} · Checking TheIntroDB… no entry (saved {today})",
-            f"{EPISODE} · Checking credit text… credits start at 21:31 (saved {today})",
-            f"{EPISODE} · Checking Plex's own markers… none (saved {today})",
-            f"{EPISODE} · Decided: intro nothing found · credits 21:31–22:01 (credit text)",
-            f"{EPISODE} · [Plex] Already up to date (credits 21:31–22:01)",
-            f"{DONE} (nothing new to send)",
-        ]
-        # Credits are decided: a file is "still nothing found" only with no marker at all.
-        assert quiet.summary_lines({FileOutcome.UP_TO_DATE.value: 1})[0] == (
-            "Decided again after the update (1 file): 1 unchanged"
-        )
-
-    @pytest.mark.parametrize(
-        ("files", "expected"),
-        [
-            (
-                [(True, False), (False, True), (False, False)],
-                "3 files): 1 changed (logged above); 2 unchanged, 1 still nothing found",
-            ),
-            ([(False, True), (False, True)], "2 files): 2 unchanged, still nothing found"),
-            ([(True, True)], "1 file): 1 changed (logged above)"),
-            ([], "0 files): nothing to decide"),
-        ],
-        ids=["mixed", "all-still-undecided", "only-changed", "none"],
-    )
-    def test_decide_again_line_wording(self, files, expected):
-        assert decide_again_line(files) == f"Decided again after the update ({expected}"
-
-
-class TestOnlineRecheckJob:
-    """The weekly online re-check asks only the due online lookups, reads nothing it doesn't have to, logs the files an
-    online database now has (or whose decisions changed) and one line for them all."""
-
-    @staticmethod
-    def _first_run(store, media):
-        out, _ = _run(_job(store, media, _plex(media), found=()), media, {"plex-1": ready_publisher()}, probe=_probe())
-        assert out.outcome_key == FileOutcome.NO_MARKERS.value  # TheIntroDB: no entry; credit text: none found
-
-    @staticmethod
-    def _weekly(store, media, *, theintrodb, days_later):
-        later = datetime.now(UTC) + timedelta(days=days_later)
-        ctx = _job(store, media, _plex(media), theintrodb=theintrodb, found=(), now=lambda: later)
-        ctx.online_recheck = True
-        return ctx
-
-    def test_a_database_that_now_has_the_file_is_logged_and_counted(self, store, media, job_log):
-        self._first_run(store, media)
-        job_log.clear()
-
-        weekly = self._weekly(store, media, theintrodb=TIDB, days_later=15)
-        out, _ = _run(weekly, media, {"plex-1": ready_publisher()})
-
-        assert out.outcome_key == FileOutcome.NO_MARKERS.value
-        credits = store.get_decisions(store.get_file(media).id)[T.CREDITS]
-        assert (credits.status, credits.reason) == (DecisionStatus.NO_EVIDENCE, ONLINE_ONLY_REASON)
-        assert (credits.proposed_start_ms, credits.proposed_end_ms) == (TIDB_CREDITS.start_ms, TIDB_CREDITS.end_ms)
-        assert len(weekly.clients["theintrodb"].calls) == 1
-        # Its credit text answer isn't due: the file isn't read again.
-        weekly.local_detectors[0].detect.assert_not_called()
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        assert _messages(job_log) == [
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (saved {today})",
-            f"{EPISODE} · Checking TheIntroDB… credits 21:36–22:00 (asked now)",
-            f"{EPISODE} · Checking credit text… none found (saved {today})",
-            # A server's "none" a day old is read again while a type is undecided, as on any run.
-            f"{EPISODE} · Checking Plex's own markers… none (asked now)",
-            f"{EPISODE} · Decided: intro nothing found · credits {ONLINE_ONLY}",
-            f"{EPISODE} · [Plex] Nothing to send",
-            f"{DONE} (nothing new to send)",
-        ]
-        assert weekly.summary_lines({FileOutcome.NO_MARKERS.value: 1}) == [
-            "Weekly online re-check (1 file): 1 newly found online, 0 unchanged",
-            "Done: 1 file · 0 sent to Plex · 1 nothing found",
-        ]
-
-    def test_a_file_still_not_found_gets_a_full_block_too(self, store, media, job_log):
-        self._first_run(store, media)
-        job_log.clear()
-
-        weekly = self._weekly(store, media, theintrodb=NO_DATA, days_later=15)
-        _run(weekly, media, {"plex-1": ready_publisher()})
-
-        assert len(weekly.clients["theintrodb"].calls) == 1  # due, so asked
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        assert _messages(job_log) == [
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (saved {today})",
-            f"{EPISODE} · Checking TheIntroDB… no entry (asked now)",
-            f"{EPISODE} · Checking credit text… none found (saved {today})",
-            f"{EPISODE} · Checking Plex's own markers… none (asked now)",
-            f"{EPISODE} · Decided: intro nothing found · credits nothing found",
-            f"{EPISODE} · [Plex] Nothing to send",
-            f"{DONE} (nothing new to send)",
-        ]
-        assert weekly.summary_lines({FileOutcome.NO_MARKERS.value: 1})[0] == (
-            "Weekly online re-check (1 file): 0 newly found online, 1 unchanged"
-        )
-
-    def test_a_no_entry_that_isnt_due_is_not_asked(self, store, media, job_log):
-        self._first_run(store, media)
-        job_log.clear()
-
-        weekly = self._weekly(store, media, theintrodb=TIDB, days_later=13)
-        _run(weekly, media, {"plex-1": ready_publisher()})
-
-        assert weekly.clients["theintrodb"].calls == []
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        assert _messages(job_log) == [
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (saved {today})",
-            f"{EPISODE} · Checking TheIntroDB… no entry (saved {today})",
-            f"{EPISODE} · Checking credit text… none found (saved {today})",
-            f"{EPISODE} · Checking Plex's own markers… none (asked now)",
-            f"{EPISODE} · Decided: intro nothing found · credits nothing found",
-            f"{EPISODE} · [Plex] Nothing to send",
-            f"{DONE} (nothing new to send)",
-        ]
-        assert weekly.summary_lines({FileOutcome.NO_MARKERS.value: 1})[0] == (
-            "Weekly online re-check (1 file): 0 newly found online, 1 unchanged"
-        )
-
-    def test_any_other_job_has_no_such_line(self, store, media):
-        ctx = _job(store, media, _plex(media), found=())
-        _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
-        assert not any(line.startswith("Weekly") for line in ctx.summary_lines({FileOutcome.NO_MARKERS.value: 1}))
-
-    @pytest.mark.parametrize(
-        ("files", "expected"),
-        [
-            ([(True, True), (False, False), (False, False)], "3 files): 1 newly found online, 2 unchanged"),
-            ([(True, False)], "1 file): 1 newly found online, 0 unchanged"),
-            ([(False, True), (True, True), (False, False)], "3 files): 1 newly found online, 1 changed otherwise, 1 "
-             "unchanged"),
-            ([], "0 files): 0 newly found online, 0 unchanged"),
-        ],
-        ids=["found-and-unchanged", "found-without-a-change", "changed-otherwise", "none"],
-    )  # fmt: skip
-    def test_online_recheck_line_wording(self, files, expected):
-        assert online_recheck_line(files) == f"Weekly online re-check ({expected}"
 
 
 class TestTotalsLine:

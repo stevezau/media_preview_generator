@@ -36,6 +36,7 @@ from typing import Optional
 
 from loguru import logger
 from rich.console import Console
+from rich.markup import escape
 
 from .utils import redact_secrets, redacted_traceback
 
@@ -142,8 +143,9 @@ def _json_sink(message) -> None:
         "line": record["line"],
         "module": record["module"],
     }
-    if record["exception"] is not None:
-        payload["exception"] = redact_secrets(str(record["exception"]))
+    exc = record["exception"]
+    if exc is not None:
+        payload["exception"] = redacted_traceback(exc.value) if exc.value is not None else redact_secrets(str(exc))
     extra = record.get("extra", {})
     for key in ("worker_id", "worker_type", "gpu_index", "media_title", "item_key"):
         if key in extra and extra[key] is not None:
@@ -301,7 +303,7 @@ def setup_logging(
             )
         elif console:
             hid = logger.add(
-                lambda msg: console.print(redact_secrets(msg), end=""),
+                lambda msg: console.print(escape(redact_secrets(msg)), end=""),
                 level=log_level,
                 format=_CONSOLE_FORMAT,
                 enqueue=True,

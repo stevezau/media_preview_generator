@@ -82,15 +82,25 @@ def server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
     loudness_raw = data.get("loudness")
     loudness = dict(loudness_raw) if isinstance(loudness_raw, dict) else {}
 
+    auth_raw = data.get("auth")
+    auth = dict(auth_raw) if isinstance(auth_raw, dict) else {}
+    try:
+        timeout = int(data.get("timeout") or 30)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Media server {!r} has an invalid timeout {!r}; using 30s.", data.get("name"), data.get("timeout")
+        )
+        timeout = 30
+
     return ServerConfig(
         id=str(data.get("id") or ""),
         type=server_type,
         name=str(data.get("name") or ""),
         enabled=bool(data.get("enabled", True)),
         url=str(data.get("url") or ""),
-        auth=dict(data.get("auth") or {}),
+        auth=auth,
         verify_ssl=bool(data.get("verify_ssl", True)),
-        timeout=int(data.get("timeout") or 30),
+        timeout=timeout,
         libraries=libs,
         path_mappings=list(data.get("path_mappings") or []),
         exclude_paths=list(data.get("exclude_paths") or []),
@@ -143,16 +153,13 @@ class ServerRegistry:
 
         Args:
             media_servers: Raw ``settings.json`` ``media_servers`` list.
-            legacy_config: Existing :class:`Config` instance whose ``plex_*``
-                fields the :class:`PlexServer` wrapper still consults when
-                constructed from a duck-typed legacy config. Optional — the
-                modern path passes ``ServerConfig`` directly and ignores it.
+            legacy_config: Ignored; still accepted so existing callers keep working.
         """
         registry = cls()
         for raw in media_servers or []:
             try:
                 cfg = server_config_from_dict(raw)
-            except UnsupportedServerTypeError as exc:
+            except Exception as exc:
                 logger.warning(
                     "Skipping a media server because its configuration is invalid: {}. "
                     "Open Settings → Media Servers, remove or fix this entry, then restart.",
@@ -162,8 +169,8 @@ class ServerRegistry:
 
             registry._configs[cfg.id] = cfg
             try:
-                server = registry._build_server(cfg, legacy_config=legacy_config)
-            except UnsupportedServerTypeError as exc:
+                server = registry._build_server(cfg)
+            except Exception as exc:
                 logger.warning(
                     "Skipping media server {!r} (id={}) — could not initialise: {}. "
                     "Verify the server URL, credentials, and type in Settings → Media Servers.",
@@ -198,7 +205,7 @@ class ServerRegistry:
         entry = _legacy_plex_to_media_server(snapshot, id_override="plex-default")
         if entry is None:
             return cls()
-        return cls.from_settings([entry], legacy_config=config)
+        return cls.from_settings([entry])
 
     # ----------------------------------------------------------- accessors
     def configs(self) -> list[ServerConfig]:
@@ -226,19 +233,11 @@ class ServerRegistry:
 
     # ----------------------------------------------------------- helpers
     @staticmethod
-    def _build_server(
-        config: ServerConfig,
-        *,
-        legacy_config: Config | None,
-    ) -> MediaServer:
+    def _build_server(config: ServerConfig) -> MediaServer:
         """Construct the right :class:`MediaServer` subclass for ``config.type``."""
         if config.type is ServerType.PLEX:
             from .plex import PlexServer
 
-            # PlexServer now accepts ServerConfig directly (it synthesizes a
-            # legacy Config-shape internally for plex_client). The
-            # legacy_config parameter on this method is retained only for
-            # backwards compatibility with from_legacy_config callers.
             return PlexServer(config)
 
         if config.type is ServerType.EMBY:

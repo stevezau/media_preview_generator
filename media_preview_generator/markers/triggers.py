@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import math
 import os
 import threading
-from collections.abc import Callable, Iterable, Mapping
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable, Iterable
+from datetime import timedelta
 from types import SimpleNamespace
 
 from loguru import logger
@@ -28,19 +27,16 @@ from ..web.settings_manager import get_settings_manager
 from .audio.season import season_group, season_videos
 from .external_ids import ids_from_path, is_season_folder
 from .job_runner import (
-    DECIDE_AGAIN,
     FILES_SEALED,
     FOLLOW_UP_LOCK,
     MAX_RETRY_FILES,
-    VERSION_RERUN,
-    VERSION_RERUN_COUNTS,
     sent_by_a_sender,
     server_pin,
     start_intro_credits_job_async,
 )
+from .models import utcnow as _utcnow
 from .ownership import marker_matches
 from .settings import load_server
-from .versions import BATCH_FILES
 
 # Serialises Inspector re-detect's "is this file already queued?" with the job creation, so a double-click queues one
 # job. Webhook follow-ups use job_runner.FOLLOW_UP_LOCK, which their runner also takes to read the files.
@@ -51,12 +47,6 @@ _pending_follow_up_lock = threading.Lock()
 _loudness_follow_up_lock = threading.Lock()
 _REDETECT_SOURCE = "inspector"
 _SEASON_PUBLISH_SOURCE = "inspector_season"
-DECIDE_AGAIN_JOB_NAME = "Intro & Credits: files the old rules couldn't decide, decided again"
-VERSION_RERUN_JOB_NAME = "Intro & Credits: Re-checking {total} after the app update · batch {batch} of {batches}"
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def markers_enabled_anywhere() -> bool:
@@ -129,9 +119,6 @@ def create_intro_credits_job(
     reconcile: bool = False,
     parent_job_id: str | None = None,
     max_retries: int = 0,
-    decide_again: bool = False,
-    version_rerun: bool = False,
-    version_rerun_counts: Mapping[str, int] | None = None,
     server_id: str | None = None,
 ) -> Job:
     """Create and start an Intro & Credits job.
@@ -158,12 +145,6 @@ def create_intro_credits_job(
         parent_job_id: For a retry: the job whose retry chain it belongs to. The retry is hidden from the queue like
             a preview retry (``is_retry``); that job's row shows it.
         max_retries: For a retry: the retry count in force (the row's "Retry N/M").
-        decide_again: List the files to decide again when the job runs (``job_runner._items_to_decide_again``)
-            instead of libraries or paths.
-        version_rerun: Take the next batch of files to re-check after an update when the job runs
-            (``job_runner._items_to_read_again``) instead of libraries or paths.
-        version_rerun_counts: For a version re-run: where its batch stands in the whole re-check
-            (``job_runner.VERSION_RERUN_COUNTS``).
         server_id: Publish to this server only (``job_runner.server_pin``): the pin of the preview job it follows, as
             ``jobs.worker.resolve_per_item_pin`` resolved it, or of the job whose retry or check it is. None = every
             server with Intro & Credits on.
@@ -184,12 +165,6 @@ def create_intro_credits_job(
         config["verify"] = True
     if reconcile:
         config["reconcile"] = True
-    if decide_again:
-        config[DECIDE_AGAIN] = True
-    if version_rerun:
-        config[VERSION_RERUN] = True
-    if version_rerun_counts:
-        config[VERSION_RERUN_COUNTS] = dict(version_rerun_counts)
     if server_id:
         config["server_id"] = server_id
     if chain_attempt:
@@ -237,7 +212,7 @@ def _queued_in_waiting_follow_ups(
         jm: The job manager.
         configs: Server configs; read from settings only when a waiting follow-up needs them.
         server_id: The request's pin (``job_runner.server_pin``); None = every server with Intro & Credits on.
-        source: The request's source; None (a Season request) = any waiting follow-up covers it.
+        source: The request's source; None = any waiting follow-up covers it.
         kind: The feature's job kind; jobs of other kinds cannot cover this request.
 
     Returns:
@@ -318,7 +293,7 @@ def submit_webhook_follow_up(
     item_id_hints: dict[str, dict[str, str]] | None = None,
     server_id: str | None = None,
 ) -> str | None:
-    """Queue the Intro & Credits job that follows a webhook preview job (spec §6.4 item 9).
+    """Queue the Intro & Credits job that follows a webhook preview job.
 
     Only files a server with Intro & Credits on holds are queued (the pinned server, for a pinned job), and not files a
     waiting follow-up that publishes at least as widely already lists. Vendor webhooks arrive one episode at a time: an
@@ -736,8 +711,7 @@ def submit_season_publish(episode: str) -> str:
     The group is the one the Season view lists (``season_group``: the same show's season folders on every disk of the
     library, the same season number, at most the 40 nearest), so a flat folder holding several seasons sends only this
     season. Jobs publish every decided marker, so decided episodes go to every server that doesn't show them yet and
-    undecided ones are checked again (owner ruling R4, at NORMAL priority since 2026-09-15). While a Publish of exactly
-    these episodes is still queued or running, that job is returned instead.
+    undecided ones are checked again. While a Publish of exactly these episodes is still queued or running, that job is returned instead.
 
     Args:
         episode: The local path of any episode of the season, already validated by the caller.
@@ -768,42 +742,3 @@ def submit_season_publish(episode: str) -> str:
             file_paths=episodes,
         )
     return job.id
-
-
-def version_rerun_counts(listed: int, after: Mapping[str, object] | None = None) -> dict[str, int]:
-    """Where the next batch of the re-check after an update stands: the next batch of the re-check ``after`` belongs
-    to, or the first batch of a new one over the ``listed`` files.
-
-    Args:
-        listed: The files due to be read again now.
-        after: The counts of the batch that just ran (``job_runner.VERSION_RERUN_COUNTS``); None for a first batch.
-
-    Returns:
-        ``{"total", "batch", "batch_size"}``.
-    """
-    previous = after if isinstance(after, Mapping) else {}
-    try:
-        total = int(previous.get("total") or 0)
-        batch = int(previous.get("batch") or 0) + 1
-    except (TypeError, ValueError):
-        total = 0
-    if total <= 0:
-        return {"total": listed, "batch": 1, "batch_size": BATCH_FILES}
-    return {"total": total, "batch": batch, "batch_size": BATCH_FILES}
-
-
-def version_rerun_job_name(counts: Mapping[str, int]) -> str:
-    """The queue title of a batch of the re-check after an update.
-
-    Args:
-        counts: ``version_rerun_counts``.
-
-    Returns:
-        E.g. ``Intro & Credits: Re-checking 1,568 files after the app update · batch 1 of 16``. A batch past the count
-        the first batch worked out (files still due after their batch) is its own last one.
-    """
-    total = int(counts["total"])
-    batch = int(counts["batch"])
-    batches = max(batch, math.ceil(total / max(1, int(counts["batch_size"]))))
-    files = f"{total:,} file" if total == 1 else f"{total:,} files"
-    return VERSION_RERUN_JOB_NAME.format(total=files, batch=batch, batches=batches)

@@ -69,8 +69,7 @@ class TestNewJobModal:
 
         dashboard_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(dashboard_page.locator("#newJobForm")).to_be_visible(timeout=2000)
-        # Wait for libraries to load + tick Movies.
-        dashboard_page.wait_for_timeout(500)
+        expect(dashboard_page.locator(".job-library-checkbox").first).to_be_visible()
         # Submit button (label varies — find by class).
         submit = (
             dashboard_page.locator("#newJobForm")
@@ -78,8 +77,8 @@ class TestNewJobModal:
             .locator('button:has-text("Start"), button.btn-primary')
             .last
         )
-        submit.click()
-        dashboard_page.wait_for_timeout(500)
+        with dashboard_page.expect_request(lambda r: r.url.endswith("/api/jobs") and r.method == "POST"):
+            submit.click()
         assert captured, "POST /api/jobs never fired"
         assert captured[0]["config"]["sort_by"] == "default"
 
@@ -251,7 +250,7 @@ class TestNewJobModalNonPlex:
 
         authed_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(authed_page.locator("#newJobForm")).to_be_visible(timeout=2000)
-        authed_page.wait_for_timeout(400)
+        expect(authed_page.locator(".job-library-checkbox").first).to_be_visible()
 
         # Precondition: the rendered DOM must actually contain the
         # second-Plex checkbox we're about to click. Without this guard
@@ -269,17 +268,17 @@ class TestNewJobModalNonPlex:
         # checkbox carries ``data-server-id="plex-calypso"``. Pre-fix the
         # UI ignored that attribute and the backend inference picked
         # Kraken's "movies" (same id="1") instead.
-        authed_page.evaluate(
-            "(async () => {"
-            "  const all = document.getElementById('jobLibraryAll');"
-            "  all.checked = false;"
-            "  if (typeof toggleAllLibraries === 'function') toggleAllLibraries(all);"
-            "  const cb = document.querySelector('input[data-server-id=\"plex-calypso\"]');"
-            "  if (cb) { cb.checked = true; cb.dispatchEvent(new Event('change')); }"
-            "  if (typeof startNewJob === 'function') { try { await startNewJob(); } catch(_){} }"
-            "})()"
-        )
-        authed_page.wait_for_timeout(800)
+        with authed_page.expect_request(lambda r: r.url.endswith("/api/jobs") and r.method == "POST"):
+            authed_page.evaluate(
+                "(async () => {"
+                "  const all = document.getElementById('jobLibraryAll');"
+                "  all.checked = false;"
+                "  if (typeof toggleAllLibraries === 'function') toggleAllLibraries(all);"
+                "  const cb = document.querySelector('input[data-server-id=\"plex-calypso\"]');"
+                "  if (cb) { cb.checked = true; cb.dispatchEvent(new Event('change')); }"
+                "  if (typeof startNewJob === 'function') { try { await startNewJob(); } catch(_){} }"
+                "})()"
+            )
 
         assert captured, "POST /api/jobs never fired"
         body = captured[0]
@@ -323,19 +322,19 @@ class TestNewJobModalNonPlex:
 
         jellyfin_dashboard_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(jellyfin_dashboard_page.locator("#newJobForm")).to_be_visible(timeout=2000)
-        jellyfin_dashboard_page.wait_for_timeout(400)
+        expect(jellyfin_dashboard_page.locator(".job-library-checkbox").first).to_be_visible()
 
-        jellyfin_dashboard_page.evaluate(
-            "(async () => {"
-            "  const all = document.getElementById('jobLibraryAll');"
-            "  all.checked = false;"
-            "  if (typeof toggleAllLibraries === 'function') toggleAllLibraries(all);"
-            "  const cb = document.querySelector('.job-library-checkbox');"
-            "  if (cb) { cb.checked = true; cb.dispatchEvent(new Event('change')); }"
-            "  if (typeof startNewJob === 'function') { try { await startNewJob(); } catch(_){} }"
-            "})()"
-        )
-        jellyfin_dashboard_page.wait_for_timeout(800)
+        with jellyfin_dashboard_page.expect_request(lambda r: r.url.endswith("/api/jobs") and r.method == "POST"):
+            jellyfin_dashboard_page.evaluate(
+                "(async () => {"
+                "  const all = document.getElementById('jobLibraryAll');"
+                "  all.checked = false;"
+                "  if (typeof toggleAllLibraries === 'function') toggleAllLibraries(all);"
+                "  const cb = document.querySelector('.job-library-checkbox');"
+                "  if (cb) { cb.checked = true; cb.dispatchEvent(new Event('change')); }"
+                "  if (typeof startNewJob === 'function') { try { await startNewJob(); } catch(_){} }"
+                "})()"
+            )
 
         assert captured, "POST /api/jobs never fired for the Jellyfin full-scan request"
         body = captured[0]
@@ -405,7 +404,7 @@ class TestServerDropdownVendorBadges:
         authed_page.wait_for_load_state("domcontentloaded")
         authed_page.locator('.dashboard-quick-card button:has-text("Start new job")').click()
         expect(authed_page.locator("#jobLibraryList")).to_be_visible(timeout=2000)
-        authed_page.wait_for_timeout(500)
+        expect(authed_page.locator("#jobLibraryList")).to_contain_text("Plex Main")
 
         list_text = authed_page.locator("#jobLibraryList").inner_text()
         assert "Plex Main" in list_text, (
@@ -431,7 +430,7 @@ class TestServerDropdownVendorBadges:
         authed_page.wait_for_load_state("domcontentloaded")
         authed_page.get_by_role("button", name="Process a file or folder").click()
         expect(authed_page.locator("#manualServerScope")).to_be_visible(timeout=2000)
-        authed_page.wait_for_timeout(500)
+        expect(authed_page.locator("#manualServerScope")).to_contain_text("(JELLYFIN)")
 
         option_texts = authed_page.locator("#manualServerScope option").all_text_contents()
         joined = " | ".join(option_texts)

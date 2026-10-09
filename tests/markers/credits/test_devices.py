@@ -1,4 +1,4 @@
-"""Worker device → PCI address → WebGPU EP device (spec §6.4 item 7, T-R3)."""
+"""Worker device → PCI address → WebGPU EP device."""
 
 import subprocess
 import threading
@@ -149,8 +149,8 @@ class TestWorkerPci:
         assert devices.worker_pci_bus_id(gpu, path) is None
 
 
-# Storage's EP list, measured 2026-09-16: the P5000 and the board's ASPEED BMC VGA.
-P5000 = {"Discrete": "1", "card_idx": "0", "pci_bus_id": "0000:02:00.0"}
+# An EP list as measured on a host with one NVIDIA card and a board's BMC VGA.
+NVIDIA_CARD = {"Discrete": "1", "card_idx": "0", "pci_bus_id": "0000:02:00.0"}
 BMC = {"card_idx": "1", "pci_bus_id": "0000:07:00.0"}
 IGPU = {"card_idx": "0", "pci_bus_id": "0000:00:02.0"}
 
@@ -159,13 +159,13 @@ IGPU = {"card_idx": "0", "pci_bus_id": "0000:00:02.0"}
     ("metadatas", "pci", "expected"),
     [
         ([], "0000:02:00.0", None),
-        ([P5000, BMC], "0000:02:00.0", 0),  # storage
-        ([BMC, P5000], "0000:02:00.0", 1),
-        ([P5000, IGPU], "0000:00:02.0", 1),  # plex: the Intel worker's helper
-        ([P5000, BMC], "0000:65:00.0", None),  # no device is this worker's GPU
-        ([P5000, BMC], None, None),  # address unknown, several devices
-        ([P5000], None, 0),  # address unknown, one device
-        ([P5000], "0000:65:00.0", None),  # the only device is another GPU
+        ([NVIDIA_CARD, BMC], "0000:02:00.0", 0),
+        ([BMC, NVIDIA_CARD], "0000:02:00.0", 1),
+        ([NVIDIA_CARD, IGPU], "0000:00:02.0", 1),  # the Intel worker's helper
+        ([NVIDIA_CARD, BMC], "0000:65:00.0", None),  # no device is this worker's GPU
+        ([NVIDIA_CARD, BMC], None, None),  # address unknown, several devices
+        ([NVIDIA_CARD], None, 0),  # address unknown, one device
+        ([NVIDIA_CARD], "0000:65:00.0", None),  # the only device is another GPU
         ([{}], "0000:02:00.0", 0),  # one device without an address
         ([{}, {}], "0000:02:00.0", None),
         ([{"pci_bus_id": "0000:02:00.0"}, {"pci_bus_id": "0000:02:00.0"}], "0000:02:00.0", None),
@@ -177,7 +177,7 @@ def test_choose_ep_device(metadatas, pci, expected):
 
 @pytest.mark.parametrize(
     ("metadata", "expected"),
-    [(P5000, "0000:02:00.0"), ({}, None), ({"pci_bus_id": "not a bus id"}, None)],
+    [(NVIDIA_CARD, "0000:02:00.0"), ({}, None), ({"pci_bus_id": "not a bus id"}, None)],
 )
 def test_ep_device_pci_bus_id(metadata, expected):
     assert devices.ep_device_pci_bus_id(metadata) == expected
@@ -209,7 +209,7 @@ def test_dri_prime_tag(pci_bus_id, expected):
 
 
 class TestPinEnvToGpu:
-    """The only thing that puts a helper process on one physical GPU (controller note N1)."""
+    """The only thing that puts a helper process on one physical GPU."""
 
     def test_an_address_sets_the_tag_and_the_force_flag(self):
         pinned = devices.pin_env_to_gpu({"PATH": "/usr/bin"}, "0000:65:00.0")

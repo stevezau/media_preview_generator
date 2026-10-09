@@ -53,25 +53,8 @@ def _distribute_gpu_threads_into_dict(settings: dict[str, Any], value: int) -> N
     settings["gpu_config"] = config
 
 
-def preview_settings_after_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    """Return settings dict after applying the same merge rules as ``SettingsManager.update``.
-
-    Produces the effective configuration state without mutating ``base``.
-
-    Args:
-        base: Current settings (e.g. from ``get_all()``).
-        updates: Incoming partial update (may include ``gpu_threads``).
-
-    Returns:
-        Deep copy of ``base`` with ``updates`` applied.
-
-    """
-    out = copy.deepcopy(base)
-    to_apply = {k: v for k, v in updates.items() if k != "gpu_threads"}
-    out.update(to_apply)
-    if "gpu_threads" in updates:
-        _distribute_gpu_threads_into_dict(out, int(updates["gpu_threads"]))
-    return out
+# Real notification ids number a handful (plus one per GPU); this only bounds growth.
+MAX_DISMISSED_NOTIFICATIONS = 200
 
 
 class SettingsManager:
@@ -89,15 +72,21 @@ class SettingsManager:
         self._setup_state: dict[str, Any] = {}
         self._client_id: str | None = None
         self._lock = threading.RLock()
+        # Set when settings.json exists but could not be read; setup then counts as complete so auth stays closed.
+        self._load_failed = False
         self._load()
         self._load_setup_state()
 
     def _load(self) -> None:
         """Load settings from file."""
+        self._load_failed = False
         if self.settings_file.exists():
             try:
                 with open(self.settings_file) as f:
-                    self._settings = json.load(f)
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    raise ValueError(f"expected a JSON object, found {type(loaded).__name__}")
+                self._settings = loaded
                 logger.debug("Loaded settings from {}", self.settings_file)
             except Exception as e:
                 # J4: when a .bak exists from a prior atomic_json_save_with_backup,
@@ -120,6 +109,7 @@ class SettingsManager:
                     bak_hint,
                 )
                 self._settings = {}
+                self._load_failed = True
         else:
             self._settings = {}
         self._migrate_global_plex_webhook_to_per_server()
@@ -198,6 +188,16 @@ class SettingsManager:
                 self._setup_state = {}
         else:
             self._setup_state = {}
+
+    def reload(self) -> None:
+        """Re-read settings.json into memory (after the file was replaced on disk)."""
+        with self._lock:
+            self._load()
+
+    def reload_setup_state(self) -> None:
+        """Re-read setup_state.json into memory (after the file was replaced on disk)."""
+        with self._lock:
+            self._load_setup_state()
 
     def _save_setup_state(self) -> None:
         """Save setup wizard state to file atomically."""
@@ -588,24 +588,14 @@ class SettingsManager:
     def dismiss_notification_permanent(self, notification_id: str) -> None:
         """Append a notification ID to the persistent dismissal list.
 
-        Idempotent: calling twice with the same ID is a no-op.
+        Idempotent: calling twice with the same ID is a no-op. The list is capped at
+        ``MAX_DISMISSED_NOTIFICATIONS``; the oldest entries are dropped first.
         """
         with self._lock:
             current = list(self.dismissed_notifications)
             if notification_id not in current:
+                current = current[-(MAX_DISMISSED_NOTIFICATIONS - 1) :]
                 current.append(notification_id)
-                self._settings["dismissed_notifications"] = current
-                self._save()
-
-    def undismiss_notification(self, notification_id: str) -> None:
-        """Remove a notification ID from the persistent dismissal list.
-
-        Used by the "reset dismissed notifications" UI button.  Idempotent.
-        """
-        with self._lock:
-            current = list(self.dismissed_notifications)
-            if notification_id in current:
-                current = [n for n in current if n != notification_id]
                 self._settings["dismissed_notifications"] = current
                 self._save()
 
@@ -710,44 +700,45 @@ class SettingsManager:
         This ID is used for Plex OAuth and should be consistent
         across app restarts. Format: plex-preview-generator-<uuid>
         """
-        if self._client_id:
-            return self._client_id
+        with self._lock:
+            if self._client_id:
+                return self._client_id
 
-        # Try to load from file
-        if self.client_id_file.exists():
+            # Try to load from file
+            if self.client_id_file.exists():
+                try:
+                    self._client_id = self.client_id_file.read_text().strip()
+                    if self._client_id:
+                        return self._client_id
+                except Exception as e:
+                    logger.warning(
+                        "Could not read the saved client identifier from {} ({}: {}). "
+                        "A new one will be generated — Plex will treat this as a fresh client "
+                        "the next time you sign in.",
+                        self.client_id_file,
+                        type(e).__name__,
+                        e,
+                    )
+
+            # Generate new ID
+            self._client_id = f"plex-preview-generator-{uuid.uuid4()}"
+
+            # Save to file
             try:
-                self._client_id = self.client_id_file.read_text().strip()
-                if self._client_id:
-                    return self._client_id
+                self.config_dir.mkdir(parents=True, exist_ok=True)
+                self.client_id_file.write_text(self._client_id)
+                logger.info("Generated new client identifier: {}", self._client_id)
             except Exception as e:
                 logger.warning(
-                    "Could not read the saved client identifier from {} ({}: {}). "
-                    "A new one will be generated — Plex will treat this as a fresh client "
-                    "the next time you sign in.",
+                    "Could not save the new client identifier to {} ({}: {}). "
+                    "It'll keep working for this session, but a new one will be generated on next start. "
+                    "Check the config directory is writable (Docker: confirm volume mount permissions and PUID/PGID).",
                     self.client_id_file,
                     type(e).__name__,
                     e,
                 )
 
-        # Generate new ID
-        self._client_id = f"plex-preview-generator-{uuid.uuid4()}"
-
-        # Save to file
-        try:
-            self.config_dir.mkdir(parents=True, exist_ok=True)
-            self.client_id_file.write_text(self._client_id)
-            logger.info("Generated new client identifier: {}", self._client_id)
-        except Exception as e:
-            logger.warning(
-                "Could not save the new client identifier to {} ({}: {}). "
-                "It'll keep working for this session, but a new one will be generated on next start. "
-                "Check the config directory is writable (Docker: confirm volume mount permissions and PUID/PGID).",
-                self.client_id_file,
-                type(e).__name__,
-                e,
-            )
-
-        return self._client_id
+            return self._client_id
 
     # =========================================================================
     # Setup Wizard State
@@ -814,6 +805,8 @@ class SettingsManager:
         but user never finished) from being treated as complete.
         """
         with self._lock:
+            if self._load_failed:
+                return True
             if self.get("setup_complete", False):
                 return True
             if self._setup_state.get("step", 0) > 0:

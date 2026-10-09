@@ -68,12 +68,17 @@ docker build -t plex-previews:dev .
 
 ```
 media_preview_generator/
-├── config.py              # @dataclass Config, loads from settings.json
+├── config/                # @dataclass Config, load_config(), paths, validation
+├── gpu/                   # GPU discovery (NVIDIA/AMD/Intel/Apple), VAAPI/Vulkan probes, FFmpeg capabilities
+├── jobs/                  # Orchestrator, dispatcher, worker pool, GPU->CPU fallback
+├── processing/            # Per-file pipeline: multi_server routing, FFmpeg runner, HDR detection, per-vendor enumeration
+├── servers/               # Plex/Emby/Jellyfin clients, ownership, registry
+├── output/                # Preview publishers: Plex bundle BIF, Emby sidecar, Jellyfin trickplay
+├── markers/               # Intro & Credits detection, decisions, publishers
+├── loudness/              # Loudness analysis jobs
+├── inspector/             # Per-file status for the Inspector page
+├── search/                # Library search query + ranking
 ├── plex_client.py         # Plex API: library queries, path resolution, retry
-├── worker.py              # ThreadPool workers, GPU task assignment
-├── media_processing.py    # FFmpeg execution, BIF generation, HDR detection
-├── processing.py          # Job orchestration
-├── gpu_detection.py       # GPU discovery (NVIDIA/AMD/Intel/Apple)
 ├── bif_reader.py          # BIF file parsing for web viewer
 ├── utils.py               # Path sanitization, Docker detection
 ├── logging_config.py      # Loguru + Rich console setup
@@ -87,8 +92,8 @@ media_preview_generator/
     ├── settings_manager.py# settings.json persistence, env migration, gpu_config
     ├── scheduler.py       # APScheduler with SQLAlchemy jobstore
     ├── webhooks.py        # Radarr/Sonarr/Tdarr webhook handlers
-    ├── routes/            # Modular API routes (api_bif, api_jobs, api_plex, api_schedules, api_settings, api_system, job_runner, pages)
-    ├── templates/         # Jinja2 HTML (base, index, settings, setup, login, logs, bif_viewer, webhooks)
+    ├── routes/            # Modular API routes (api_*.py per area, job_runner, pages)
+    ├── templates/         # Jinja2 HTML pages and partials
     └── static/            # CSS, JS, images
 ```
 

@@ -253,7 +253,7 @@ def _start_button(page: Page):
 @pytest.mark.e2e
 @pytest.mark.parametrize("status", ["pending", "running", "completed", "failed", "cancelled"])
 def test_loudness_retry_row_explains_automatic_retry_without_preview_instructions(dashboard, status):
-    eta = (datetime.now(UTC) + timedelta(seconds=45)).isoformat()
+    eta = (datetime.now(UTC) + timedelta(seconds=80)).isoformat()
     active = status in {"pending", "running"}
     chain = _job(
         "loudness-status-proof",
@@ -461,6 +461,7 @@ class TestStartJobModalIntroCredits:
                 "library_name": "TV Shows",
                 "priority": 2,
                 "config": {"force_generate": True, "sort_by": "default", "added_filter": "all"},
+                "libraries": [{"server_id": "plex-1", "library_id": "2"}],
                 "server_id": "plex-1",
             }
         ]
@@ -477,7 +478,7 @@ class TestStartJobModalIntroCredits:
         ],
         ids=["queued", "already-queued", "paused"],
     )
-    def test_rerun_of_a_check_servers_job_answers_like_the_modal(self, dashboard, answer, toast) -> None:
+    def test_rerun_of_a_finished_verify_job_answers_like_the_modal(self, dashboard, answer, toast) -> None:
         finished = _markers_job(
             library_name="Intro & Credits · Check servers",
             config={
@@ -600,10 +601,8 @@ class TestQueueRows:
         page = dashboard([])
         expect(page.locator("#jobQueue")).to_be_attached(timeout=5000)
         raw = "a\"b'c<d>&e"
-        escaped = page.evaluate(
-            "raw => [escapeHtml(raw), escapeHtmlText(raw), escapeHtmlAttr(raw), escapeHtml(null), escapeHtml(0)]", raw
-        )
-        assert escaped == ["a&quot;b&#39;c&lt;d&gt;&amp;e"] * 3 + ["", "0"]
+        escaped = page.evaluate("raw => [escapeHtml(raw), escapeHtml(null), escapeHtml(0)]", raw)
+        assert escaped == ["a&quot;b&#39;c&lt;d&gt;&amp;e", "", "0"]
 
     def test_a_quote_in_a_job_error_stays_inside_the_status_tooltip(self, dashboard) -> None:
         # An Intro & Credits job fails with f"{type(exc).__name__}: {exc}", which can quote a file name.
@@ -715,7 +714,7 @@ class TestQueueRows:
                 "current_item": "Retry starting in 300s — waiting for these files to appear on disk or on a server",
             },
         )
-        soon_eta = (datetime.now(UTC) + timedelta(seconds=45)).isoformat()
+        soon_eta = (datetime.now(UTC) + timedelta(seconds=80)).isoformat()
         soon = json.loads(json.dumps(retry))
         soon["id"] = "bbbbbbbb-0000-4000-8000-000000000004"
         soon["config"]["retry_not_before"] = soon_eta
@@ -727,7 +726,7 @@ class TestQueueRows:
         expect(row.locator(".markers-retry-chip")).to_contain_text("Retry 2")
         # Minutes from 90 s up (rounded), seconds below.
         expect(row).to_contain_text("Retry starting in 5 min")
-        expect(page.locator(f"#job-row-{soon['id']}")).to_contain_text(re.compile(r"Retry starting in 4\d s"))
+        expect(page.locator(f"#job-row-{soon['id']}")).to_contain_text(re.compile(r"Retry starting in [67]\d s"))
         expect(row.locator('button[aria-label="Retry now"]')).to_have_count(0)
         expect(row).to_contain_text("Rick and Morty S01")
 
@@ -735,7 +734,7 @@ class TestQueueRows:
         # The shape markers/job_runner.py gives the job after its first run (upsert_retry_chain_job "scheduled"); its
         # hidden retry job never reaches the queue (is_user_visible_job).
         preview = _preview_job()
-        eta = (datetime.now(UTC) + timedelta(seconds=45)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(seconds=80)).isoformat()
         chain = _markers_job(
             status="pending",
             completed_at=None,
@@ -768,7 +767,7 @@ class TestQueueRows:
         expect(row.locator(".markers-retry-chip")).to_have_count(0)
         # The preview chain's explanation is about preview tiles, so this chip has none.
         expect(row.locator("[data-explain-template]")).to_have_count(0)
-        expect(row.locator("[data-scheduled-at]")).to_have_text(re.compile(r"^Retry starting in 4\d s$"))
+        expect(row.locator("[data-scheduled-at]")).to_have_text(re.compile(r"^Retry starting in [67]\d s$"))
         expect(row.locator('button[aria-label="Retry now"]')).to_have_count(1)
         expect(row.locator(".job-follows")).to_have_count(0)
         arrow = row.locator(".job-follow-arrow")
@@ -817,7 +816,7 @@ class TestQueueRows:
         )
         soon = json.loads(json.dumps(verify))
         soon["id"] = "bbbbbbbb-0000-4000-8000-000000000006"
-        soon_eta = (datetime.now(UTC) + timedelta(seconds=45)).isoformat()
+        soon_eta = (datetime.now(UTC) + timedelta(seconds=80)).isoformat()
         soon["config"]["retry_not_before"] = soon_eta
         soon["progress"]["retry_eta"] = soon_eta
         page = dashboard([verify, soon])
@@ -828,11 +827,11 @@ class TestQueueRows:
         # The owner's wording for a delayed check: minutes from 90 s up (rounded), seconds below.
         expect(row.locator("[data-scheduled-at]")).to_have_text("Checking again in 10 min")
         expect(page.locator(f"#job-row-{soon['id']} [data-scheduled-at]")).to_have_text(
-            re.compile(r"^Checking again in 4\d s$")
+            re.compile(r"^Checking again in [67]\d s$")
         )
         # The 1 s ticker rewrites the countdown between renders with the same words (read once, no retrying).
         ticked = page.evaluate(_TICK_AND_READ, f"#job-row-{soon['id']} [data-scheduled-at]")
-        assert re.fullmatch(r"Checking again in [34]\d s", ticked), ticked
+        assert re.fullmatch(r"Checking again in [5-7]\d s", ticked), ticked
         expect(row).not_to_contain_text("Retry starting")
 
     def test_running_verify_card_checks_again_without_the_retry_wording(self, dashboard) -> None:
@@ -1214,9 +1213,6 @@ class TestFilesPanel:
             "skipped_bif_exists",
             "skipped_not_indexed",
             "no_media_parts",
-            "skipped_excluded",
-            "skipped_invalid_hash",
-            "unresolved_plex",
             "failed",
             "skipped_file_not_found",
             "skipped_source_gone",

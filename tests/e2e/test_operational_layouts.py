@@ -13,8 +13,9 @@ SIZES = [(1440, "dark"), (1440, "light"), (390, "dark"), (390, "light")]
 
 
 def _capture(page, name):
-    if os.environ.get("MPG_UX_SCREENSHOTS") == "1":
-        destination = Path(__file__).resolve().parents[2] / "docs/design/followup-ux"
+    screenshot_dir = os.environ.get("MPG_UX_SCREENSHOTS_DIR")
+    if screenshot_dir:
+        destination = Path(screenshot_dir)
         destination.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(destination / f"operations-{name}.jpg"), quality=75, full_page=False)
 

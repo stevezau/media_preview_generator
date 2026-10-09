@@ -7,7 +7,6 @@ configuration object for the entire application.
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -39,7 +38,10 @@ from .validation import (  # noqa: F401
     _validate_plex_config,
     _validate_processing_config,
     _validate_thread_config,
+    get_setting,
+    gpu_worker_total,
     thread_totals_from_ui_settings,
+    usable_gpu_config,
     validate_processing_thread_totals,
 )
 
@@ -57,51 +59,6 @@ def _resolve_ffmpeg_path() -> str | None:
     if os.path.isfile(_JELLYFIN_FFMPEG_PATH) and os.access(_JELLYFIN_FFMPEG_PATH, os.X_OK):
         return _JELLYFIN_FFMPEG_PATH
     return shutil.which("ffmpeg")
-
-
-def get_config_value(cli_args, field_name: str, env_key: str, default, value_type: type = str):
-    """Get configuration value with proper precedence: CLI args > env vars > defaults.
-
-    Args:
-        cli_args: CLI arguments object or None
-        field_name: Name of the CLI argument field
-        env_key: Environment variable key
-        default: Default value if neither CLI nor env var is set
-        value_type: Type to convert the value to (str, int, bool)
-
-    Returns:
-        The configuration value converted to the specified type
-
-    """
-    cli_value = None
-    if cli_args is not None:
-        try:
-            cli_vars = vars(cli_args)
-        except TypeError:
-            cli_vars = {}
-        if field_name in cli_vars:
-            cli_value = cli_vars[field_name]
-    if cli_value is not None:
-        return cli_value
-
-    env_value = os.environ.get(env_key, "")
-
-    # Handle boolean conversion specially
-    if value_type is bool:
-        if env_value.strip().lower() in ("true", "1", "yes"):
-            return True
-        elif env_value.strip().lower() in ("false", "0", "no"):
-            return False
-        return default
-
-    # Handle other types
-    if not env_value:
-        return default
-
-    try:
-        return value_type(env_value)
-    except (ValueError, TypeError):
-        return default
 
 
 @dataclass
@@ -170,9 +127,6 @@ class Config:
 
     # Runtime state (set after construction)
     working_tmp_folder: str = ""
-
-    # Internal constants
-    worker_pool_timeout: int = 30
 
     # When set, filter libraries by Plex section key (ID) instead of plex_libraries (names)
     plex_library_ids: list[str] | None = None
@@ -493,31 +447,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
         ui_settings = {**ui_settings, **plex_view}
 
     def get_value(settings_key, env_key, default, value_type=str):
-        """Get config value from settings.json, falling back to env then default."""
-        if settings_key in ui_settings and ui_settings[settings_key] not in (None, ""):
-            val = ui_settings[settings_key]
-            if value_type is bool:
-                return bool(val)
-            elif value_type is int:
-                try:
-                    return int(val)
-                except (ValueError, TypeError):
-                    return default
-            else:
-                return str(val) if val else default
-
-        env_value = os.environ.get(env_key, "")
-        if env_value:
-            if value_type is bool:
-                return env_value.strip().lower() in ("true", "1", "yes")
-            elif value_type is int:
-                try:
-                    return int(env_value)
-                except (ValueError, TypeError):
-                    return default
-            return env_value
-
-        return default
+        return get_setting(ui_settings, settings_key, env_key, default, value_type)
 
     # Load configuration: settings.json > env vars > defaults
     plex_url = get_value("plex_url", "PLEX_URL", "", str)
@@ -584,15 +514,11 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
     sort_by = sort_by_raw.strip().lower() if sort_by_raw else "newest"
 
     # Load per-GPU config from settings (populated by settings UI or migration)
-    gpu_config = ui_settings.get("gpu_config", [])
-    if isinstance(gpu_config, list):
-        gpu_config = [entry for entry in gpu_config if isinstance(entry, dict) and entry.get("device")]
-    else:
-        gpu_config = []
+    gpu_config = usable_gpu_config(ui_settings)
 
     # Compute totals from per-GPU config
     if gpu_config:
-        gpu_threads = sum(entry.get("workers", 0) for entry in gpu_config if entry.get("enabled", True))
+        gpu_threads = gpu_worker_total(gpu_config)
         enabled_ffmpeg = [entry.get("ffmpeg_threads", 2) for entry in gpu_config if entry.get("enabled", True)]
         ffmpeg_threads = max(enabled_ffmpeg) if enabled_ffmpeg else 2
     else:
@@ -636,13 +562,15 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
 
     ffmpeg_path = _resolve_ffmpeg_path()
     if not ffmpeg_path:
-        logger.error(
-            "FFmpeg is not installed (or not on the system PATH). This app cannot generate any previews without it — "
-            "the process will exit now. If you're using Docker, the official image already includes FFmpeg; this error usually "
+        message = (
+            "FFmpeg is not installed (or not on the system PATH). This app cannot generate any previews without it. "
+            "If you're using Docker, the official image already includes FFmpeg; this error usually "
             "means a custom image is missing it. If you're running from source, install FFmpeg from your package manager "
             "(apt install ffmpeg / brew install ffmpeg) and restart."
         )
-        sys.exit(1)
+        if log_validation_errors:
+            logger.error(message)
+        raise ConfigValidationError([message])
 
     # Test FFmpeg actually works and log its version
     logger.debug("FFmpeg path: {}", ffmpeg_path)

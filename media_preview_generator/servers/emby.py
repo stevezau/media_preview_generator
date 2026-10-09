@@ -18,7 +18,7 @@ from typing import Any
 import requests
 from loguru import logger
 
-from ._embyish import EmbyApiClient, is_video_library_folder
+from ._embyish import EmbyApiClient, is_video_library_folder, library_folder_id
 from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
 
 # Emby's /Packages answer is its whole public plugin catalog (about 1.4 MB), so whether it lists the Bridge plugin is
@@ -99,7 +99,7 @@ class EmbyServer(EmbyApiClient):
                 params={
                     "Path": remote_path,
                     "Recursive": "true",
-                    # Audit L2: restrict to Movie/Episode so a non-video
+                    # Restrict to Movie/Episode so a non-video
                     # item indexed at the same Path (e.g. an audiobook
                     # mistakenly classified as Audio with overlapping
                     # path layout) can't return a non-preview-worthy
@@ -131,7 +131,7 @@ class EmbyServer(EmbyApiClient):
         Calls ``POST /Library/Media/Updated`` which is Emby's
         path-based scan-nudge — same shape Sonarr/Radarr's own
         path-update notifier uses. Best-effort; failures are logged at
-        debug level by the base wrapper.
+        warning level by the base wrapper.
 
         The base class (see
         :meth:`MediaServer.trigger_refresh`) calls this once per
@@ -145,31 +145,6 @@ class EmbyServer(EmbyApiClient):
         response.raise_for_status()
         logger.info(
             "[{}] Triggered partial scan: {}",
-            self.name,
-            server_view_path,
-        )
-
-    def _trigger_path_deleted(self, server_view_path: str) -> None:
-        """Tell Emby a previously-imported file is gone.
-
-        Same ``/Library/Media/Updated`` endpoint as
-        :meth:`_trigger_path_refresh`, but with ``UpdateType:"Deleted"``
-        so Emby drops the stale library row instead of waiting for its
-        filesystem monitor / scheduled scan to notice. Used after
-        Radarr/Sonarr upgrade webhooks where the payload's
-        ``deletedFiles[]`` lists the prior release that was replaced.
-
-        Best-effort; failures are logged at debug level by the base
-        wrapper.
-        """
-        response = self._request(
-            "POST",
-            "/Library/Media/Updated",
-            json_body={"Updates": [{"Path": server_view_path, "UpdateType": "Deleted"}]},
-        )
-        response.raise_for_status()
-        logger.info(
-            "[{}] Notified deleted path: {}",
             self.name,
             server_view_path,
         )
@@ -342,13 +317,13 @@ class EmbyServer(EmbyApiClient):
     def intro_skip_registered(self) -> bool | None:
         """Whether this server's Emby Premiere key lets viewers skip intros (``GET /Registrations/dvr``).
 
-        Emby's players check the Premiere feature ``dvr`` against the server's registration before they skip an intro
-        (spec §3.3); credits' "Up Next" has no such check. An answer is reused per server URL for
-        ``REGISTRATION_TTL_S``, a failed read for ``REGISTRATION_ERROR_TTL_S``.
+         Emby's players check the Premiere feature ``dvr`` against the server's registration before they skip an intro
+        ; credits' "Up Next" has no such check. An answer is reused per server URL for
+         ``REGISTRATION_TTL_S``, a failed read for ``REGISTRATION_ERROR_TTL_S``.
 
-        Returns:
-            ``IsRegistered``; None when it couldn't be read (a transport error or timeout, an error status, an Emby
-            without the route, an unexpected answer).
+         Returns:
+             ``IsRegistered``; None when it couldn't be read (a transport error or timeout, an error status, an Emby
+             without the route, an unexpected answer).
         """
         url = self._config.url.rstrip("/")
         with _catalog_guard:
@@ -423,46 +398,17 @@ class EmbyServer(EmbyApiClient):
 
         ``library_ids=None`` means "every library".
         """
-        try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
-        except Exception as exc:
-            return {"_global": f"failed to fetch libraries: {exc}"}
 
-        if not isinstance(folders, list):
-            return {"_global": "unexpected VirtualFolders response shape"}
-
-        results: dict[str, str] = {}
-        target = set(library_ids) if library_ids else None
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
-            if target is not None and lib_id not in target:
-                continue
-
-            options = dict(raw.get("LibraryOptions") or {})
+        def edit(_lib_id: str, options: dict) -> list[str]:
             options["ExtractChapterImagesDuringLibraryScan"] = bool(scan_extraction)
-            options["ExtractTrickplayImagesDuringLibraryScan"] = bool(scan_extraction)
+            # Older Emby libraries never had the trickplay key; adding it would be a stray setting.
+            if "ExtractTrickplayImagesDuringLibraryScan" in options:
+                options["ExtractTrickplayImagesDuringLibraryScan"] = bool(scan_extraction)
+            return ["extraction"]
 
-            try:
-                update = self._request(
-                    "POST",
-                    "/Library/VirtualFolders/LibraryOptions",
-                    json_body={"Id": lib_id, "LibraryOptions": options},
-                )
-                update.raise_for_status()
-                results[lib_id] = "ok"
-            except Exception as exc:
-                logger.warning(
-                    "Could not update Emby library {} extraction on server {!r}: {}",
-                    lib_id,
-                    self.name,
-                    exc,
-                )
-                results[lib_id] = f"error: {exc}"
-        return results
+        return self._update_video_library_options(
+            edit, library_ids=set(library_ids) if library_ids else None, key_per_flag=False
+        )
 
     # The flag(s) that ``set_vendor_extraction`` flips for Emby. Both are
     # set to false by the apply path — chapter is the older Emby
@@ -475,7 +421,7 @@ class EmbyServer(EmbyApiClient):
     )
 
     def get_vendor_extraction_status(self) -> dict[str, int]:
-        """Audit per-library vendor-extraction state without writing.
+        """Report per-library vendor-extraction state without writing.
 
         Same shape as the Jellyfin variant but checks Emby's flag set.
         Older Emby installs that don't return ``ExtractTrickplayImagesDuringLibraryScan``
@@ -484,24 +430,13 @@ class EmbyServer(EmbyApiClient):
         already at the recommended state by absence).
         """
         try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
+            folders = self._video_library_folders()
         except Exception as exc:
             logger.debug("Vendor-extraction status probe failed for {!r}: {}", self.name, exc)
             return {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
 
-        if not isinstance(folders, list):
-            return {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
-
         extracting = stopped = 0
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            # Issue #237: skip music/photo/book libraries entirely —
-            # they don't carry video preview options.
-            if not is_video_library_folder(raw):
-                continue
+        for _lib_id, raw in folders:
             options = raw.get("LibraryOptions") or {}
             all_recommended = True
             for flag, want in self._VENDOR_EXTRACTION_FLAGS:
@@ -603,7 +538,7 @@ class EmbyServer(EmbyApiClient):
             # tells users to disable a toggle that doesn't exist.
             if not is_video_library_folder(raw):
                 continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
+            lib_id = library_folder_id(raw)
             lib_name = str(raw.get("Name") or "")
             options = raw.get("LibraryOptions") or {}
             for flag, label, recommended, severity, rationale in self._RECOMMENDED_SETTINGS:
@@ -757,16 +692,6 @@ class EmbyServer(EmbyApiClient):
         if not targets:
             return {}
 
-        try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
-        except Exception as exc:
-            return {"_global": f"failed to fetch libraries: {exc}"}
-
-        if not isinstance(folders, list):
-            return {"_global": "unexpected VirtualFolders response shape"}
-
         per_flag: dict[str, list[FlagTarget]] = {}
         for target in targets:
             flag = str(target.get("flag") or "")
@@ -774,18 +699,7 @@ class EmbyServer(EmbyApiClient):
                 continue
             per_flag.setdefault(flag, []).append(target)
 
-        results: dict[str, str] = {}
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            # Issue #237: music/photo libraries have no video preview
-            # flags to flip. Even if the UI never sends a target for
-            # them, defend at the apply-site too.
-            if not is_video_library_folder(raw):
-                continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
-            options = dict(raw.get("LibraryOptions") or {})
-
+        def edit(lib_id: str, options: dict) -> list[str]:
             changed: list[str] = []
             for flag, target_rows in per_flag.items():
                 # Older Emby: skip 4.8+ trickplay flag when the library
@@ -810,30 +724,9 @@ class EmbyServer(EmbyApiClient):
                     continue
                 options[flag] = bool(want)
                 changed.append(flag)
+            return changed
 
-            if not changed:
-                continue
-
-            try:
-                update = self._request(
-                    "POST",
-                    "/Library/VirtualFolders/LibraryOptions",
-                    json_body={"Id": lib_id, "LibraryOptions": options},
-                )
-                update.raise_for_status()
-                for flag in changed:
-                    results[f"{lib_id}:{flag}"] = "ok"
-            except Exception as exc:
-                logger.warning(
-                    "Could not update Emby library {} settings on server {!r}: {}",
-                    lib_id,
-                    self.name,
-                    exc,
-                )
-                for flag in changed:
-                    results[f"{lib_id}:{flag}"] = f"error: {exc}"
-
-        return results
+        return self._update_video_library_options(edit)
 
     def previews_readiness(self) -> dict[str, Any]:
         """Unified readiness payload for the Previews readiness card.
@@ -846,7 +739,7 @@ class EmbyServer(EmbyApiClient):
         absent — except that a server set to receive intro and credits
         markers gains a ``plugin`` section for the Media Preview Bridge
         the markers go through, and a server with the feature off gains
-        the one ``markers`` row that says so (plan P-R6).
+        the one ``markers`` row that says so.
 
         Emby's sidecar auto-discovery works purely by filename
         convention — every library-flag issue is advisory (wasted-CPU
@@ -855,18 +748,8 @@ class EmbyServer(EmbyApiClient):
         """
         sections: list[dict[str, Any]] = []
 
-        version_value = ""
-        connection_ok = True
-        connection_reason = ""
-        try:
-            response = self._request("GET", "/System/Info")
-            response.raise_for_status()
-            data = response.json() or {}
-            version_value = str(data.get("Version") or "")
-        except Exception as exc:
-            logger.debug("Version probe failed for {!r}: {}", self.name, exc)
-            connection_ok = False
-            connection_reason = f"Could not read /System/Info: {exc}"
+        version_value, connection_reason = self._probe_system_version()
+        connection_ok = not connection_reason
 
         sections.append(
             {
@@ -941,9 +824,9 @@ class EmbyServer(EmbyApiClient):
             }
         )
 
-        # --- Intro & Credits (spec §7 item 6) -----------------------
+        # --- Intro & Credits -----------------------
         # Built from the facts the Intro & Credits tab already asked for, never a second probe; a server with
-        # the feature off gets the one row that says so and nothing else (plan P-R6). The section id is
+        # the feature off gets the one row that says so and nothing else. The section id is
         # ``plugin`` and its first check's ``current`` is "not installed" or a version: the Setup Health
         # install controls read exactly that.
         from ..markers import readiness as markers_readiness
@@ -988,7 +871,7 @@ class EmbyServer(EmbyApiClient):
                 if not is_video_library_folder(raw):
                     continue
                 any_libraries_seen = True
-                lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
+                lib_id = library_folder_id(raw)
                 lib_name = str(raw.get("Name") or "")
                 options = raw.get("LibraryOptions") or {}
                 if "ExtractTrickplayImagesDuringLibraryScan" in options:
@@ -1266,31 +1149,10 @@ class EmbyServer(EmbyApiClient):
         rewritten — fields we omit revert to their defaults).
         Returns dict keyed ``"<library_id>:<flag>"``.
         """
-        try:
-            response = self._request("GET", "/Library/VirtualFolders")
-            response.raise_for_status()
-            folders = response.json()
-        except Exception as exc:
-            return {"_global": f"failed to fetch libraries: {exc}"}
-
-        if not isinstance(folders, list):
-            return {"_global": "unexpected VirtualFolders response shape"}
-
         target_flags = set(flags) if flags is not None else None
-        results: dict[str, str] = {}
 
-        for raw in folders:
-            if not isinstance(raw, dict):
-                continue
-            # Issue #237: don't flip flags on music/photo/book libraries
-            # — they shouldn't have appeared in the UI list in the first
-            # place, but the apply-site guards independently.
-            if not is_video_library_folder(raw):
-                continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
-            options = dict(raw.get("LibraryOptions") or {})
-
-            changed_flags: list[str] = []
+        def edit(_lib_id: str, options: dict) -> list[str]:
+            changed: list[str] = []
             for flag, _label, recommended, _sev, _rationale in self._RECOMMENDED_SETTINGS:
                 if target_flags is not None and flag not in target_flags:
                     continue
@@ -1299,31 +1161,10 @@ class EmbyServer(EmbyApiClient):
                 if bool(options.get(flag, False)) == recommended:
                     continue
                 options[flag] = recommended
-                changed_flags.append(flag)
+                changed.append(flag)
+            return changed
 
-            if not changed_flags:
-                continue
-
-            try:
-                update = self._request(
-                    "POST",
-                    "/Library/VirtualFolders/LibraryOptions",
-                    json_body={"Id": lib_id, "LibraryOptions": options},
-                )
-                update.raise_for_status()
-                for flag in changed_flags:
-                    results[f"{lib_id}:{flag}"] = "ok"
-            except Exception as exc:
-                logger.warning(
-                    "Could not update Emby library {} settings on server {!r}: {}",
-                    lib_id,
-                    self.name,
-                    exc,
-                )
-                for flag in changed_flags:
-                    results[f"{lib_id}:{flag}"] = f"error: {exc}"
-
-        return results
+        return self._update_video_library_options(edit)
 
     def parse_webhook(
         self,
@@ -1358,8 +1199,7 @@ class EmbyServer(EmbyApiClient):
         item_id = str(item.get("Id") or item.get("guid") or "") if isinstance(item, dict) else ""
         # Emby's library.new payload includes the local file path in
         # ``Item.Path``. Capturing it lets the dispatcher skip an extra
-        # reverse-lookup roundtrip per webhook (audit fix — was being
-        # silently dropped).
+        # reverse-lookup roundtrip per webhook.
         item_path = str(item.get("Path") or item.get("path") or "").strip() or None if isinstance(item, dict) else None
 
         return WebhookEvent(
