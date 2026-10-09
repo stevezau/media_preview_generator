@@ -157,14 +157,21 @@ class TestStatusPillFit:
             expect(row).to_be_visible()
             pill = row.locator(".queue-status .status-dot")
             expect(pill).to_have_attribute("aria-label", label)
-            pill_box = pill.bounding_box()
-            cell_box = row.locator("td.queue-status").bounding_box()
-            priority_box = row.locator("td.queue-priority").bounding_box()
-            assert pill_box["x"] + pill_box["width"] <= cell_box["x"] + cell_box["width"] + 0.5, label
-            assert pill_box["x"] + pill_box["width"] <= priority_box["x"] + 0.5, label
-            assert pill.evaluate(
-                "el => el.querySelector('.status-label').scrollWidth <= el.querySelector('.status-label').clientWidth"
-            ), f"{label} label is truncated at {width}px"
+            # One in-page read: the queue re-renders its rows on refresh, and separate bounding_box() calls can
+            # land on a row being swapped out (None).
+            fit = row.evaluate(
+                """row => {
+                    const pill = row.querySelector('.queue-status .status-dot').getBoundingClientRect();
+                    const cell = row.querySelector('td.queue-status').getBoundingClientRect();
+                    const priority = row.querySelector('td.queue-priority').getBoundingClientRect();
+                    const text = row.querySelector('.queue-status .status-dot .status-label');
+                    return {pillRight: pill.right, cellRight: cell.right, priorityLeft: priority.left,
+                            labelFits: text.scrollWidth <= text.clientWidth};
+                }"""
+            )
+            assert fit["pillRight"] <= fit["cellRight"] + 0.5, label
+            assert fit["pillRight"] <= fit["priorityLeft"] + 0.5, label
+            assert fit["labelFits"], f"{label} label is truncated at {width}px"
 
 
 @pytest.mark.e2e
