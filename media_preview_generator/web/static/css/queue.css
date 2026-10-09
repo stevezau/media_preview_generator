@@ -58,20 +58,24 @@
 .dashboard-layout .jobs-table { width: 100%; min-width: 980px; table-layout: fixed; border-collapse: collapse; --bs-table-bg: transparent; --bs-table-hover-bg: transparent; --bs-table-striped-bg: transparent; }
 .dashboard-layout .jobs-table thead th { position: sticky; top: 0; z-index: 1; padding: 10px 14px; background: var(--bs-secondary-bg, transparent); color: var(--faint); border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; text-align: left; white-space: nowrap; }
 .dashboard-layout .jobs-table thead th.text-end { text-align: right; }
-.dashboard-layout .jobs-table th:nth-child(1) { width: 88px; }
-.dashboard-layout .jobs-table th:nth-child(3) { width: 260px; }
-.dashboard-layout .jobs-table th:nth-child(4) { width: 104px; }
-.dashboard-layout .jobs-table th:nth-child(5) { width: 14%; }
-.dashboard-layout .jobs-table th:nth-child(6) { width: 100px; }
-.dashboard-layout .jobs-table th:nth-child(7) { width: 124px; }
+.dashboard-layout .jobs-table th:nth-child(1) { width: 40px; }
+.dashboard-layout .jobs-table th:nth-child(2) { width: 76px; }
+.dashboard-layout .jobs-table th:nth-child(4) { width: 260px; }
+.dashboard-layout .jobs-table th:nth-child(5) { width: 104px; }
+.dashboard-layout .jobs-table th:nth-child(6) { width: 14%; }
+.dashboard-layout .jobs-table th:nth-child(7) { width: 100px; }
+.dashboard-layout .jobs-table th:nth-child(8) { width: 124px; }
 .dashboard-layout .jobs-table tbody .job-row > td { padding: 11px 14px; vertical-align: middle; border-bottom: 1px solid var(--line); background: transparent; overflow-wrap: anywhere; }
 .dashboard-layout .jobs-table tbody .job-row { transition: background-color .14s ease-out; }
 .dashboard-layout .jobs-table tbody .job-row:hover > td { background: var(--inset); }
 /* Cells hug the ID so the row expander sits next to it; the freed width goes to the Job column. */
 @media (min-width: 1200px) {
-    .dashboard-layout .jobs-table thead th:nth-child(1), .dashboard-layout .jobs-table tbody .job-row > td.queue-id { padding-right: 4px; }
-    .dashboard-layout .jobs-table thead th:nth-child(2), .dashboard-layout .jobs-table tbody .job-row > td.queue-job { padding-left: 4px; }
+    .dashboard-layout .jobs-table thead th:nth-child(1), .dashboard-layout .jobs-table tbody .job-row > td.queue-select { padding-right: 0; }
+    .dashboard-layout .jobs-table thead th:nth-child(2), .dashboard-layout .jobs-table tbody .job-row > td.queue-id { padding-left: 8px; padding-right: 4px; }
+    .dashboard-layout .jobs-table thead th:nth-child(3), .dashboard-layout .jobs-table tbody .job-row > td.queue-job { padding-left: 4px; }
 }
+.dashboard-layout .queue-select .form-check-input, .dashboard-layout .jobs-table th.queue-select .form-check-input { margin: 0; vertical-align: middle; }
+.dashboard-layout .selection-count { font-size: 12px; color: var(--muted); font-weight: 600; }
 .dashboard-layout .queue-id .jid { padding: 0; background: transparent; color: var(--faint); font-family: var(--mono); font-size: 12px; }
 .dashboard-layout .queue-job-main { display: grid; grid-template-columns: 28px 30px minmax(0, 1fr); align-items: center; gap: 8px; }
 .dashboard-layout .queue-job-copy { min-width: 0; }
@@ -236,7 +240,9 @@
     .dashboard-layout .jobs-table tbody { display: block; }
     .dashboard-layout .jobs-table tbody tr.job-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "job job" "status priority" "progress actions" "id created"; gap: 8px 12px; align-items: center; margin: 0; padding: 12px; border: 0; border-bottom: 1px solid var(--line); }
     .dashboard-layout .jobs-table tbody tr.job-row > td { display: block !important; min-width: 0; padding: 0; border: 0 !important; line-height: 1.45; }
-    .dashboard-layout .jobs-table tbody tr.job-row > td.queue-job { grid-area: job; }
+    .dashboard-layout .jobs-table tbody tr.job-row { position: relative; }
+    .dashboard-layout .jobs-table tbody tr.job-row > td.queue-select { position: absolute; top: 14px; right: 12px; z-index: 1; }
+    .dashboard-layout .jobs-table tbody tr.job-row > td.queue-job { grid-area: job; padding-right: 32px; }
     .dashboard-layout .jobs-table tbody tr.job-row > td.queue-status { grid-area: status; }
     .dashboard-layout .jobs-table tbody tr.job-row > td.queue-priority { grid-area: priority; justify-self: end; }
     .dashboard-layout .jobs-table tbody tr.job-row > td.queue-actions { grid-area: actions; justify-self: end; }

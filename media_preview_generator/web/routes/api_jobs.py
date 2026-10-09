@@ -2270,13 +2270,36 @@ def _clear_pause_all_for_rerun() -> bool:
 @api.route("/jobs/clear", methods=["POST"])
 @api_token_required
 def clear_jobs():
-    """Clear jobs by status.
+    """Clear finished jobs by status, or only the selected ones.
 
     Accepts optional JSON body: {"statuses": ["completed", "failed", "cancelled"]}
-    Defaults to clearing all terminal statuses if omitted.
+    to clear by status (all terminal statuses if omitted), or {"job_ids": [...]}
+    to remove just those jobs. With ``job_ids`` only finished jobs are removed;
+    running and queued ones come back in ``skipped``.
     """
     job_manager = get_job_manager()
     data = request.get_json(silent=True) or {}
+    job_ids = data.get("job_ids")
+    if job_ids is not None:
+        if not isinstance(job_ids, list) or not all(isinstance(j, str) for j in job_ids):
+            return jsonify({"error": "job_ids must be a list of strings"}), 400
+        if "statuses" in data:
+            return jsonify({"error": "send either job_ids or statuses, not both"}), 400
+        removed = job_manager.clear_finished_jobs_by_id(job_ids)
+        removed_set = set(removed)
+        skipped = []
+        for job_id in dict.fromkeys(job_ids):
+            if job_id in removed_set:
+                continue
+            job = job_manager.get_job(job_id)
+            if job is None:
+                skipped.append({"id": job_id, "reason": "not_found"})
+            elif job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+                skipped.append({"id": job_id, "reason": "retry_in_progress"})
+            else:
+                skipped.append({"id": job_id, "reason": f"not_finished ({job.status.value})"})
+        return jsonify({"success": True, "cleared": len(removed), "removed": removed, "skipped": skipped})
+
     statuses = data.get("statuses")
     if statuses is not None:
         if not isinstance(statuses, list):

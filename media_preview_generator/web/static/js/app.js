@@ -1001,7 +1001,7 @@ async function _loadJobsPage(request) {
             // Show a less alarming message
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="text-center text-muted py-4">
+                    <td colspan="8" class="text-center text-muted py-4">
                         <i class="bi bi-hourglass-split me-2"></i>Loading job queue...
                     </td>
                 </tr>
@@ -2427,71 +2427,116 @@ function _markersPauseButton(job) {
 
 let _jobQueueUpdatePending = false;
 
-// Queued (pending) rows ticked for bulk cancel. Survives re-renders; pruned when a job leaves pending.
-const selectedQueuedJobIds = new Set();
+// Rows ticked for bulk actions: queued ones can be cancelled, finished ones deleted. Survives re-renders;
+// pruned when a job disappears or starts running.
+const selectedJobIds = new Set();
+const _FINISHED_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
-function _visibleQueuedJobIds() {
-    return jobs.filter((job) => job.status === 'pending').map((job) => String(job.id));
+function _isSelectableJob(job) {
+    return job.status === 'pending' || _FINISHED_STATUSES.has(job.status);
 }
 
-function _pruneQueuedSelection() {
-    const queued = new Set(_visibleQueuedJobIds());
-    for (const id of Array.from(selectedQueuedJobIds)) {
-        if (!queued.has(id)) selectedQueuedJobIds.delete(id);
+function _visibleSelectableJobIds() {
+    return jobs.filter(_isSelectableJob).map((job) => String(job.id));
+}
+
+function _selectedByKind() {
+    const status = new Map(jobs.map((job) => [String(job.id), job.status]));
+    const ids = Array.from(selectedJobIds);
+    return {
+        queued: ids.filter((id) => status.get(id) === 'pending'),
+        finished: ids.filter((id) => _FINISHED_STATUSES.has(status.get(id))),
+    };
+}
+
+function _pruneJobSelection() {
+    const selectable = new Set(_visibleSelectableJobIds());
+    for (const id of Array.from(selectedJobIds)) {
+        if (!selectable.has(id)) selectedJobIds.delete(id);
     }
 }
 
-function _syncQueuedSelectionControls() {
-    const queued = _visibleQueuedJobIds();
-    const count = selectedQueuedJobIds.size;
-    const button = document.getElementById('cancelSelectedButton');
-    if (button) {
-        button.classList.toggle('d-none', count === 0);
-        document.getElementById('cancelSelectedButtonText').textContent = `Cancel selected (${count})`;
+// With rows ticked, the toolbar swaps the "clear all finished" dropdown for actions on just those rows.
+function _syncJobSelectionControls() {
+    const selectable = _visibleSelectableJobIds();
+    const count = selectedJobIds.size;
+    const { queued, finished } = _selectedByKind();
+    const bar = document.getElementById('selectionBar');
+    if (bar) {
+        bar.classList.toggle('d-none', count === 0);
+        document.getElementById('selectionCount').textContent = `${count.toLocaleString()} selected`;
+        document.getElementById('cancelSelectedButtonText').textContent = `Cancel queued (${queued.length.toLocaleString()})`;
+        document.getElementById('deleteSelectedButtonText').textContent = `Delete finished (${finished.length.toLocaleString()})`;
+        document.getElementById('cancelSelectedButton').disabled = queued.length === 0;
+        document.getElementById('deleteSelectedButton').disabled = finished.length === 0;
     }
+    const clearDropdown = document.getElementById('clearJobsDropdown');
+    if (clearDropdown) clearDropdown.classList.toggle('d-none', count > 0);
     const selectAll = document.getElementById('selectAllQueued');
     if (selectAll) {
-        selectAll.disabled = queued.length === 0;
-        selectAll.checked = queued.length > 0 && count === queued.length;
-        selectAll.indeterminate = count > 0 && count < queued.length;
+        selectAll.disabled = selectable.length === 0;
+        selectAll.checked = selectable.length > 0 && count === selectable.length;
+        selectAll.indeterminate = count > 0 && count < selectable.length;
     }
 }
 
-function toggleQueuedJobSelected(jobId, checked) {
-    if (checked) selectedQueuedJobIds.add(String(jobId));
-    else selectedQueuedJobIds.delete(String(jobId));
-    _syncQueuedSelectionControls();
+function toggleJobSelected(jobId, checked) {
+    if (checked) selectedJobIds.add(String(jobId));
+    else selectedJobIds.delete(String(jobId));
+    _syncJobSelectionControls();
 }
 
 document.addEventListener('change', (event) => {
-    const cb = event.target.closest && event.target.closest('.queued-select-cb');
-    if (cb) toggleQueuedJobSelected(cb.dataset.jobId, cb.checked);
+    const cb = event.target.closest && event.target.closest('.job-select-cb');
+    if (cb) toggleJobSelected(cb.dataset.jobId, cb.checked);
 });
 
-function toggleAllQueuedSelected(checked) {
-    selectedQueuedJobIds.clear();
-    document.querySelectorAll('#jobQueue .queued-select-cb').forEach((cb) => {
+function toggleAllJobsSelected(checked) {
+    selectedJobIds.clear();
+    document.querySelectorAll('#jobQueue .job-select-cb').forEach((cb) => {
         cb.checked = checked;
-        if (checked) selectedQueuedJobIds.add(String(cb.dataset.jobId));
+        if (checked) selectedJobIds.add(String(cb.dataset.jobId));
     });
-    _syncQueuedSelectionControls();
+    _syncJobSelectionControls();
+}
+
+function clearJobSelection() {
+    toggleAllJobsSelected(false);
 }
 
 async function cancelSelectedQueuedJobs() {
-    const ids = Array.from(selectedQueuedJobIds);
+    const ids = _selectedByKind().queued;
     if (ids.length === 0) return;
     const noun = ids.length === 1 ? 'queued job' : 'queued jobs';
     if (!await appConfirm(`Cancel ${ids.length} ${noun}? A job waiting to retry is cancelled with its retry. Jobs already running are skipped.`, { title: 'Cancel queued jobs', confirmText: `Cancel ${noun}`, cancelText: 'Keep queued' })) return;
 
     try {
         const result = await apiPost('/api/jobs/cancel-bulk', { job_ids: ids });
-        ids.forEach((id) => selectedQueuedJobIds.delete(id));
+        ids.forEach((id) => selectedJobIds.delete(id));
         await loadJobs({ force: true });
         loadJobStats();
         const skipped = (result.skipped || []).length;
         showToast('Jobs Cancelled', `Cancelled ${result.cancelled.length} queued ${result.cancelled.length === 1 ? 'job' : 'jobs'}${skipped ? `; ${skipped} could not be cancelled (already started, finished or removed)` : ''}`, skipped ? 'warning' : 'info');
     } catch (error) {
         showToast('Error', 'Failed to cancel jobs: ' + error.message, 'danger');
+    }
+}
+
+async function deleteSelectedFinishedJobs() {
+    const ids = _selectedByKind().finished;
+    if (ids.length === 0) return;
+    const noun = ids.length === 1 ? 'finished job' : 'finished jobs';
+    if (!await appConfirm(`Delete ${ids.length} ${noun} from the history? Their logs and results are removed too.`, { title: 'Delete finished jobs', confirmText: `Delete ${noun}`, cancelText: 'Keep' })) return;
+
+    try {
+        const result = await apiPost('/api/jobs/clear', { job_ids: ids });
+        ids.forEach((id) => selectedJobIds.delete(id));
+        await loadJobs({ force: true });
+        loadJobStats();
+        const skipped = (result.skipped || []).length;
+        showToast('Jobs Deleted', `Deleted ${result.cleared} ${result.cleared === 1 ? 'job' : 'jobs'}${skipped ? `; ${skipped} could not be deleted (still running or retrying)` : ''}`, skipped ? 'warning' : 'info');
+    } catch (error) {
+        showToast('Error', 'Failed to delete jobs: ' + error.message, 'danger');
     }
 }
 
@@ -2521,19 +2566,19 @@ function updateJobQueue(force) {
     // currently hovered. Safe because we'll rebuild on the next tick.
     if (force !== true && (tbody.matches(':hover') || tbody.querySelector(':hover'))) {
         _jobQueueUpdatePending = true;
-        _pruneQueuedSelection();
-        _syncQueuedSelectionControls();
+        _pruneJobSelection();
+        _syncJobSelectionControls();
         return;
     }
     _jobQueueUpdatePending = false;
-    _pruneQueuedSelection();
-    _syncQueuedSelectionControls();
+    _pruneJobSelection();
+    _syncJobSelectionControls();
 
     if (jobs.length === 0) {
         if (jobTotal === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="queue-empty">
+                    <td colspan="8" class="queue-empty">
                         <i class="bi bi-inbox" aria-hidden="true"></i>
                         <div class="queue-empty-title">${jobFiltersActive() ? 'No jobs match these filters.' : 'Nothing queued'}</div>
                         <div class="queue-empty-sub">${jobFiltersActive() ? 'Change a filter or use Clear filters to see other jobs.' : 'Start a job, or choose All jobs and history (the All tab) to review past work.'}</div>
@@ -2544,7 +2589,7 @@ function updateJobQueue(force) {
         } else {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="7" class="text-center text-muted py-4">
+                    <td colspan="8" class="text-center text-muted py-4">
                         No jobs on this page
                     </td>
                 </tr>
@@ -2742,7 +2787,8 @@ function updateJobQueue(force) {
                 : `<span class="queue-phase text-body-secondary">${escapeHtml(phaseText)}</span>`;
         html += `
             <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}${isFilesExpanded ? ' open' : ''}">
-                <td class="queue-id" data-label="ID">${job.status === 'pending' ? `<input type="checkbox" class="form-check-input queued-select-cb me-2" aria-label="Select queued job ${escapeHtmlAttr(job.id.substring(0, 8))}" data-job-id="${escapeHtmlAttr(job.id)}" onclick="event.stopPropagation()"${selectedQueuedJobIds.has(String(job.id)) ? ' checked' : ''}>` : ''}<code class="jid" title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
+                <td class="queue-select" data-label="Select">${_isSelectableJob(job) ? `<input type="checkbox" class="form-check-input job-select-cb" aria-label="Select job ${escapeHtmlAttr(job.id.substring(0, 8))}" data-job-id="${escapeHtmlAttr(job.id)}" onclick="event.stopPropagation()"${selectedJobIds.has(String(job.id)) ? ' checked' : ''}>` : ''}</td>
+                <td class="queue-id" data-label="ID"><code class="jid" title="${escapeHtmlAttr(job.id)}">${escapeHtml(job.id.substring(0, 8))}</code></td>
                 <td class="queue-job" data-label="Job">
                     <div class="queue-job-main">${filesToggleBtn}${_jobTypeTileHtml(job)}<div class="queue-job-copy"><div class="queue-title-line">${nameHtml}</div>
                     <div class="queue-metadata">${_queueMetadataHtml(job, rowTitle)}</div></div></div>
@@ -2763,7 +2809,7 @@ function updateJobQueue(force) {
             ? `<section class="job-current-activity"><h3 class="job-detail-heading">${['running', 'pending'].includes(job.status) ? 'Current activity' : 'Last activity'}</h3>${currentItem || wait?.reason ? `<p class="mb-1 queue-full-path">${escapeHtml(wait?.reason || currentItem)}</p>` : ''}${nextEligible}${started ? `<div class="small text-body-secondary">${started}</div>` : ''}</section>` : '';
         const error = job.error ? `<section class="job-detail-error"><h3 class="job-detail-heading text-danger-emphasis"><i class="bi bi-exclamation-triangle me-1"></i>Job error</h3><p class="mb-0 queue-full-path">${escapeHtml(job.error)}</p></section>` : '';
         html += `<tr id="job-detail-${escapeHtml(job.id)}" class="${isFilesExpanded ? '' : 'd-none'} job-files-detail" aria-hidden="${isFilesExpanded ? 'false' : 'true'}">
-            <td colspan="7" class="job-expanded-cell"><div class="job-expanded-content">
+            <td colspan="8" class="job-expanded-cell"><div class="job-expanded-content">
                 <div class="queue-detail-grid">
                     <div class="queue-detail-summary">${error}${activity}<div class="queue-results" id="queue-publishers-${escapeHtml(job.id)}">${publishersBlock}</div></div>
                     ${filesBlock}

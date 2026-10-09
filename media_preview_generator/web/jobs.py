@@ -2679,13 +2679,32 @@ class JobManager:
             statuses: List of status strings to clear (e.g. ["completed", "failed"]).
                 Defaults to all terminal statuses: completed, failed, cancelled.
 
+        Returns:
+            Number of jobs removed, including finished retry rows cleared with their chain head.
+
         """
         valid_terminal = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
         if statuses:
             target = {JobStatus(s) for s in statuses if s in {e.value for e in valid_terminal}}
         else:
             target = valid_terminal
+        return len(self._clear_terminal_jobs(target))
 
+    def clear_finished_jobs_by_id(self, job_ids: list[str]) -> list[str]:
+        """Remove only the listed jobs, and only if they are finished.
+
+        Args:
+            job_ids: Jobs the user selected. Running, queued and unknown ids are left alone.
+
+        Returns:
+            Ids actually removed (a cleared chain head also takes its finished retry rows).
+
+        """
+        terminal = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        return self._clear_terminal_jobs(terminal, only_ids=set(job_ids))
+
+    def _clear_terminal_jobs(self, target: set[JobStatus], only_ids: set[str] | None = None) -> list[str]:
+        valid_terminal = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
         with self._lock:
             children_by_parent: dict[str, list[str]] = {}
             for job_id, job in self._jobs.items():
@@ -2696,7 +2715,7 @@ class JobManager:
             to_delete: list[str] = []
             queued: set[str] = set()
             for job_id, job in self._jobs.items():
-                if job.status not in target:
+                if job.status not in target or (only_ids is not None and job_id not in only_ids):
                     continue
                 head = self._jobs.get(_retry_parent_id_of(job) or "")
                 # Finished retry rows are the history of a chain that is still going; keep them.
@@ -2719,7 +2738,7 @@ class JobManager:
             if to_delete:
                 self._emit_event("jobs_cleared", {"count": len(to_delete)})
                 logger.info("Cleared {} job(s)", len(to_delete))
-            return len(to_delete)
+            return to_delete
 
     def get_stats(self) -> dict:
         """Counts that match what the queue UI shows.
