@@ -365,19 +365,27 @@ class TestScheduleIntroCredits:
         expect(authed_page.locator("#scheduleMarkersFind")).to_be_checked()
         expect(authed_page.locator("#scheduleServerGroup")).to_be_visible()
         expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_visible()
+        hint = authed_page.locator("#scheduleMarkersModeHint")
+        expect(hint).to_have_text(
+            "Finds skip markers for new or changed files in the libraries below, and puts back any a server has lost."
+        )
 
         authed_page.locator("#scheduleMarkersCheckServers").check()
+        expect(hint).to_have_text(
+            "Doesn't scan files. Quickly checks every server still has the markers this app added, "
+            "and puts back any it lost."
+        )
         expect(authed_page.locator("#scheduleServerGroup")).to_be_hidden()
         expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_hidden()
         info = authed_page.locator("#scheduleMarkersCheckServersInfo.info-icon")
         assert (info.get_attribute("data-bs-original-title") or info.get_attribute("title")) == (
-            "Checks your servers still show the markers this app sent, and resends any missing or changed. "
-            "Click for more."
+            "Doesn't scan files. Quickly checks every server still has the markers this app added, "
+            "and puts back any it lost. Click for more."
         )
         detail = " ".join(
             authed_page.locator("#infoScheduleCheckServersTpl").evaluate("tpl => tpl.content.textContent").split()
         )
-        assert "Covers all servers and libraries. Low priority unless you pick otherwise." in detail
+        assert "puts back any it lost. Low priority unless you pick otherwise." in detail
         # A library pick left from before doesn't block the save: Check servers has no libraries.
         authed_page.evaluate("document.getElementById('scheduleLibraryAll').checked = false")
         _save_schedule(authed_page, "/api/schedules")

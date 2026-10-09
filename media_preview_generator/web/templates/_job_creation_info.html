@@ -3,10 +3,6 @@
     <p>Finds Skip Intro / Skip Credits markers for the chosen libraries and sends them to every server with Intro &amp; Credits turned on.</p>
     <p>Runs at low priority by default (change it under Priority below) on worker groups that allow Intro &amp; Credits.</p>
 </template>
-<template id="infoJobCheckServersTpl">
-    <p>Checks that every server with Intro &amp; Credits on still shows the markers this app sent, and sends them again where they're missing or changed (unless that server is set to keep its own).</p>
-    <p>Covers all servers and libraries.</p>
-</template>
 <template id="infoJobLibrariesTpl">
     <p>Per-run scope — picks which libraries this specific job will process.</p>
     <p>Independent of the server-level 'Libraries to monitor' setting (Servers → Edit → Libraries), which gates everything an installed server is allowed to touch.</p>

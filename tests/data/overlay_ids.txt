@@ -6,10 +6,6 @@
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	2	restyled	#jobKindMarkers
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	2	restyled	#jobKindMarkersInfo
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	3	restyled	#jobKindLoudness
-1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	4	restyled	#jobMarkersModeFind
-1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	4	restyled	#jobMarkersModeCheckServers
-1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	4	restyled	#jobMarkersCheckServersInfo
-1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	4	restyled	#jobMarkersModeGroup
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	5	kept	onJobKindChange
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	6	restyled	#jobLibrariesGroup
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	7	kept	#jobLibraryAll
@@ -46,7 +42,6 @@
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	24	kept	MediaScanFilters.read/setLoading
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	25	restyled	#jobOwnRunnerFiltersNote
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	25	restyled	_showJobKindControls
-1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	26	kept	_jobChecksServers
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	27	restyled	#jobMarkersForce
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	28	restyled	#jobMissingOnly
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	28	restyled	#jobRegenerateAll

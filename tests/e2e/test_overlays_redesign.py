@@ -162,18 +162,6 @@ class TestStartNewJob:
         assert body["libraries"] == [{"server_id": "jf-1", "library_id": "1"}]
         assert body["priority"] == priority
 
-    def test_check_servers_hides_the_libraries_and_posts_the_reconcile_request(self, overlay_page) -> None:
-        page, writes = overlay_page
-        _open_start(page)
-        pick_job_kind(page, "jobKindMarkers")
-        page.locator("#jobMarkersModeCheckServers").check()
-        expect(page.locator("#jobLibrariesGroup")).to_be_hidden()
-        expect(page.locator("#jobCheckServersNote")).to_be_visible()
-        expect(page.locator("#jobStartLabel")).to_have_text("Check servers")
-        _segment(page, "jobPriority", "Normal").click()
-        page.locator("#jobStartButton").click()
-        assert [w for w in writes if w["url"] == "markers/reconcile"][0]["body"] == {"priority": 2}
-
     def test_type_cards_colour_the_dialog_by_the_first_ticked_type(self, overlay_page) -> None:
         page, _ = overlay_page
         _open_start(page)
@@ -228,17 +216,6 @@ class TestStartNewJob:
         expect(page.locator("#jobScanFiltersGroup")).to_be_hidden()
         expect(page.locator("#jobPriority")).to_have_value("3")
         expect(page.locator("#jobStartLabel")).to_have_text("Start loudness job")
-
-    def test_check_servers_clears_the_other_types_and_ticking_one_leaves_it(self, overlay_page) -> None:
-        page, _ = overlay_page
-        _open_start(page)
-        page.locator("#jobKindMarkers").check()
-        page.locator("#jobMarkersModeCheckServers").check()
-        expect(page.locator("#jobKindPreviews")).not_to_be_checked()
-        expect(page.locator("#jobKindLoudness")).not_to_be_checked()
-        page.locator("#jobKindLoudness").check()
-        expect(page.locator("#jobMarkersModeFind")).to_be_checked()
-        expect(page.locator("#jobLibrariesGroup")).to_be_visible()
 
 
 class TestManualTrigger:
