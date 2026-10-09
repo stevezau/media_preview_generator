@@ -87,6 +87,12 @@ def journal_mode(request, monkeypatch):
     return request.param
 
 
+@pytest.fixture(autouse=True)
+def short_wait_slice(monkeypatch):
+    """Lock waits poll every 50 ms, not 1 s: a timeout or cancel is noticed that much sooner, so tests can wait less."""
+    monkeypatch.setattr(plex_db, "WAIT_SLICE_S", 0.05)
+
+
 # TestLockDomain overrides plex_holds_the_database and uses the real probe.
 pytestmark = pytest.mark.usefixtures("plex_holds_the_database")
 
@@ -2116,7 +2122,7 @@ class TestNotMadeForThisFile:
             start = time.monotonic()
             cancelled.set()
             reader.join(10)
-            assert time.monotonic() - start < plex_db.WAIT_SLICE_S + 1.0
+            assert time.monotonic() - start < plex_db.WAIT_SLICE_S + 0.5
         finally:
             lock.release()
         assert answers == [None]
@@ -2521,6 +2527,19 @@ class TestUnknownPrevious:
         assert (_rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")) == before
 
 
+class _FastClock:
+    """Stands in for ``time`` in plex_db: ``monotonic`` runs ``factor`` times faster, so waits end sooner."""
+
+    def __init__(self, factor: int) -> None:
+        self._factor = factor
+
+    def monotonic(self) -> float:
+        return time.monotonic() * self._factor
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
 class TestLockTimeouts:
     def _paused_writer(self, tmp_path, monkeypatch):
         folder = tmp_path / "Plex Media Server"
@@ -2564,7 +2583,7 @@ class TestLockTimeouts:
 
     def test_no_convoy_behind_plex_s_write_lock(self, tmp_path, monkeypatch):
         # Every call waits at most BUSY_TIMEOUT_S in total, however many threads queue on the same database.
-        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 2.0)
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.5)
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)
         pub = _publisher(tmp_path, folder)
@@ -2593,12 +2612,12 @@ class TestLockTimeouts:
             locker.execute("ROLLBACK")
             locker.close()
         assert len(results) == 5
-        assert all(elapsed < 2.0 + 1.0 for _name, elapsed, _outcome in results), results
+        assert all(elapsed < 0.5 + 0.5 for _name, elapsed, _outcome in results), results
         assert {outcome for name, _e, outcome in results if name.startswith("w")} == {Capability.UNREACHABLE}
 
     def test_one_deadline_covers_both_the_lock_wait_and_plex_s_write_lock(self, tmp_path, monkeypatch):
         # A write that gets this process's lock late must not then wait a full BUSY_TIMEOUT_S on Plex.
-        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 2.0)
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.8)
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)
         pub = _publisher(tmp_path, folder)
@@ -2606,7 +2625,7 @@ class TestLockTimeouts:
         locker.execute("BEGIN IMMEDIATE")  # Plex writing for longer than we wait
         lock = plex_db._db_lock(str(db))
         lock.acquire()
-        threading.Timer(1.5, lock.release).start()  # another task of ours finishing
+        threading.Timer(0.6, lock.release).start()  # another task of ours finishing
         start = time.monotonic()
         try:
             with pytest.raises(PublishError) as ei:
@@ -2615,7 +2634,7 @@ class TestLockTimeouts:
             locker.execute("ROLLBACK")
             locker.close()
         assert ei.value.state is Capability.UNREACHABLE
-        assert time.monotonic() - start < 2.0 + 0.8
+        assert time.monotonic() - start < 0.8 + 0.3  # two full waits would take 0.6 + 0.8
 
     @staticmethod
     def _four_items(folder):
@@ -2660,8 +2679,8 @@ class TestLockTimeouts:
         return db, results
 
     # Production: another program held Plex's write lock for 30.8 s against a 30 s wait; four files failed. Scaled
-    # down 1:60 so the test takes seconds: the job wait keeps its ratio to the old one.
-    SCALE = 60
+    # down 1:120 so the test takes seconds: the job wait keeps its ratio to the old one.
+    SCALE = 120
     OLD_WAIT_S = 30.0
     HELD_S = 30.8
 
@@ -2691,8 +2710,8 @@ class TestLockTimeouts:
     def test_every_file_queued_behind_a_write_blocked_by_plex_names_plex_as_the_cause(self, tmp_path, monkeypatch):
         # The holder waits in BEGIN IMMEDIATE; the three behind it wait for this process's lock. None of them may
         # blame "another Intro & Credits task": that task is only waiting for Plex too.
-        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 1.0)
-        db, results = self._write_all_while_plex_holds_its_write_lock(tmp_path, 2.5)
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.3)
+        db, results = self._write_all_while_plex_holds_its_write_lock(tmp_path, 0.8)
         assert len(results) == 4
         for result in results.values():
             assert isinstance(result, DatabaseBusyError) and result.state is Capability.UNREACHABLE, results
@@ -2703,6 +2722,7 @@ class TestLockTimeouts:
     def test_a_busy_stretch_is_counted_from_its_start_across_writes(self, tmp_path, monkeypatch):
         # The second write starts waiting right after the first gave up: Plex has been busy since the first began.
         monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 1.0)
+        monkeypatch.setattr(plex_db, "time", _FastClock(4))  # the "1 s" of the messages passes in 0.25 s
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)
         pub = _publisher(tmp_path, folder)
@@ -2774,11 +2794,11 @@ class TestBusyThroughTheRealLockProbe:
         # The first write waits in BEGIN IMMEDIATE holding this process's lock; the three that
         # arrive later give up in the lock probe (file_checks), whose report used to lose the busy type. The first
         # waits longer than the others, so they all give up in the probe, whatever the threads' timing.
-        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 1.0)
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.3)
         folder = tmp_path / "Plex Media Server"
         db, items = TestLockTimeouts._four_items(folder)
         publishers = [_publisher(tmp_path, folder) for _ in items]
-        publishers[0]._db_timeout_s = 3.0
+        publishers[0]._db_timeout_s = 1.0
         probed = []
         real_file_checks = LocalPlexDb.file_checks
 
@@ -2801,7 +2821,7 @@ class TestBusyThroughTheRealLockProbe:
         try:
             first = threading.Thread(target=publish, args=(publishers[0], *items[0]))
             first.start()
-            time.sleep(0.3)  # the first write now waits in BEGIN IMMEDIATE, holding this process's lock
+            time.sleep(0.2)  # the first write now waits in BEGIN IMMEDIATE, holding this process's lock
             rest = [
                 threading.Thread(target=publish, args=(pub, *item))
                 for pub, item in zip(publishers[1:], items[1:], strict=True)
@@ -2841,7 +2861,7 @@ class TestBusyThroughTheRealLockProbe:
             start = time.monotonic()
             cancelled.set()
             writer.join(10)
-            assert time.monotonic() - start < plex_db.WAIT_SLICE_S + 1.0
+            assert time.monotonic() - start < plex_db.WAIT_SLICE_S + 0.5
         finally:
             lock.release()
         [error] = outcome

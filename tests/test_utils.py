@@ -476,6 +476,21 @@ class TestAtomicJsonSaveWithBackup:
     earlier app versions are not migrated; they coexist and age out.
     """
 
+    @pytest.fixture()
+    def advancing_clock(self, monkeypatch):
+        """Make every ``datetime.now`` in utils land one second after the last, so saves get distinct suffixes."""
+        import datetime as _dt
+
+        ticks = iter(range(10_000))
+        base = _dt.datetime(2026, 1, 1, tzinfo=_dt.UTC)
+
+        class _Clock(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return base + _dt.timedelta(seconds=next(ticks))
+
+        monkeypatch.setattr("media_preview_generator.utils.datetime", _Clock)
+
     def _list_timestamped_baks(self, dirpath, stem):
         return sorted(p for p in dirpath.iterdir() if p.name.startswith(f"{stem}.") and p.name.endswith(".bak"))
 
@@ -506,34 +521,25 @@ class TestAtomicJsonSaveWithBackup:
         assert len(suffix) == 15 and suffix[8] == "-"
         assert _json.loads(baks[0].read_text())["v"] == 1
 
-    @pytest.mark.slow
-    def test_keeps_history_across_many_writes(self, tmp_path):
+    def test_keeps_history_across_many_writes(self, tmp_path, advancing_clock):
         """Multiple saves accumulate timestamped backups (vs. the old rolling single)."""
-        import time
-
         from media_preview_generator.utils import atomic_json_save_with_backup
 
         target = tmp_path / "config.json"
         for v in range(5):
             atomic_json_save_with_backup(str(target), {"v": v})
-            # 1.1s gap so the YYYYMMDD-HHMMSS suffix is unique per save.
-            time.sleep(1.1)
         baks = self._list_timestamped_baks(tmp_path, "config.json")
         # 5 saves → 4 backups (the first save had no prior contents to back up).
         assert len(baks) == 4
 
-    @pytest.mark.slow
-    def test_prunes_oldest_beyond_retention(self, tmp_path, monkeypatch):
+    def test_prunes_oldest_beyond_retention(self, tmp_path, monkeypatch, advancing_clock):
         """CONFIG_BACKUP_KEEP caps how many history entries are kept."""
-        import time
-
         from media_preview_generator.utils import atomic_json_save_with_backup
 
         monkeypatch.setenv("CONFIG_BACKUP_KEEP", "3")
         target = tmp_path / "config.json"
         for v in range(6):
             atomic_json_save_with_backup(str(target), {"v": v})
-            time.sleep(1.1)
         baks = self._list_timestamped_baks(tmp_path, "config.json")
         assert len(baks) == 3
 

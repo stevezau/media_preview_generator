@@ -1,5 +1,6 @@
 """Decision rules as a full matrix."""
 
+import functools
 import itertools
 import math
 import random
@@ -2794,10 +2795,16 @@ class TestProperties:
     SEEDS = (20260913, 7, 1234)
     FILES = 1000
 
-    def _files(self, seed):
+    @staticmethod
+    @functools.cache
+    def _generated(seed, count):
+        """The seed's random files, drawn once for all the properties (drawing costs as much as deciding them)."""
         rng = random.Random(seed)
-        for _ in range(self.FILES):
-            yield _random_file(rng)
+        return tuple(_random_file(rng) for _ in range(count))
+
+    def _files(self, seed):
+        for cands, x, locked in self._generated(seed, self.FILES):
+            yield list(cands), x, dict(locked)
 
     @pytest.mark.parametrize("seed", SEEDS)
     def test_rule_7_only_moves_a_decided_credits_or_preview_start_later(self, seed):

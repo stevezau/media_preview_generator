@@ -393,9 +393,13 @@ class TestListItems:
         log a warning, yield nothing, return cleanly. Matches the
         pre-pagination behaviour ``_shared.py:list_canonical_paths``
         already handles by ``continue``-ing to the next library."""
-        with patch.object(JellyfinServer, "_request", side_effect=RuntimeError("server down")):
+        with (
+            patch.object(JellyfinServer, "_request", side_effect=RuntimeError("server down")) as req,
+            patch("media_preview_generator.servers._embyish.time.sleep") as mock_sleep,
+        ):
             items = list(jelly.list_items("lib-1"))
         assert items == []
+        assert req.call_count == mock_sleep.call_count + 1  # every attempt but the last backs off first
 
     def test_list_items_uses_extended_per_request_timeout(self, jelly):
         """Job b5651c8a regression: cold-cache /Items query on a

@@ -388,6 +388,23 @@ def _assert_gone(pid_file, *, within_s: float = 0.0) -> None:
     assert _gone(pid), f"pid {pid} is still running"
 
 
+def _settled_progress(progress, *, quiet_s: float = 0.4, within_s: float = 10.0) -> int:
+    """Frames the decoder has written once it stops advancing (blocked on a full pipe) or has written them all."""
+    last, since = -1, time.monotonic()
+    deadline = since + within_s
+    while time.monotonic() < deadline:
+        try:
+            now = int(progress.read_text())
+        except (FileNotFoundError, ValueError):
+            now = -1
+        if now != last:
+            last, since = now, time.monotonic()
+        elif time.monotonic() - since >= quiet_s:
+            break
+        time.sleep(0.02)
+    return last
+
+
 def _reapers() -> list[threading.Thread]:
     return [t for t in threading.enumerate() if t.name == "credits-frames-reaper"]
 
@@ -873,11 +890,12 @@ class TestRunDecode:
                 hw_active=False,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
-                timeout_s=2.0,
+                timeout_s=1.0,
             )
         assert time.monotonic() - started < 9
 
-    def test_a_process_holding_the_pipe_after_the_kill_never_blocks_the_worker(self, tmp_path):
+    def test_a_process_holding_the_pipe_after_the_kill_never_blocks_the_worker(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(frames, "_READER_JOIN_S", 0.3)
         # A grandchild in its own session keeps stdout open after ffmpeg's group is killed (like a read stuck on a stalled
         # mount): the decode still returns within its limit plus the bounded waits, and the pipe is left to a reaper.
         pid_file = tmp_path / "holder.pid"
@@ -898,9 +916,9 @@ class TestRunDecode:
                     hw_active=False,
                     pts_offset_s=0.0,
                     detect_boxes=lambda p: [()] * len(p),
-                    timeout_s=2.0,
+                    timeout_s=1.0,
                 )
-            assert time.monotonic() - started < 2.0 + 6
+            assert time.monotonic() - started < 1.0 + 6
             assert any("still holds its output" in message for message in warnings)
             handed_over = [t for t in _reapers() if t not in before]
             assert len(handed_over) == 1 and handed_over[0].is_alive()
@@ -967,8 +985,7 @@ class TestRunDecode:
 
         def count(planes):
             if not ahead:
-                time.sleep(1.5)
-                ahead.append(int(progress.read_text()))
+                ahead.append(_settled_progress(progress))
             return [()] * len(planes)
 
         rows = frames.run_decode(
@@ -1013,9 +1030,11 @@ class TestRunDecode:
         with pytest.raises(TypeError, match="pts_offset_s"):
             frames.run_decode(fake_ffmpeg([10], ["1"]), hw_active=False, detect_boxes=lambda p: [()] * len(p))
 
-    def test_slow_text_detection_never_loses_the_end_of_the_stream(self):
+    def test_slow_text_detection_never_loses_the_end_of_the_stream(self, monkeypatch):
+        monkeypatch.setattr(frames, "_POLL_S", 0.01)  # a 0.15 s chunk is still fifteen put timeouts, as 1.5 s was ten
+
         def slow(planes):
-            time.sleep(1.5)
+            time.sleep(0.15)
             return [()] * len(planes)
 
         started = time.monotonic()
@@ -1031,11 +1050,13 @@ class TestRunDecode:
         assert time.monotonic() - started < 8
 
     @pytest.mark.parametrize("count", [192, 256, 320])
-    def test_whole_chunks_with_a_slow_detector_finish(self, count):
+    def test_whole_chunks_with_a_slow_detector_finish(self, count, monkeypatch):
         # Reproduced before the fix: a tail with a multiple of 64 frames filled the queue while the last chunk was being
         # counted, dropped the end marker and was reported as a timeout.
+        monkeypatch.setattr(frames, "_POLL_S", 0.01)  # a 0.12 s chunk is twelve put timeouts, as 1.2 s was at 0.1 s
+
         def slow(planes):
-            time.sleep(1.2)
+            time.sleep(0.12)
             return [()] * len(planes)
 
         started = time.monotonic()
@@ -1047,7 +1068,7 @@ class TestRunDecode:
             timeout_s=20,
         )
         assert len(rows) == count
-        assert time.monotonic() - started < 1.2 * count / 64 + 6
+        assert time.monotonic() - started < 0.12 * count / 64 + 6
 
     def test_a_failing_text_detection_kills_ffmpeg_and_propagates(self, tmp_path):
         pid_file = tmp_path / "ffmpeg.pid"
@@ -1367,17 +1388,17 @@ class TestRunDecodePause:
                 paused.set()  # everything is paused as the first chunk is read
             return [()] * len(planes)
 
-        # 20 frames over about 1 s of work; the pause lasts longer than the whole time limit.
+        # 20 frames over about 0.4 s of work; the pause lasts longer than the whole time limit.
         thread, out = self._decode_in_background(
-            fake_ffmpeg([10] * 20, ["1"] * 20, sleep_s=0.05, pid_file=str(pid_file), progress_file=str(progress)),
-            detect_boxes=detect, pause_check=paused.is_set, chunk_frames=2, timeout_s=2.5,
+            fake_ffmpeg([10] * 20, ["1"] * 20, sleep_s=0.02, pid_file=str(pid_file), progress_file=str(progress)),
+            detect_boxes=detect, pause_check=paused.is_set, chunk_frames=2, timeout_s=1.5,
         )  # fmt: skip
         try:
             assert _wait_for(paused.is_set, within_s=5)
             pid = int(pid_file.read_text())
             assert _wait_for(lambda: _state(pid) == "T", within_s=5)
             frozen_at = _progress(progress)
-            time.sleep(3.0)  # past the 2.5 s limit
+            time.sleep(1.8)  # past the 1.5 s limit
             assert _state(pid) == "T" and _progress(progress) == frozen_at
             assert thread.is_alive()
         finally:
@@ -1418,9 +1439,9 @@ class TestRunDecodePause:
         paused.set()
         thread, out = self._decode_in_background(
             fake_ffmpeg([10, 250], ["1", "2"], pid_file=str(pid_file)),
-            detect_boxes=lambda planes: [()] * len(planes), pause_check=paused.is_set, timeout_s=1.0,
+            detect_boxes=lambda planes: [()] * len(planes), pause_check=paused.is_set, timeout_s=0.8,
         )  # fmt: skip
-        time.sleep(1.5)  # past the time limit: it starts counting once the decode starts
+        time.sleep(1.0)  # past the time limit: it starts counting once the decode starts
         assert not pid_file.exists() and thread.is_alive()
         paused.clear()
         thread.join(10)

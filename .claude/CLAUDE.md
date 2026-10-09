@@ -12,7 +12,7 @@ pip install -e ".[dev]"
 gunicorn media_preview_generator.web.wsgi:app --bind 0.0.0.0:8080 --worker-class gthread --workers 1
 
 # Test — default runs parallel (xdist, worksteal), excludes gpu + e2e, keeps coverage
-pytest                                          # ~100s, 12604 tests, ~89% cov
+pytest                                          # ~150s at 8 workers, ~18,950 tests, ~92% cov
 pytest --no-cov tests/test_config.py            # Single file, skip coverage
 pytest -m e2e -n 8 --no-cov                     # E2E: cap at 8 workers, NOT -n auto (see below)
 pytest -m e2e -n 0 --no-cov                     # E2E serial (also fine)
