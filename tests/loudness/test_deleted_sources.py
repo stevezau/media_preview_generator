@@ -42,7 +42,7 @@ def test_explicit_deleted_source_settles_existing_retry_without_analysis(lifecyc
     Path(path).unlink()
     parent = start_sender(lifecycle, path)
     (child,) = lifecycle.children(parent)
-    cfg = job._build_multi_server_registry(None).get_config("plex")
+    cfg = job._build_multi_server_registry().get_config("plex")
     cfg.path_mappings = [
         {"remote_prefix": "/plex", "local_prefix": str(lifecycle.media), "webhook_prefixes": ["/sender"]}
     ]
@@ -112,7 +112,7 @@ def test_deleted_skip_preserves_success_and_unknown_missing_failure_in_chain(lif
 def test_reimported_absent_path_keeps_retry_instead_of_using_stale_deletion(lifecycle, notice, mapped):
     path = lifecycle.add_file("reused-name.mkv")
     Path(path).unlink()
-    cfg = job._build_multi_server_registry(None).get_config("plex")
+    cfg = job._build_multi_server_registry().get_config("plex")
     cfg.path_mappings = [
         {"remote_prefix": "/plex", "local_prefix": str(lifecycle.media), "webhook_prefixes": ["/sender"]}
     ]
@@ -151,7 +151,7 @@ def test_unknown_deletion_order_cannot_retire_a_missing_source(lifecycle, timest
     # JobManager sorts by created_at; direct helper probe isolates legacy invalid evidence.
     from media_preview_generator.loudness.deleted_sources import confirmed_deleted_paths
 
-    registry = job._build_multi_server_registry(None)
+    registry = job._build_multi_server_registry()
     assert confirmed_deleted_paths([old], registry, "plex", event_times={old.id: timestamp}) == frozenset()
 
 

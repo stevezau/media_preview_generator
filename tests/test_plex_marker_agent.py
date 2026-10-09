@@ -279,11 +279,11 @@ class TestItOwnsThePath:
 
 
 def _write_body(*, rating_key: int, wanted: list[Marker], prior=(), keep_plex=False, kept_types=()) -> dict:
-    from media_preview_generator.markers.publishers.plex_db import WriteRequest, _Part
+    from media_preview_generator.markers.publishers.plex_db import Part, WriteRequest
 
     request = WriteRequest(
         rating_key=rating_key,
-        parts=[_Part(1, 1, "/data/tv/S01E01.mkv", None, None)],
+        parts=[Part(1, 1, "/data/tv/S01E01.mkv", None, None)],
         wanted=list(wanted),
         prior=list(prior),
         duration_ms=DUR,

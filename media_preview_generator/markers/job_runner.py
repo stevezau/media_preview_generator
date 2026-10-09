@@ -1119,11 +1119,38 @@ def run_intro_credits_job(job_id: str) -> None:
         pass
 
 
+@dataclasses.dataclass
+class _PassState:
+    """What the teardown of one job pass needs, kept as the pass goes (it can end at any step).
+
+    Attributes:
+        cfg: The job's config; replaced when the files are sealed or the sender hints merged.
+        slot: Whether the pass holds the job gate's slot (``release_slot`` clears it).
+        dispatcher: Set once the pool exists, so a failure can stop the files still running.
+        sweep_store: Set once the job completes: the fingerprint cache sweep starts after the slot is given back.
+        sweep_configs: The servers' configs for the deleted-file sweep that runs first.
+        listing_on_job: Whether the config holds the Check servers listing (a revived job's from the start): only a
+            revive needs it, so the teardown takes it off the ended job (the config ships in every job payload).
+        parked: Whether the job parked itself (its listing is kept for the revive).
+    """
+
+    cfg: dict
+    slot: dict = dataclasses.field(default_factory=lambda: {"held": False})
+    dispatcher: object | None = None
+    sweep_store: MarkerStore | None = None
+    sweep_configs: list[ServerConfig] = dataclasses.field(default_factory=list)
+    listing_on_job: bool = False
+    parked: bool = False
+
+
 def _run_intro_credits_pass(job_id: str) -> bool | None:
     """Run one Intro & Credits job to completion (called on its own thread).
 
     Args:
         job_id: The job to run.
+
+    Returns:
+        True when the job parked itself and should run again after its availability window.
     """
     from loguru import logger as loguru_logger
 
@@ -1148,18 +1175,8 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
         filter=lambda record: not record["extra"].get(JOB_LOG_SKIP) and is_job_thread_for(record["thread"].id, job_id),
         enqueue=True,
     )
-    # Held from the gate until the files are submitted to the dispatcher (or the job ends first).
-    slot = {"held": False}
     cfg = dict(job.config or {})
-    dispatcher = None
-    # Set once the job completes: the fingerprint cache sweep starts after the slot is given back, with the servers'
-    # configs for the deleted-file sweep that runs first.
-    sweep_store = None
-    sweep_configs: list[ServerConfig] = []
-    # While the config holds the Check servers listing (a revived job's from the start): only a revive needs it, so the
-    # teardown takes it off the ended job (the config ships in every job payload).
-    listing_on_job = LISTING_CONFIG_KEY in cfg
-    parked = False
+    state = _PassState(cfg=cfg, listing_on_job=LISTING_CONFIG_KEY in cfg)
 
     def cancel_check() -> bool:
         return jm.is_cancellation_requested(job_id)
@@ -1168,393 +1185,575 @@ def _run_intro_credits_pass(job_id: str) -> bool | None:
         # ``job`` is the job manager's own object, which the priority route updates in place.
         return job.priority
 
+    try:
+        with failure_scope(job_id):
+            try:
+                _run_job(jm, job_id, job, settings, state, cancel_check, live_priority)
+            finally:
+                clear_failures()
+    except JobParked:
+        state.parked = True
+        return True
+    except Exception as exc:
+        _fail_job(jm, job_id, exc, state.dispatcher)
+    finally:
+        _tear_down_pass(jm, job_id, state, handler_id, loguru_logger)
+
+
+def _fail_job(jm, job_id: str, exc: Exception, dispatcher) -> None:
+    """Log a job's failure, stop the files it still has running and mark it failed.
+
+    Args:
+        jm: The job manager.
+        job_id: The failed job.
+        exc: What the job raised.
+        dispatcher: The job's dispatcher, or None when it ended before submitting its files.
+    """
+    # The job's error is served by GET /api/jobs, and exception text can carry a server URL with its token.
+    detail = redact_secrets(f"{type(exc).__name__}: {exc}")
+    logger.error("Intro & Credits job {} failed: {}", job_id, detail)
+    logger.bind(**{JOB_LOG_SKIP: True}).error(
+        "Traceback of Intro & Credits job {}:\n{}", job_id, redacted_traceback(exc)
+    )
+    if dispatcher is not None:
+        # Its checks would otherwise go on publishing for a failed job, without a slot or Files-panel rows.
+        try:
+            dispatcher.cancel_job(job_id)
+        except Exception as cancel_exc:
+            logger.warning("Could not stop the remaining files of Intro & Credits job {}: {}", job_id, cancel_exc)
+    try:
+        jm.complete_job(job_id, error=detail)
+    except Exception as complete_exc:
+        logger.warning("Could not mark Intro & Credits job {} failed: {}", job_id, complete_exc)
+
+
+def _tear_down_pass(jm, job_id: str, state: _PassState, handler_id: int, loguru_logger) -> None:
+    """End a job pass: give the slot back, clear its per-job flags, start the cache sweep, drop its log handler.
+
+    Args:
+        jm: The job manager.
+        job_id: The job that ran.
+        state: What the pass kept as it went.
+        handler_id: The job log handler to remove.
+        loguru_logger: The loguru logger the handler was added to.
+    """
+    # Same teardown as the preview runner (web/routes/job_runner.py run_job finally): slot first (a job that
+    # ended before submitting its files still holds one), then per-job flags, then worker cards once nothing
+    # else is running.
+    release_slot(state.slot, get_job_gate())
+    set_file_result_callback(None, job_id=job_id)
+    jm.clear_pause_flag(job_id)
+    jm.clear_cancellation_flag(job_id)
+    jm.clear_active_worker_pool(job_id)
+    if state.listing_on_job and not state.parked:
+        try:
+            jm.merge_job_config(job_id, {}, remove=(LISTING_CONFIG_KEY,))
+        except Exception as exc:
+            logger.debug("Could not drop the Check servers listing of {}: {}", job_id, exc)
+    try:
+        if not jm.get_running_jobs():
+            jm.clear_worker_statuses()
+    except Exception as exc:
+        logger.debug("Could not clear worker statuses after {}: {}", job_id, exc)
+    unregister_job_thread()
+    # After the slot is back, and outside the job's log: a skipped cleanup's warning isn't about this job.
+    if state.sweep_store is not None:
+        _start_fingerprint_sweep(state.cfg, state.sweep_store, state.sweep_configs)
+    try:
+        loguru_logger.complete()
+        loguru_logger.remove(handler_id)
+    except (ValueError, TypeError):
+        logger.debug("Could not remove the job log handler for {}", job_id)
+
+
+def _wait_for_job_slot(
+    jm,
+    job_id: str,
+    job,
+    cfg: dict,
+    state: _PassState,
+    cancel_check: Callable[[], bool],
+    live_priority: Callable[[], int],
+) -> bool:
+    """Wait for the job's turn: the job it follows, its retry time, a pause, then capacity and a gate slot.
+
+    Args:
+        jm: The job manager.
+        job_id: The job waiting.
+        job: The job manager's job object.
+        cfg: The job's config.
+        state: The pass state; ``slot`` is held on a True return.
+        cancel_check: True once the job is cancelled.
+        live_priority: The job's current priority.
+
+    Returns:
+        True with the slot held; False when the job was cancelled while waiting (it is already marked cancelled).
+    """
+
     def on_wait(active: int) -> None:
         jm.update_progress(job_id, current_item=format_wait_message(active))
         jm.note_slot_wait(job_id)  # JobManager.requeue_interrupted_jobs ages a waiting job by the downtime only
 
-    try:
-        with failure_scope(job_id):
-            try:
-                if not wait_for_preceding_job(job_id, cfg.get("follows_job_id"), cancel_check):
-                    jm.add_log(job_id, "WARNING - Job cancelled while waiting for its preview job")
-                    jm.cancel_job(job_id)
-                    return
-                if not wait_for_retry_time(job_id, cfg, cancel_check):
-                    jm.add_log(job_id, "WARNING - Job cancelled while waiting to retry")
-                    jm.cancel_job(job_id)
-                    return
-                if job.paused and not hold_pause_from_before_restart(job_id, cancel_check):
-                    jm.add_log(job_id, "WARNING - Job cancelled while paused")
-                    jm.cancel_job(job_id)
-                    return
-                # The first job of a process pays for these (ffmpeg listing its muxers, up to 30 s of the text
-                # detection check), so they run before the job holds a slot; build_context reads the answers they keep.
-                # None: the ffmpeg load_config picks is one of the same candidates (``fingerprint._ffmpeg_candidates``).
-                run_detector_checks(None)
-                while True:
-                    if not wait_for_capacity(
-                        jm,
-                        job_id,
-                        JOB_KIND_INTRO_CREDITS,
-                        cancel_check,
-                        lambda: jm.is_pause_requested(job_id) or get_settings_manager().processing_paused,
-                    ):
-                        jm.cancel_job(job_id)
-                        return
-                    jm.note_slot_wait(job_id)
-                    if not get_job_gate().acquire(
-                        priority=live_priority(),
-                        cancel_check=cancel_check,
-                        on_wait=on_wait,
-                        **admission_options(jm, job_id, JOB_KIND_INTRO_CREDITS),
-                    ):
-                        jm.cancel_job(job_id)
-                        return
-                    slot["held"] = True
-                    if (
-                        runtime_capacity(JOB_KIND_INTRO_CREDITS)["open"]
-                        and not jm.is_pause_requested(job_id)
-                        and not get_settings_manager().processing_paused
-                    ):
-                        break
-                    release_slot(slot, get_job_gate())
-                # The job's own start line (start_line) follows once its files are listed.
-                with logger.contextualize(**{JOB_LOG_SKIP: True}):
-                    if cfg.get("parked_checkpoint") or (job.config or {}).get("resource_wait"):
-                        jm.resume_parked_job(job_id)
-                    else:
-                        jm.start_job(job_id)
-                # A retry in a chain shows its run on the chain head's row, and records its files there (below).
-                chain_head = cfg.get("parent_job_id")
-                if chain_head:
-                    _upsert_chain(
-                        jm,
-                        chain_head,
-                        attempt=int(cfg.get("retry_attempt") or 0),
-                        max_attempts=int(cfg.get("max_retries") or 0),
-                        outcome="running",
-                    )
+    if not wait_for_preceding_job(job_id, cfg.get("follows_job_id"), cancel_check):
+        jm.add_log(job_id, "WARNING - Job cancelled while waiting for its preview job")
+        jm.cancel_job(job_id)
+        return False
+    if not wait_for_retry_time(job_id, cfg, cancel_check):
+        jm.add_log(job_id, "WARNING - Job cancelled while waiting to retry")
+        jm.cancel_job(job_id)
+        return False
+    if job.paused and not hold_pause_from_before_restart(job_id, cancel_check):
+        jm.add_log(job_id, "WARNING - Job cancelled while paused")
+        jm.cancel_job(job_id)
+        return False
+    # The first job of a process pays for these (ffmpeg listing its muxers, up to 30 s of the text
+    # detection check), so they run before the job holds a slot; build_context reads the answers they keep.
+    # None: the ffmpeg load_config picks is one of the same candidates (``fingerprint._ffmpeg_candidates``).
+    run_detector_checks(None)
+    while True:
+        if not wait_for_capacity(
+            jm,
+            job_id,
+            JOB_KIND_INTRO_CREDITS,
+            cancel_check,
+            lambda: jm.is_pause_requested(job_id) or get_settings_manager().processing_paused,
+        ):
+            jm.cancel_job(job_id)
+            return False
+        jm.note_slot_wait(job_id)
+        if not get_job_gate().acquire(
+            priority=live_priority(),
+            cancel_check=cancel_check,
+            on_wait=on_wait,
+            **admission_options(jm, job_id, JOB_KIND_INTRO_CREDITS),
+        ):
+            jm.cancel_job(job_id)
+            return False
+        state.slot["held"] = True
+        if (
+            runtime_capacity(JOB_KIND_INTRO_CREDITS)["open"]
+            and not jm.is_pause_requested(job_id)
+            and not get_settings_manager().processing_paused
+        ):
+            return True
+        release_slot(state.slot, get_job_gate())
 
-                def progress_callback(current, total, message, percent_override=None):
-                    if percent_override is not None:
-                        percent = percent_override
-                    else:
-                        percent = (current / total * 100) if total else 0
-                    jm.update_progress(
-                        job_id, percent=percent, processed_items=current, total_items=total, current_item=message
-                    )
 
-                worker_callback = worker_cards(jm)
+def _list_files(
+    *,
+    jm,
+    job_id: str,
+    state: _PassState,
+    ctx: PipelineContext,
+    registry,
+    checkpoint: dict | None,
+    saved: dict,
+    cancel_check: Callable[[], bool],
+    progress_callback: Callable[..., None],
+) -> tuple[list[ProcessableItem], list[str], dict[str, str], CheckServersListing | None]:
+    """List the files the job runs: a parked job's saved ones, a Check servers listing, or the job's own selection.
 
-                config = load_config()
-                # A job following a pinned preview job (and its retries and checks) publishes where the previews did.
-                config.server_id_filter = server_pin(cfg)
-                registry = _build_multi_server_registry(config)
-                if registry is None:
-                    jm.complete_job(job_id, error="Couldn't load the media servers configuration")
-                    return
-                cfg = _seal_files(jm, job_id, job, cfg)
-                ctx = build_context(
-                    registry=registry,
-                    config=config,
-                    priority=live_priority,
-                    force=bool(cfg.get("force")),
-                    recheck_empty_server_markers=bool(cfg.get("reconcile")),
-                )
-                ctx.busy_writes_retried = _retry_follows(cfg)
-                ctx.retry_file_cap = MAX_RETRY_FILES
-                ctx.freeze_check = job_freeze_check(jm, job_id)
-                sweep_configs = list(registry.configs())
-                checkpoint = (
-                    read_checkpoint(jm.config_dir, job_id, cfg["parked_checkpoint"])
-                    if cfg.get("parked_checkpoint")
-                    else None
-                )
-                saved = checkpoint.get("bookkeeping", {}) if checkpoint else {}
-                listing = None
-                if checkpoint:
-                    restore_context(ctx, saved.get("context", {}))
-                    items, warnings, sender_paths = (
-                        checkpoint_items(checkpoint),
-                        saved.get("warnings", []),
-                        saved.get("sender_paths", {}),
-                    )
-                    listing = (
-                        CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY)) if cfg.get("reconcile") else None
-                    )
-                elif cfg.get("reconcile"):
-                    from .reconcile import check_servers_listing
+    Args:
+        jm: The job manager.
+        job_id: The job listing its files.
+        state: The pass state; ``cfg`` takes the merged sender hints and ``listing_on_job`` is set when a listing is
+            saved on the job.
+        ctx: The job's pipeline context.
+        registry: The media servers registry.
+        checkpoint: The parked job's checkpoint, if it is being revived.
+        saved: The bookkeeping stored in the checkpoint.
+        cancel_check: True once the job is cancelled.
+        progress_callback: Reports the listing's progress.
 
-                    # A run revived after a restart checks the files its first run listed, without reading every
-                    # server back again; the checks of the files it had finished were used then (count_checked).
-                    listing = CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY))
-                    if listing is None and LISTING_CONFIG_KEY in cfg:
-                        logger.warning(
-                            "Check servers couldn't read the files it listed before the restart; listing them again"
-                        )
-                    if listing is None:
-                        listing = check_servers_listing(
-                            registry=registry,
-                            store=ctx.store,
-                            max_files=MAX_RETRY_FILES,
-                            capability=lambda server_cfg, publisher: cached_capability(ctx, server_cfg, publisher),
-                            cancel_check=_cancel_check_waiting_out_pause(
-                                job_id=job_id,
-                                cancel_check=cancel_check,
-                                on_pause=lambda: release_slot(slot, get_job_gate()),
-                            ),
-                            progress_callback=progress_callback,
-                        )
-                        if not cancel_check() and jm.merge_job_config(
-                            job_id, {LISTING_CONFIG_KEY: listing.to_config()}
-                        ):
-                            listing_on_job = True
-                    items, warnings, sender_paths = listing.items, listing.warnings, {}
-                else:
-                    items, warnings, sender_paths = build_items(
-                        cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
-                    )
-                    cfg = _with_merged_sender_hints(cfg, items, sender_paths)
-                if cancel_check():
-                    jm.cancel_job(job_id)
-                    return
-                try:
-                    trigger = trigger_words(job, cfg)
-                except Exception as exc:
-                    # A line describing the job mustn't end it.
-                    logger.debug("Couldn't describe what started job {}: {}", job_id, type(exc).__name__)
-                    trigger = ""
-                logger.info("{}", start_line(job_id, len(items), trigger))
-                logger.complete()  # the lines added straight to the job's log below come after it
-                if not items:
-                    if listing is not None:
-                        jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
-                        jm.complete_job(job_id, warning=" | ".join(warnings) or None)
-                    else:
-                        jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
-                    sweep_store = ctx.store
-                    return
-                sent_files = _sends_files(cfg)
-                retries_missing_files = _retries_missing_files(cfg)
-                # Only files just sent were just replaced: a listing's replaced file may have changed days ago, and
-                # servers rescanned it long since. A verify chain checks once.
-                checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
-                # A revived job still owes the later check of the replaced files it published before the restart.
-                # A retry's rows are its chain head's.
-                if checkpoint:
-                    carried, replaced_before_restart, carried_outcomes = {}, set(), {}
-                else:
-                    items, carried, replaced_before_restart, carried_outcomes = _skip_finished_before_restart(
-                        jm, chain_head or job_id, items, ctx.store
-                    )
-                if carried_outcomes:
-                    # The pipeline never decides for a file without an owner; the store may still hold an old run's.
-                    for path, outcome in sorted(carried_outcomes.items()):
-                        if outcome != FileOutcome.NO_OWNERS.value:
-                            ctx.decided_by.add(stored_groups(ctx.store, path))
-                    jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
-                if not items:
-                    jm.set_job_outcome(job_id, carried)
-                    finish_job(jm, job_id, carried, warnings, ctx)
-                    if chain_head:
-                        # A retry revived after a restart that had settled all its files: nothing is left to wait.
-                        _recount_chain_head(jm, chain_head, ctx.store)
-                        _end_chain(jm, cfg, {})
-                    if replaced_before_restart and checks_replaced_later:
-                        _queue_verify(job, cfg, replaced_before_restart, sender_paths)
-                    sweep_store = ctx.store
-                    return
-                waiting = {key: set(values) for key, values in saved.get("waiting", {}).items()}
-                replaced = set(saved.get("replaced", replaced_before_restart))
-                unchecked = {key: set(values) for key, values in saved.get("unchecked", {}).items()}
-                gone_items = {
-                    key: {tuple(value) for value in values} for key, values in saved.get("gone_items", {}).items()
-                }
-
-                def on_file_result(file_path, outcome, reason, worker, servers=None):
-                    # Any server that can take the file later, even when another server was written. Check servers
-                    # retries only a write Plex's busy database refused or a file another job kept running (its next
-                    # run is a day away) and the files whose old item a server confirmed gone (below).
-                    codes = {code for row in servers or [] if (code := retry_reason(row))}
-                    if listing is not None:
-                        codes &= {PLEX_DB_BUSY, FILE_BUSY}
-                    for code in codes:
-                        waiting.setdefault(code, set()).add(file_path)
-                    if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
-                        waiting.setdefault(NOT_ON_DISK, set()).add(file_path)
-                    if any(isinstance(row, dict) and row.get(VERIFY_LATER) for row in servers or []):
-                        replaced.add(file_path)
-                    for row in servers or []:
-                        if isinstance(row, dict) and row.get(READ_BACK_FAILED):
-                            name = str(row.get("server_name") or row.get("server_id") or "a server")
-                            unchecked.setdefault(name, set()).add(file_path)
-                    # Before the row is kept: a restart in between runs the file again, which counts nothing twice.
-                    # A result that comes in after a cancel (the file stopped part way) leaves its checks due.
-                    if listing is not None and not cancel_check():
-                        listing.count_checked(ctx.store, file_path)
-                    jm.record_file_result(
-                        chain_head or job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
-                    )
-                    # The pipeline counted the file before handing its result here (``PipelineContext.decided_by``).
-                    jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
-                    if listing is not None and (gone := _confirmed_gone_items(listing, registry, file_path, servers)):
-                        gone_items[file_path] = gone
-                        waiting.setdefault(NOT_IN_LIBRARY, set()).add(file_path)
-
-                set_file_result_callback(on_file_result, job_id=job_id)
-                # Detected before the settings lock below, so detection never runs while it's held.
-                detected_gpus = _ensure_gpu_cache()
-                selected_gpus = _build_selected_gpus(settings, detected=detected_gpus)
-                dispatcher = get_or_create_dispatcher(config, selected_gpus)
-                _start_decode_checks(ctx, config, selected_gpus)
-                # The running job's pool for the per-job worker routes, as the preview runner registers it; complete_job
-                # and cancel_job clear it.
-                jm.set_active_worker_pool(job_id, dispatcher.worker_pool)
-                # The saved settings, not the config read before the files were listed: a count saved while no pool
-                # existed had nothing to resize. The pool is registered above, so a later save finds it. Read and
-                # resize under the settings lock so a save landing in between (including one after the GPU
-                # selection above was read) isn't undone.
-                try:
-                    with settings.locked():
-                        selected_gpus = _build_selected_gpus(settings, detected=detected_gpus)
-                        if not refresh_worker_groups(dispatcher.worker_pool, config, selected_gpus):
-                            if selected_gpus:
-                                dispatcher.worker_pool.reconcile_gpu_workers(selected_gpus)
-                            dispatcher.worker_pool.reconcile_cpu_workers(settings.cpu_threads)
-                except Exception as exc:
-                    logger.debug("Could not reconcile the worker pool with the saved settings: {}", exc)
-                tracker = dispatcher.submit_items(
-                    job_id=job_id,
-                    items=items,
-                    config=config,
-                    registry=registry,
-                    title_max_width=200,
-                    library_name="",
-                    callbacks={
-                        "progress_callback": progress_callback,
-                        "worker_callback": worker_callback,
-                        "cancel_check": cancel_check,
-                        "pause_check": lambda: (
-                            jm.is_pause_requested(job_id) or get_settings_manager().processing_paused
-                        ),
-                    },
-                    priority=live_priority(),
-                    kind=JOB_KIND_INTRO_CREDITS,
-                    handlers=kind_handlers(ctx),
-                    **({"carried_state": checkpoint["state"]} if checkpoint else {"carried_outcome": carried}),
-                )
-                release_slot(slot, get_job_gate())
-                # The priority route skips the dispatcher while this job has no tracker yet; a change that landed
-                # between reading the priority and registering the tracker would otherwise be lost.
-                current = live_priority()
-                if tracker.priority != current:
-                    dispatcher.update_job_priority(job_id, current)
-
-                def park_check():
-                    park_if_unavailable(
-                        dispatcher,
-                        tracker,
-                        jm,
-                        job_id,
-                        JOB_KIND_INTRO_CREDITS,
-                        lambda: {
-                            "context": snapshot_context(ctx),
-                            "warnings": warnings,
-                            "sender_paths": sender_paths,
-                            "waiting": {key: sorted(values) for key, values in waiting.items()},
-                            "replaced": sorted(replaced),
-                            "unchecked": {key: sorted(values) for key, values in unchecked.items()},
-                            "gone_items": {key: sorted(values) for key, values in gone_items.items()},
-                        },
-                    )
-
-                wait_for_tracker(tracker, cancel_check=cancel_check, park_check=park_check)
-                result = tracker.get_result()
-                _log_missing(ctx)
-                outcome = dict(result["outcome"])  # includes the carried counts
-                jm.set_job_outcome(job_id, outcome)
-                # Worker threads store their snapshots in any order; the last one stored may not be the newest.
-                jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
-                if chain_head and not (result["cancelled"] or cancel_check()):
-                    _recount_chain_head(jm, chain_head, ctx.store)
-                if result["cancelled"] or cancel_check():
-                    jm.cancel_job(job_id)
-                    return
-                # Those files stay "Up to date": a read failure mustn't rewrite them, but it mustn't go unseen either.
-                unchecked_warnings = [
-                    f"Couldn't check what {len(files)} file(s) show on {name}"
-                    for name, files in sorted(unchecked.items())
-                ]
-                # The retry is queued before completing, as the preview runner does: its chain keeps the chain head's
-                # row pending, so completing the head only settles its run's bookkeeping.
-                # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
-                # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
-                # file still waiting keeps its item and is listed again by a later run.
-                retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
-                _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
-                finish_job(
-                    jm,
-                    job_id,
-                    outcome,
-                    [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)],
-                    ctx,
-                    retried=bool(retried),
-                )
-                if chain_head and not retried:
-                    _end_chain(jm, cfg, waiting)
-                if replaced and checks_replaced_later:
-                    _queue_verify(job, cfg, replaced, sender_paths)
-                sweep_store = ctx.store
-            finally:
-                clear_failures()
-    except JobParked:
-        parked = True
-        return True
-    except Exception as exc:
-        # The job's error is served by GET /api/jobs, and exception text can carry a server URL with its token.
-        detail = redact_secrets(f"{type(exc).__name__}: {exc}")
-        logger.error("Intro & Credits job {} failed: {}", job_id, detail)
-        logger.bind(**{JOB_LOG_SKIP: True}).error(
-            "Traceback of Intro & Credits job {}:\n{}", job_id, redacted_traceback(exc)
+    Returns:
+        The items, the warnings, the sender paths and the Check servers listing (None for other jobs).
+    """
+    cfg = state.cfg
+    listing = None
+    if checkpoint:
+        items, warnings, sender_paths = (
+            checkpoint_items(checkpoint),
+            saved.get("warnings", []),
+            saved.get("sender_paths", {}),
         )
-        if dispatcher is not None:
-            # Its checks would otherwise go on publishing for a failed job, without a slot or Files-panel rows.
-            try:
-                dispatcher.cancel_job(job_id)
-            except Exception as cancel_exc:
-                logger.warning("Could not stop the remaining files of Intro & Credits job {}: {}", job_id, cancel_exc)
-        try:
-            jm.complete_job(job_id, error=detail)
-        except Exception as complete_exc:
-            logger.warning("Could not mark Intro & Credits job {} failed: {}", job_id, complete_exc)
-    finally:
-        # Same teardown as the preview runner (web/routes/job_runner.py run_job finally): slot first (a job that
-        # ended before submitting its files still holds one), then per-job flags, then worker cards once nothing
-        # else is running.
-        release_slot(slot, get_job_gate())
-        set_file_result_callback(None, job_id=job_id)
-        jm.clear_pause_flag(job_id)
-        jm.clear_cancellation_flag(job_id)
-        jm.clear_active_worker_pool(job_id)
-        if listing_on_job and not parked:
-            try:
-                jm.merge_job_config(job_id, {}, remove=(LISTING_CONFIG_KEY,))
-            except Exception as exc:
-                logger.debug("Could not drop the Check servers listing of {}: {}", job_id, exc)
-        try:
-            if not jm.get_running_jobs():
-                jm.clear_worker_statuses()
-        except Exception as exc:
-            logger.debug("Could not clear worker statuses after {}: {}", job_id, exc)
-        unregister_job_thread()
-        # After the slot is back, and outside the job's log: a skipped cleanup's warning isn't about this job.
-        if sweep_store is not None:
-            _start_fingerprint_sweep(cfg, sweep_store, sweep_configs)
-        try:
-            loguru_logger.complete()
-            loguru_logger.remove(handler_id)
-        except (ValueError, TypeError):
-            logger.debug("Could not remove the job log handler for {}", job_id)
+        listing = CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY)) if cfg.get("reconcile") else None
+    elif cfg.get("reconcile"):
+        from .reconcile import check_servers_listing
+
+        # A run revived after a restart checks the files its first run listed, without reading every
+        # server back again; the checks of the files it had finished were used then (count_checked).
+        listing = CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY))
+        if listing is None and LISTING_CONFIG_KEY in cfg:
+            logger.warning("Check servers couldn't read the files it listed before the restart; listing them again")
+        if listing is None:
+            listing = check_servers_listing(
+                registry=registry,
+                store=ctx.store,
+                max_files=MAX_RETRY_FILES,
+                capability=lambda server_cfg, publisher: cached_capability(ctx, server_cfg, publisher),
+                cancel_check=_cancel_check_waiting_out_pause(
+                    job_id=job_id,
+                    cancel_check=cancel_check,
+                    on_pause=lambda: release_slot(state.slot, get_job_gate()),
+                ),
+                progress_callback=progress_callback,
+            )
+            if not cancel_check() and jm.merge_job_config(job_id, {LISTING_CONFIG_KEY: listing.to_config()}):
+                state.listing_on_job = True
+        items, warnings, sender_paths = listing.items, listing.warnings, {}
+    else:
+        items, warnings, sender_paths = build_items(
+            cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
+        )
+        state.cfg = _with_merged_sender_hints(cfg, items, sender_paths)
+    return items, warnings, sender_paths, listing
+
+
+def _file_result_callback(
+    *,
+    jm,
+    job_id: str,
+    chain_head: str | None,
+    ctx: PipelineContext,
+    registry,
+    listing: CheckServersListing | None,
+    retries_missing_files: bool,
+    waiting: dict[str, set[str]],
+    replaced: set[str],
+    unchecked: dict[str, set[str]],
+    gone_items: dict[str, set[tuple]],
+    cancel_check: Callable[[], bool],
+) -> Callable:
+    """Build the callback that records each finished file: its Files-panel row and what the job must come back to.
+
+    Args:
+        jm: The job manager.
+        job_id: The job.
+        chain_head: The retry chain's head job whose row takes the files, if the job is a retry.
+        ctx: The job's pipeline context.
+        registry: The media servers registry.
+        listing: The Check servers listing, if the job is one.
+        retries_missing_files: Whether files not on disk wait for a retry.
+        waiting: Files waiting for a retry, by reason (filled in by the callback).
+        replaced: Files whose replacement a later check must verify (filled in).
+        unchecked: Files a server couldn't be read back for, by server name (filled in).
+        gone_items: Items a server confirmed gone, by file (filled in).
+        cancel_check: True once the job is cancelled.
+
+    Returns:
+        The ``on_file_result`` callback.
+    """
+
+    def on_file_result(file_path, outcome, reason, worker, servers=None):
+        # Any server that can take the file later, even when another server was written. Check servers
+        # retries only a write Plex's busy database refused or a file another job kept running (its next
+        # run is a day away) and the files whose old item a server confirmed gone (below).
+        codes = {code for row in servers or [] if (code := retry_reason(row))}
+        if listing is not None:
+            codes &= {PLEX_DB_BUSY, FILE_BUSY}
+        for code in codes:
+            waiting.setdefault(code, set()).add(file_path)
+        if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
+            waiting.setdefault(NOT_ON_DISK, set()).add(file_path)
+        if any(isinstance(row, dict) and row.get(VERIFY_LATER) for row in servers or []):
+            replaced.add(file_path)
+        for row in servers or []:
+            if isinstance(row, dict) and row.get(READ_BACK_FAILED):
+                name = str(row.get("server_name") or row.get("server_id") or "a server")
+                unchecked.setdefault(name, set()).add(file_path)
+        # Before the row is kept: a restart in between runs the file again, which counts nothing twice.
+        # A result that comes in after a cancel (the file stopped part way) leaves its checks due.
+        if listing is not None and not cancel_check():
+            listing.count_checked(ctx.store, file_path)
+        jm.record_file_result(
+            chain_head or job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
+        )
+        # The pipeline counted the file before handing its result here (``PipelineContext.decided_by``).
+        jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
+        if listing is not None and (gone := _confirmed_gone_items(listing, registry, file_path, servers)):
+            gone_items[file_path] = gone
+            waiting.setdefault(NOT_IN_LIBRARY, set()).add(file_path)
+
+    return on_file_result
+
+
+def _start_dispatcher(jm, settings, job_id: str, config, state: _PassState, ctx: PipelineContext):
+    """Get the dispatcher, register its pool for the job and size the pool to the saved settings.
+
+    Args:
+        jm: The job manager.
+        settings: The settings manager.
+        job_id: The job.
+        config: The loaded config.
+        state: The pass state; ``dispatcher`` is set as soon as it exists.
+        ctx: The job's pipeline context.
+
+    Returns:
+        The dispatcher.
+    """
+    # Detected before the settings lock below, so detection never runs while it's held.
+    detected_gpus = _ensure_gpu_cache()
+    selected_gpus = _build_selected_gpus(settings, detected=detected_gpus)
+    dispatcher = state.dispatcher = get_or_create_dispatcher(config, selected_gpus)
+    _start_decode_checks(ctx, config, selected_gpus)
+    # The running job's pool for the per-job worker routes, as the preview runner registers it; complete_job
+    # and cancel_job clear it.
+    jm.set_active_worker_pool(job_id, dispatcher.worker_pool)
+    # The saved settings, not the config read before the files were listed: a count saved while no pool
+    # existed had nothing to resize. The pool is registered above, so a later save finds it. Read and
+    # resize under the settings lock so a save landing in between (including one after the GPU
+    # selection above was read) isn't undone.
+    try:
+        with settings.locked():
+            selected_gpus = _build_selected_gpus(settings, detected=detected_gpus)
+            if not refresh_worker_groups(dispatcher.worker_pool, config, selected_gpus):
+                if selected_gpus:
+                    dispatcher.worker_pool.reconcile_gpu_workers(selected_gpus)
+                dispatcher.worker_pool.reconcile_cpu_workers(settings.cpu_threads)
+    except Exception as exc:
+        logger.debug("Could not reconcile the worker pool with the saved settings: {}", exc)
+    return dispatcher
+
+
+def _run_job(
+    jm,
+    job_id: str,
+    job,
+    settings,
+    state: _PassState,
+    cancel_check: Callable[[], bool],
+    live_priority: Callable[[], int],
+) -> None:
+    """Wait for the job's slot, list its files, run them and finish the job.
+
+    Args:
+        jm: The job manager.
+        job_id: The job to run.
+        job: The job manager's job object.
+        settings: The settings manager.
+        state: The pass state the teardown reads.
+        cancel_check: True once the job is cancelled.
+        live_priority: The job's current priority.
+    """
+    cfg = state.cfg
+    if not _wait_for_job_slot(jm, job_id, job, cfg, state, cancel_check, live_priority):
+        return
+    # The job's own start line (start_line) follows once its files are listed.
+    with logger.contextualize(**{JOB_LOG_SKIP: True}):
+        if cfg.get("parked_checkpoint") or (job.config or {}).get("resource_wait"):
+            jm.resume_parked_job(job_id)
+        else:
+            jm.start_job(job_id)
+    # A retry in a chain shows its run on the chain head's row, and records its files there (below).
+    chain_head = cfg.get("parent_job_id")
+    if chain_head:
+        _upsert_chain(
+            jm,
+            chain_head,
+            attempt=int(cfg.get("retry_attempt") or 0),
+            max_attempts=int(cfg.get("max_retries") or 0),
+            outcome="running",
+        )
+
+    def progress_callback(current, total, message, percent_override=None):
+        if percent_override is not None:
+            percent = percent_override
+        else:
+            percent = (current / total * 100) if total else 0
+        jm.update_progress(job_id, percent=percent, processed_items=current, total_items=total, current_item=message)
+
+    worker_callback = worker_cards(jm)
+
+    config = load_config()
+    # A job following a pinned preview job (and its retries and checks) publishes where the previews did.
+    config.server_id_filter = server_pin(cfg)
+    registry = _build_multi_server_registry()
+    if registry is None:
+        jm.complete_job(job_id, error="Couldn't load the media servers configuration")
+        return
+    cfg = state.cfg = _seal_files(jm, job_id, job, cfg)
+    ctx = build_context(
+        registry=registry,
+        config=config,
+        priority=live_priority,
+        force=bool(cfg.get("force")),
+        recheck_empty_server_markers=bool(cfg.get("reconcile")),
+    )
+    ctx.busy_writes_retried = _retry_follows(cfg)
+    ctx.retry_file_cap = MAX_RETRY_FILES
+    ctx.freeze_check = job_freeze_check(jm, job_id)
+    state.sweep_configs = list(registry.configs())
+    checkpoint = (
+        read_checkpoint(jm.config_dir, job_id, cfg["parked_checkpoint"]) if cfg.get("parked_checkpoint") else None
+    )
+    saved = checkpoint.get("bookkeeping", {}) if checkpoint else {}
+    if checkpoint:
+        restore_context(ctx, saved.get("context", {}))
+    items, warnings, sender_paths, listing = _list_files(
+        jm=jm,
+        job_id=job_id,
+        state=state,
+        ctx=ctx,
+        registry=registry,
+        checkpoint=checkpoint,
+        saved=saved,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+    )
+    cfg = state.cfg
+    if cancel_check():
+        jm.cancel_job(job_id)
+        return
+    try:
+        trigger = trigger_words(job, cfg)
+    except Exception as exc:
+        # A line describing the job mustn't end it.
+        logger.debug("Couldn't describe what started job {}: {}", job_id, type(exc).__name__)
+        trigger = ""
+    logger.info("{}", start_line(job_id, len(items), trigger))
+    logger.complete()  # the lines added straight to the job's log below come after it
+    if not items:
+        if listing is not None:
+            jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
+            jm.complete_job(job_id, warning=" | ".join(warnings) or None)
+        else:
+            jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
+        state.sweep_store = ctx.store
+        return
+    sent_files = _sends_files(cfg)
+    retries_missing_files = _retries_missing_files(cfg)
+    # Only files just sent were just replaced: a listing's replaced file may have changed days ago, and
+    # servers rescanned it long since. A verify chain checks once.
+    checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
+    # A revived job still owes the later check of the replaced files it published before the restart.
+    # A retry's rows are its chain head's.
+    if checkpoint:
+        carried: dict[str, int] = {}
+        replaced_before_restart: set[str] = set()
+        carried_outcomes: dict[str, str] = {}
+    else:
+        items, carried, replaced_before_restart, carried_outcomes = _skip_finished_before_restart(
+            jm, chain_head or job_id, items, ctx.store
+        )
+    if carried_outcomes:
+        # The pipeline never decides for a file without an owner; the store may still hold an old run's.
+        for path, outcome in sorted(carried_outcomes.items()):
+            if outcome != FileOutcome.NO_OWNERS.value:
+                ctx.decided_by.add(stored_groups(ctx.store, path))
+        jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
+    if not items:
+        jm.set_job_outcome(job_id, carried)
+        finish_job(jm, job_id, carried, warnings, ctx)
+        if chain_head:
+            # A retry revived after a restart that had settled all its files: nothing is left to wait.
+            _recount_chain_head(jm, chain_head, ctx.store)
+            _end_chain(jm, cfg, {})
+        if replaced_before_restart and checks_replaced_later:
+            _queue_verify(job, cfg, replaced_before_restart, sender_paths)
+        state.sweep_store = ctx.store
+        return
+    waiting = {key: set(values) for key, values in saved.get("waiting", {}).items()}
+    replaced = set(saved.get("replaced", replaced_before_restart))
+    unchecked = {key: set(values) for key, values in saved.get("unchecked", {}).items()}
+    gone_items = {key: {tuple(value) for value in values} for key, values in saved.get("gone_items", {}).items()}
+
+    set_file_result_callback(
+        _file_result_callback(
+            jm=jm,
+            job_id=job_id,
+            chain_head=chain_head,
+            ctx=ctx,
+            registry=registry,
+            listing=listing,
+            retries_missing_files=retries_missing_files,
+            waiting=waiting,
+            replaced=replaced,
+            unchecked=unchecked,
+            gone_items=gone_items,
+            cancel_check=cancel_check,
+        ),
+        job_id=job_id,
+    )
+    dispatcher = _start_dispatcher(jm, settings, job_id, config, state, ctx)
+    tracker = dispatcher.submit_items(
+        job_id=job_id,
+        items=items,
+        config=config,
+        registry=registry,
+        title_max_width=200,
+        library_name="",
+        callbacks={
+            "progress_callback": progress_callback,
+            "worker_callback": worker_callback,
+            "cancel_check": cancel_check,
+            "pause_check": lambda: jm.is_pause_requested(job_id) or get_settings_manager().processing_paused,
+        },
+        priority=live_priority(),
+        kind=JOB_KIND_INTRO_CREDITS,
+        handlers=kind_handlers(ctx),
+        **({"carried_state": checkpoint["state"]} if checkpoint else {"carried_outcome": carried}),
+    )
+    release_slot(state.slot, get_job_gate())
+    # The priority route skips the dispatcher while this job has no tracker yet; a change that landed
+    # between reading the priority and registering the tracker would otherwise be lost.
+    current = live_priority()
+    if tracker.priority != current:
+        dispatcher.update_job_priority(job_id, current)
+
+    def park_check():
+        park_if_unavailable(
+            dispatcher,
+            tracker,
+            jm,
+            job_id,
+            JOB_KIND_INTRO_CREDITS,
+            lambda: {
+                "context": snapshot_context(ctx),
+                "warnings": warnings,
+                "sender_paths": sender_paths,
+                "waiting": {key: sorted(values) for key, values in waiting.items()},
+                "replaced": sorted(replaced),
+                "unchecked": {key: sorted(values) for key, values in unchecked.items()},
+                "gone_items": {key: sorted(values) for key, values in gone_items.items()},
+            },
+        )
+
+    wait_for_tracker(tracker, cancel_check=cancel_check, park_check=park_check)
+    result = tracker.get_result()
+    _log_missing(ctx)
+    outcome = dict(result["outcome"])  # includes the carried counts
+    jm.set_job_outcome(job_id, outcome)
+    # Worker threads store their snapshots in any order; the last one stored may not be the newest.
+    jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
+    if chain_head and not (result["cancelled"] or cancel_check()):
+        _recount_chain_head(jm, chain_head, ctx.store)
+    if result["cancelled"] or cancel_check():
+        jm.cancel_job(job_id)
+        return
+    # Those files stay "Up to date": a read failure mustn't rewrite them, but it mustn't go unseen either.
+    unchecked_warnings = [
+        f"Couldn't check what {len(files)} file(s) show on {name}" for name, files in sorted(unchecked.items())
+    ]
+    # The retry is queued before completing, as the preview runner does: its chain keeps the chain head's
+    # row pending, so completing the head only settles its run's bookkeeping.
+    # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
+    # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
+    # file still waiting keeps its item and is listed again by a later run.
+    retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
+    _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
+    finish_job(
+        jm,
+        job_id,
+        outcome,
+        [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)],
+        ctx,
+        retried=bool(retried),
+    )
+    if chain_head and not retried:
+        _end_chain(jm, cfg, waiting)
+    if replaced and checks_replaced_later:
+        _queue_verify(job, cfg, replaced, sender_paths)
+    state.sweep_store = ctx.store
 
 
 def start_intro_credits_job_async(job_id: str, config_overrides: dict | None = None) -> None:

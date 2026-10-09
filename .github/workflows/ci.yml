@@ -80,6 +80,29 @@ jobs:
         with:
           args: -color
 
+  typecheck:
+    # Report-only: never blocks merges and is not in the `test` job's needs. The step (not the job) may fail, so the
+    # check stays green and the errors stay readable in its log.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs full history
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + mypy
+        run: pip install -e ".[dev]"
+
+      - name: mypy
+        continue-on-error: true
+        run: mypy
+
   unit:
     # Shards the unit suite 3 ways so the required `test` check (below) only has to wait on
     # the slowest shard, not the whole unit suite serially. A repo ruleset requires a

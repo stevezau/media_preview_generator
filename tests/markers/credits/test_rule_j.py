@@ -2018,7 +2018,7 @@ class TestOverlayBoxes:
     )
     def test_how_far_inside_the_bug_a_box_has_to_lie(self, card, dropped):
         overlay = (0, 4, 48, 26)
-        inside = rule_j._inside(card, overlay)
+        inside = rule_j.inside(card, overlay)
         assert (inside >= rule_j.OVERLAY_CONTAINMENT) is dropped, inside
         assert rule_j._iou(card, overlay) < rule_j.OVERLAY_IOU  # overlap alone would keep every one of them
         kept = rule_j.without_overlays([(1000.0, 1, 8.0, (card,))], (overlay,))

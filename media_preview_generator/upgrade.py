@@ -1551,7 +1551,7 @@ def _migrate_to_v14(sm) -> list:
 
 
 def _migrate_to_v15(sm) -> list:
-    """Seed the Intro & Credits global block and a disabled per-server block (spec §8).
+    """Seed the Intro & Credits global block and a disabled per-server block.
 
     The feature is off until enabled per server, so this migration is purely additive: it seeds
     ``markers`` (global detection settings) when absent, and adds a disabled ``markers`` block to

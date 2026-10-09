@@ -184,7 +184,7 @@ def lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(module, "get_job_gate", lambda: gate)
     monkeypatch.setattr(jobs, "get_job_manager", lambda: manager)
     monkeypatch.setattr(job, "load_config", lambda: config)
-    monkeypatch.setattr(job, "_build_multi_server_registry", lambda config: registry)
+    monkeypatch.setattr(job, "_build_multi_server_registry", lambda: registry)
     monkeypatch.setattr(job, "_ensure_gpu_cache", lambda: [])
     monkeypatch.setattr(job, "_build_selected_gpus", lambda *args, **kwargs: [])
     monkeypatch.setattr(job, "get_or_create_dispatcher", lambda *args: dispatcher)

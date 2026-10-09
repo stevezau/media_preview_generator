@@ -704,7 +704,7 @@ def _rating_key(item_id: str) -> int:
     return int(bare)
 
 
-class _Part(NamedTuple):
+class Part(NamedTuple):
     id: int
     media_item_id: int
     file: str
@@ -725,18 +725,18 @@ def _same_extra_data(a: str | None, b: str | None) -> bool:
     return {k: v for k, v in da.items() if k != "url"} == {k: v for k, v in db.items() if k != "url"}
 
 
-def _is_optimized_copy(part: _Part) -> bool:
+def _is_optimized_copy(part: Part) -> bool:
     # Plex's "Optimize" transcodes carry media_items.proxy_type and live under a "Plex Versions" folder. Both must hold:
     # an unknown proxy_type on an ordinary file still takes part in the version agreement.
     return bool(part.proxy_type) and "Plex Versions" in part.file.replace("\\", "/").split("/")
 
 
-def _version_files(parts: list[_Part]) -> tuple[str, ...]:
+def _version_files(parts: list[Part]) -> tuple[str, ...]:
     """The item's versions as its sorted part files, Plex's optimized copies left out (they take no part in agreement)."""
     return tuple(sorted(p.file for p in parts if not _is_optimized_copy(p)))
 
 
-def _same_files(a: list[_Part], b: list[_Part]) -> bool:
+def _same_files(a: list[Part], b: list[Part]) -> bool:
     """The same parts, files and versions (extra_data and the time a part changed aside: an app older than this
     code sends no time)."""
     return [p._replace(extra_data=None, updated_at=None) for p in a] == [
@@ -779,7 +779,7 @@ def _nothing_to_write(plan: _Plan) -> bool:
 
 
 def _refresh_final_types(
-    parts: list[_Part], wanted: list[Marker], duration_ms: int | None, keep_plex: bool
+    parts: list[Part], wanted: list[Marker], duration_ms: int | None, keep_plex: bool
 ) -> frozenset[MarkerType]:
     """The types whose rows and ``pv:`` key are rewritten when they serve the wanted times with a stale ``final`` flag.
 
@@ -879,7 +879,7 @@ def _epoch(value: object) -> int | None:
     return seconds if seconds > 0 else None
 
 
-def _types_not_made_for_file(rows: list[_TaggingRow], parts: list[_Part]) -> frozenset[MarkerType]:
+def _types_not_made_for_file(rows: list[_TaggingRow], parts: list[Part]) -> frozenset[MarkerType]:
     """The types whose marker rows were made for an earlier file at this path (stale).
 
     Plex's markers belong to the metadata item, so they outlive a file replacement (a show's markers detected against old Blu-ray
@@ -910,7 +910,7 @@ def _types_not_made_for_file(rows: list[_TaggingRow], parts: list[_Part]) -> fro
     return frozenset(stale)
 
 
-def _a_part_records(mtype: MarkerType, rows: list[_TaggingRow], parts: list[_Part]) -> bool | None:
+def _a_part_records(mtype: MarkerType, rows: list[_TaggingRow], parts: list[Part]) -> bool | None:
     """Whether a live part's ``pv:`` key holds these rows' times; None when a part's key can't be read.
 
     Compared as stored (``time_offset``/``end_time_offset`` against ``startTimeOffset``/``endTimeOffset``), which Plex
@@ -938,7 +938,7 @@ class ItemRead(NamedTuple):
     """One item as Plex's database has it right now."""
 
     exists: bool  # the database knows this rating key at all
-    parts: list[_Part]  # its live files (deleted parts and items in Plex's trash left out)
+    parts: list[Part]  # its live files (deleted parts and items in Plex's trash left out)
     # Types whose rows were made for an earlier file at this path (``_types_not_made_for_file``); None when not read
     # (an agent older than this field).
     stale_types: frozenset[MarkerType] | None = None
@@ -948,7 +948,7 @@ class WriteRequest(NamedTuple):
     """One item's write: everything the decision half worked out, and the parts it worked it out for."""
 
     rating_key: int
-    parts: list[_Part]  # the item's parts when ``wanted`` was decided; a different set now stops the write
+    parts: list[Part]  # the item's parts when ``wanted`` was decided; a different set now stops the write
     wanted: list[Marker]  # the markers the item should show, this server's types only
     prior: list[Marker]  # what this app last left on the item
     duration_ms: int | None
@@ -1151,14 +1151,14 @@ class LocalPlexDb(PlexDatabase):
                 _check_marker_array(key, value)
 
     @staticmethod
-    def _item_parts(conn: sqlite3.Connection, rating_key: int) -> list[_Part]:
+    def _item_parts(conn: sqlite3.Connection, rating_key: int) -> list[Part]:
         rows = conn.execute(
             "SELECT mp.id, mp.media_item_id, mp.file, mp.extra_data, mi.proxy_type, mp.updated_at FROM media_parts mp "
             "JOIN media_items mi ON mi.id = mp.media_item_id "
             "WHERE mi.metadata_item_id=? AND mp.deleted_at IS NULL AND mi.deleted_at IS NULL ORDER BY mp.id",
             (rating_key,),
         ).fetchall()
-        return [_Part(*row) for row in rows]
+        return [Part(*row) for row in rows]
 
     @staticmethod
     def _item_rows(conn: sqlite3.Connection, rating_key: int, tag_id: int) -> list[_TaggingRow]:
@@ -1430,7 +1430,7 @@ class LocalPlexDb(PlexDatabase):
         conn: sqlite3.Connection,
         rating_key: int,
         tag_id: int,
-        parts: list[_Part],
+        parts: list[Part],
         wanted: list[Marker],
         prior: list[Marker],
         duration_ms: int | None,
@@ -1559,7 +1559,7 @@ class LocalPlexDb(PlexDatabase):
         conn: sqlite3.Connection,
         deadline: float,
         rating_key: int,
-        parts: list[_Part],
+        parts: list[Part],
         wanted: list[Marker],
         prior: list[Marker],
         duration_ms: int | None,
@@ -1631,7 +1631,7 @@ class LocalPlexDb(PlexDatabase):
         ours: list[Marker],
         kept_types: frozenset[MarkerType],
         item_files: tuple[str, ...] | None,
-    ) -> tuple[Shown, list[_Part]]:
+    ) -> tuple[Shown, list[Part]]:
         """One item's rows compared with ``ours`` on an open connection, and the item's live parts.
 
         ``ours`` is already projected to the types this publisher writes (``ShownAsk``).
@@ -1903,7 +1903,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         return None
 
     def _desired(
-        self, parts: list[_Part], markers: list[Marker], canonical_path: str, prior: list[Marker]
+        self, parts: list[Part], markers: list[Marker], canonical_path: str, prior: list[Marker]
     ) -> list[Marker]:
         """The item's marker set: per type, the decision of the first version in Plex's order that has one.
 

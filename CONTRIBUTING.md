@@ -54,6 +54,7 @@ pip install -e ".[dev,test]"
 # Verify
 pytest
 ruff check .
+mypy  # type check (non-blocking in CI)
 ```
 
 ### Running the Application

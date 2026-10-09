@@ -98,6 +98,7 @@ test = [
 dev = [
     "media-preview-generator[test]",
     "ruff>=0.6.0",
+    "mypy>=1.13",
     "pre-commit>=3.6.0",
 ]
 
@@ -184,6 +185,13 @@ fallback_version = "0.0.0+unknown"
 # `plugin-v10.11.0.1` (the Jellyfin plugin's own version stream) and ends up
 # producing 4-segment versions that fail the PEP 440 regex.
 git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "[0-9]*.[0-9]*.[0-9]*"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["media_preview_generator"]
+ignore_missing_imports = true
+warn_unused_ignores = false
+show_error_codes = true
 
 [tool.ruff]
 line-length = 120

@@ -236,7 +236,7 @@ def _iou(a: Box, b: Box) -> float:
     return both / ((a[2] - a[0] + 1) * (a[3] - a[1] + 1) + (b[2] - b[0] + 1) * (b[3] - b[1] + 1) - both)
 
 
-def _inside(box: Box, holder: Box) -> float:
+def inside(box: Box, holder: Box) -> float:
     """The share of ``box`` that lies inside ``holder``."""
     left, top = max(box[0], holder[0]), max(box[1], holder[1])
     right, bottom = min(box[2], holder[2]), min(box[3], holder[3])
@@ -341,7 +341,7 @@ def without_overlays(rows: Sequence[Row], overlays: Sequence[Box]) -> list[Row]:
             out.append(row)
             continue
         kept = tuple(
-            box for box in row[3] if not any(_inside(box, overlay) >= OVERLAY_CONTAINMENT for overlay in overlays)
+            box for box in row[3] if not any(inside(box, overlay) >= OVERLAY_CONTAINMENT for overlay in overlays)
         )
         out.append((row[0], len(kept), row[2], kept))
     return out

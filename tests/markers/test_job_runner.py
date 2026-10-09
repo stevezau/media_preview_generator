@@ -317,7 +317,7 @@ def env(monkeypatch):
     config = MagicMock(ffmpeg_path="/usr/bin/ffmpeg")
     monkeypatch.setattr(job_runner, "load_config", lambda: config)
     registry = MagicMock()
-    monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
+    monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: registry)
     gpus = [("nvidia", "/dev/nvidia0", {"workers": 1})]
     monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda settings, **kw: gpus)
     ctx = MagicMock()
@@ -1267,7 +1267,7 @@ class TestRun:
         if ends == "cancelled-waiting-for-a-slot":
             env.gate.acquire.return_value = False
         else:
-            monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: None)
+            monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: None)
         self._run()
         env.dispatcher.submit_items.assert_not_called()
         env.jm.merge_job_config.assert_called_once_with("j1", {}, remove=(reconcile.LISTING_CONFIG_KEY,))
@@ -1468,7 +1468,7 @@ class TestRun:
         env.gate.release.assert_called_once_with()
 
     def test_registry_unavailable_fails_the_job(self, env, monkeypatch):
-        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: None)
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: None)
         self._run()
         assert "media servers" in env.jm.complete_job.call_args.kwargs["error"]
         env.dispatcher.submit_items.assert_not_called()
@@ -2690,7 +2690,7 @@ class TestCheckServersUsesChecksAsFilesRun:
                 "jf-1": server_config("jf-1", ServerType.JELLYFIN, root=str(root)),
             }
         )
-        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: registry)
         monkeypatch.setattr(reconcile, "_utcnow", lambda: clock["t"])
         monkeypatch.setattr(job_runner, "start_fingerprint_sweep", MagicMock(return_value=True))
         env.ctx.store = store
@@ -3144,7 +3144,7 @@ class TestRetryCarriesTheSenderPath:
             markers={"enabled": True, "library_ids": None, "plex": {"db_write_confirmed_at": "x"}},
         )
         reg = FakeRegistry({"plex-1": cfg})
-        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: reg)
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: reg)
         settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
         env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
         env.job.library_name = "Show - S01E01.mkv"

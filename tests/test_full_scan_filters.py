@@ -151,7 +151,7 @@ def test_filters_reach_real_adapters_before_dispatch(
             assert totals["processed"] == totals["failed"] == 0
         items = dispatch.call_args.args[0] if dispatch.called else []
     else:
-        monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda: registry)
         monkeypatch.setattr(orchestrator, "_dispatch_processable_items", dispatch)
         warnings = []
         counts = orchestrator._run_full_scan_multi_server(config, selected_gpus=[], warnings_out=warnings)
@@ -178,7 +178,7 @@ def test_relative_cutoff_is_shared_across_servers_and_fresh_for_each_run(monkeyp
     ]
     registry = MagicMock()
     registry.configs.return_value = servers
-    monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda cfg: registry)
+    monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda: registry)
     snapshots = []
     processor = MagicMock()
 
@@ -204,7 +204,7 @@ def test_recently_added_automation_does_not_apply_full_scan_filters(monkeypatch:
     server = ServerConfig(id="server", type=ServerType.JELLYFIN, name="Test", enabled=True, url="http://test", auth={})
     registry = MagicMock()
     registry.configs.return_value = [server]
-    monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda cfg: registry)
+    monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda: registry)
     processor = MagicMock()
     media = ProcessableItem(canonical_path="/media/old-season.mkv", server_id="server")
     processor.scan_recently_added.return_value = iter([media])

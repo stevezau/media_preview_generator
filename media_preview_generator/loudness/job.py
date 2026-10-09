@@ -614,7 +614,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     _chain_state(jm, chain_head, cfg, "running")
                 config = load_config()
                 config.server_id_filter = server_pin(cfg)
-                registry = _build_multi_server_registry(config)
+                registry = _build_multi_server_registry()
                 if registry is None:
                     raise RuntimeError("Couldn't load the media servers configuration")
                 if cfg.get("parked_checkpoint"):
@@ -645,7 +645,7 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                     if chain_head:
                         _finish_chain(jm, chain_head, cfg, warnings, attempt_id=job_id)
                     return
-                carried = {}
+                carried: dict[str, int] = {}
                 loudness_ffmpeg = analyze.resolve_ffmpeg(getattr(config, "ffmpeg_path", None) or "ffmpeg")
                 logger.info("{}: using {}", LABEL, loudness_ffmpeg)
                 ctx = LoudnessContext(

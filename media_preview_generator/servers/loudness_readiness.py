@@ -62,7 +62,7 @@ def loudness_readiness_section(
         logger.debug("Loudness readiness probe failed for {} ({})", server.id, type(exc).__name__)
         ready = False
         reason = "Could not check loudness analysis. Check the Plex connection and try Setup Health again."
-    checks = [
+    checks: list[dict[str, Any]] = [
         {
             "id": "loudness_registration",
             "label": "Loudness measurements can be stored" if ready else "Loudness measurements cannot be stored",

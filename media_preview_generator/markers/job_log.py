@@ -683,7 +683,12 @@ def _written_phrase(result: ServerResult, name: str) -> str:
         had_by_type = {t: m for t, m in had_by_type.items() if t not in result.kept}
     order = list(MarkerType)
     all_types = sorted({*new_by_type, *(had_by_type or {})}, key=order.index)
-    added, added_same, replaced, unchanged, removed, unread = [], [], [], [], [], []
+    added: list[str] = []
+    added_same: list[str] = []
+    replaced: list[str] = []
+    unchanged: list[str] = []
+    removed: list[str] = []
+    unread: list[str] = []
     for mtype in all_types:
         new = new_by_type.get(mtype)
         had = (had_by_type or {}).get(mtype)

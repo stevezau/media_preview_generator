@@ -115,7 +115,7 @@ class TestRetryThroughThePipeline:
                     recheck_empty_server_markers=recheck_empty_server_markers,
                 )
 
-            monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)
+            monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: registry)
             monkeypatch.setattr(job_runner, "build_context", build_context)
             monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
             return registry, publishers
@@ -854,7 +854,7 @@ class TestRealJobThread:
             outcome_keys=("markers_published", "failed"),
             check_share=0.25,
         )
-        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: MagicMock())
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: MagicMock())
         # The real job manager stores the context's counts on the job, so those have to be real.
         monkeypatch.setattr(
             job_runner,
@@ -918,7 +918,7 @@ class TestCreditTextOnTheWorkers:
         monkeypatch.setattr(
             job_runner, "_build_selected_gpus", lambda s, **kw: [("NVIDIA", "cuda:0", {"name": "Test GPU"})]
         )
-        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: registry)
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
 
         def build_context(
@@ -1360,7 +1360,7 @@ class TestACancelStopsTheFileWheneverItLands:
         monkeypatch.setattr(
             job_runner, "_build_selected_gpus", lambda s, **kw: [("NVIDIA", "cuda:0", {"name": "Test GPU"})]
         )
-        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda: registry)
         monkeypatch.setattr(job_runner, "build_context", build_context)
         monkeypatch.setattr(job_runner, "run_detector_checks", lambda *args, **kwargs: None)
         # Every decode loop asks the job's freeze check once per poll: a poll held there hasn't looked at the cancel.

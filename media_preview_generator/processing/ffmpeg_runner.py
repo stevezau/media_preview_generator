@@ -33,6 +33,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from typing import Any
 
 from loguru import logger
 
@@ -493,8 +494,8 @@ def create_ffmpeg_runner(
             # Track progress
             total_duration = None
             speed_local = "0.0x"
-            ffmpeg_output_lines = deque(maxlen=256) if active_timeout_s is not None else []
-            sticky_diagnostics = []
+            ffmpeg_output_lines: Any = deque(maxlen=256) if active_timeout_s is not None else []
+            sticky_diagnostics: list[str] = []
             last_progress_time = time.time()
             stalled = False
             gpu_cant_decode = False

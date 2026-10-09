@@ -6,11 +6,8 @@
 .dashboard-layout .num, .dashboard-layout .dash-stat-value { font-variant-numeric: tabular-nums; }
 
 /* ---- primitives ---- */
-.dashboard-layout .pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--inset); color: var(--muted); white-space: nowrap; letter-spacing: normal; text-transform: none; }
-.dashboard-layout .pill.ok { background: var(--ok-soft); color: var(--ok); }
 .dashboard-layout .pill.bad { background: var(--bad-soft); color: var(--bad); }
 .dashboard-layout .pill.run { background: var(--run-soft); color: var(--run); }
-.dashboard-layout .pill.warn { background: var(--warn-soft); color: var(--warn); }
 .dashboard-layout .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; display: inline-block; }
 .dashboard-layout .dot.ok { background: var(--ok); }
 .dashboard-layout .dot.run { background: var(--run); }
@@ -73,8 +70,7 @@
 .dashboard-layout .pool-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: var(--radius-ctl); background: var(--inset); min-width: 0; }
 .dashboard-layout .pool-row.is-off .pool-name { color: var(--faint); }
 .dashboard-layout .pool-ico { color: var(--muted); font-size: 16px; }
-.dashboard-layout .pool-lbl { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 0 8px; }
-.dashboard-layout .pool-lbl { flex-wrap: wrap; }
+.dashboard-layout .pool-lbl { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 0 8px; flex-wrap: wrap; }
 .dashboard-layout .pool-name { font-size: 14px; font-weight: 600; line-height: 1.3; flex: none; max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
 .dashboard-layout .pool-lbl small { color: var(--faint); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-layout .pool-row .cap { width: 24px; height: 24px; font-size: 12px; }
@@ -88,8 +84,7 @@
 .dashboard-layout .dash-qa-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: 10px; }
 .dashboard-layout .dash-qa-links button.dash-tile-link { background: transparent; text-align: left; font: inherit; cursor: pointer; }
 .dashboard-layout .dash-qa-links button.dash-tile-link:disabled { opacity: .6; cursor: not-allowed; }
-.dashboard-layout .dash-tile-link { min-height: 44px; position: relative; }
-.dashboard-layout .dash-tile-link { min-width: 0; }
+.dashboard-layout .dash-tile-link { min-height: 44px; position: relative; min-width: 0; }
 .dashboard-layout .dash-tile-link > span { min-width: 0; }
 .dashboard-layout .dash-tile-link small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-layout .dash-tile-link b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

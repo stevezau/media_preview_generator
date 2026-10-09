@@ -109,7 +109,7 @@ def test_full_scan_submits_requested_order(
         )
         items = dispatch.call_args.args[0]
     else:
-        monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(orchestrator, "_build_multi_server_registry", lambda: registry)
         dispatch = MagicMock(return_value={})
         monkeypatch.setattr(orchestrator, "_dispatch_processable_items", dispatch)
         orchestrator._run_full_scan_multi_server(config, selected_gpus=[])

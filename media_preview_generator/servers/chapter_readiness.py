@@ -38,7 +38,7 @@ def chapter_readiness_section(
         ready = False
         reason = "Could not check chapter registration. Check the Plex connection and try Setup Health again."
 
-    registration = {
+    registration: dict[str, Any] = {
         "id": "chapter_registration",
         "label": "Chapter thumbnails can be registered" if ready else "Chapter thumbnails cannot be registered",
         "docs_anchor": "chapter-thumbnails",

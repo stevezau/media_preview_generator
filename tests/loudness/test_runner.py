@@ -65,7 +65,7 @@ def run(monkeypatch, tmp_path):
         "get_job_gate": lambda: gate,
         "get_settings_manager": lambda: SimpleNamespace(processing_paused=False, get=settings.get),
         "load_config": lambda: MagicMock(ffmpeg_path="ffmpeg"),
-        "_build_multi_server_registry": lambda config: MagicMock(),
+        "_build_multi_server_registry": lambda: MagicMock(),
         "build_items": lambda cfg, **kw: (items, [], {}),
         "_ensure_gpu_cache": lambda: [],
         "_build_selected_gpus": lambda *a, **kw: [],
@@ -280,7 +280,7 @@ def test_waiting_for_a_slot_and_listing_files_show_on_the_job(run, monkeypatch):
 
 
 def test_a_missing_server_configuration_fails_the_job(run, monkeypatch):
-    monkeypatch.setattr(job, "_build_multi_server_registry", lambda config: None)
+    monkeypatch.setattr(job, "_build_multi_server_registry", lambda: None)
     job.run_loudness_job("j1")
     assert "media servers configuration" in run["jm"].complete_job.call_args.kwargs["error"]
     run["gate"].release.assert_called_once()

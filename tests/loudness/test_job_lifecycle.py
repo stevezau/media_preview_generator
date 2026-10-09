@@ -190,7 +190,7 @@ def test_retry_failure_before_listing_closes_parent_chain(
     path = lifecycle.add_file("waiting.mkv")
     parent = lifecycle.start([path])
     (child,) = lifecycle.children(parent)
-    monkeypatch.setattr(job, "_build_multi_server_registry", lambda config: None)
+    monkeypatch.setattr(job, "_build_multi_server_registry", lambda: None)
     lifecycle.retry(child)
     assert child.status is JobStatus.FAILED
     assert parent.status is JobStatus.FAILED
@@ -216,7 +216,7 @@ def test_retry_with_missing_parent_stops_before_processing(lifecycle: Lifecycle)
 def test_retry_keeps_sender_path_for_mapping_on_next_attempt(lifecycle: Lifecycle) -> None:
     path = lifecycle.add_file("waiting.mkv")
     sender = "/sender/waiting.mkv"
-    cfg = job._build_multi_server_registry(None).get_config("plex")
+    cfg = job._build_multi_server_registry().get_config("plex")
     cfg.path_mappings = [{"remote_prefix": "/sender", "local_prefix": str(lifecycle.media)}]
     cfg.libraries = [Library(id="1", name="Movies", remote_paths=("/sender",), kind="movie", enabled=True)]
     with sqlite3.connect(lifecycle.database) as conn:
@@ -239,7 +239,7 @@ def test_large_remapped_retry_survives_restart_without_omitting_waiting_files(
 
     paths = [lifecycle.add_file(f"waiting-{index:03}.mkv") for index in range(501)]
     senders = [f"/sender/{Path(path).name}" for path in paths]
-    cfg = job._build_multi_server_registry(None).get_config("plex")
+    cfg = job._build_multi_server_registry().get_config("plex")
     cfg.path_mappings = [{"remote_prefix": "/sender", "local_prefix": str(lifecycle.media)}]
     cfg.libraries = [Library(id="1", name="Movies", remote_paths=("/sender",), kind="movie", enabled=True)]
     with sqlite3.connect(lifecycle.database) as conn:

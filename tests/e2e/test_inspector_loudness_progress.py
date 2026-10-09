@@ -33,7 +33,7 @@ def test_real_worker_paths_drive_live_inspector(
     env = lifecycle
     env.api_ready = True
     paths = [env.add_file("first.mkv"), env.add_file("second.mkv")]
-    registry = job._build_multi_server_registry(None)
+    registry = job._build_multi_server_registry()
     cfg = registry.get_config("plex")
     cfg.path_mappings = [
         {"remote_prefix": str(env.media), "local_prefix": str(env.media), "webhook_prefixes": ["/sender"]}

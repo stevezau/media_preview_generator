@@ -746,6 +746,34 @@ class EmbyServer(EmbyApiClient):
         warning) and nothing blocks preview playback, so
         ``overall_ok`` is always True.
         """
+        sections, connection_ok = self._connection_version_sections()
+
+        marker_sections, markers_section_ok = self._markers_sections()
+        sections.extend(marker_sections)
+
+        sections.append(self._library_settings_section())
+        sections.append(self._vendor_extraction_section())
+
+        scheduled_section = self._scheduled_trickplay_section()
+        if scheduled_section is not None:
+            sections.append(scheduled_section)
+        sched_section_ok = scheduled_section is None or bool(scheduled_section["ok"])
+
+        return {
+            "vendor": "emby",
+            # Emby library-flag issues are advisory; scheduled-task absence
+            # breaks registration entirely, so it joins overall_ok. So does a
+            # missing markers plugin on a server set to receive markers.
+            "overall_ok": connection_ok and sched_section_ok and markers_section_ok,
+            "sections": sections,
+        }
+
+    def _connection_version_sections(self) -> tuple[list[dict[str, Any]], bool]:
+        """Build the ``connection`` and ``version`` sections.
+
+        Returns:
+            ``(sections, connection_ok)``.
+        """
         sections: list[dict[str, Any]] = []
 
         version_value, connection_reason = self._probe_system_version()
@@ -823,7 +851,15 @@ class EmbyServer(EmbyApiClient):
                 ],
             }
         )
+        return sections, connection_ok
 
+    def _markers_sections(self) -> tuple[list[dict[str, Any]], bool]:
+        """Build the Intro & Credits ``plugin`` / ``markers`` section, if any applies.
+
+        Returns:
+            ``(sections, markers_section_ok)``; the flag is False only on a critical plugin failure.
+        """
+        sections: list[dict[str, Any]] = []
         # --- Intro & Credits -----------------------
         # Built from the facts the Intro & Credits tab already asked for, never a second probe; a server with
         # the feature off gets the one row that says so and nothing else. The section id is
@@ -847,8 +883,14 @@ class EmbyServer(EmbyApiClient):
                 markers_section_ok = not any(
                     check["ok"] is False and check["severity"] == "critical" for check in plugin_section["checks"]
                 )
+        return sections, markers_section_ok
 
-        # --- Library settings — per-library per-flag rows ------------
+    def _library_settings_section(self) -> dict[str, Any]:
+        """Build the per-library per-flag ``library_settings`` section.
+
+        Returns:
+            The section dict.
+        """
         library_checks: list[dict[str, Any]] = []
         library_section_ok = True
         try:
@@ -942,18 +984,21 @@ class EmbyServer(EmbyApiClient):
                 }
             )
 
-        sections.append(
-            {
-                "id": "library_settings",
-                "title": "Library settings",
-                "docs_anchor": "library-settings",
-                "ok": library_section_ok,
-                "severity": "recommended" if not library_section_ok else "info",
-                "checks": library_checks,
-            }
-        )
+        return {
+            "id": "library_settings",
+            "title": "Library settings",
+            "docs_anchor": "library-settings",
+            "ok": library_section_ok,
+            "severity": "recommended" if not library_section_ok else "info",
+            "checks": library_checks,
+        }
 
-        # --- Vendor-side extraction ---------------------------------
+    def _vendor_extraction_section(self) -> dict[str, Any]:
+        """Build the ``vendor_extraction`` section.
+
+        Returns:
+            The section dict.
+        """
         try:
             extraction_status = self.get_vendor_extraction_status()
         except Exception as exc:
@@ -962,75 +1007,79 @@ class EmbyServer(EmbyApiClient):
         stopped = extraction_status.get("stopped_count", 0)
         extracting = extraction_status.get("extracting_count", 0)
         vendor_current = f"stopped on {stopped}/{stopped + extracting}" if (stopped + extracting) else "unknown"
-        sections.append(
-            {
-                "id": "vendor_extraction",
-                "title": "Vendor-side preview generation",
-                "docs_anchor": "vendor-extraction",
-                "ok": True,
-                "severity": "info",
-                "checks": [
-                    {
-                        "id": "vendor_extraction_state",
-                        "label": "Emby scan-time extraction",
-                        "docs_anchor": "vendor-extraction",
-                        "tooltip": "Stop Emby running its own preview extraction",
-                        "explanation": (
-                            "<p><strong>What this controls:</strong> a server-wide shortcut for "
-                            "disabling Emby's own preview extraction (trickplay + chapter images) "
-                            "across every configured library in one batch.</p>"
-                            "<p><strong>Why we recommend stopping it:</strong> this app handles "
-                            "preview generation end-to-end (GPU-accelerated, HDR-aware, frame-"
-                            "reuse caching). Letting Emby ALSO extract during scans is "
-                            "duplicate CPU — both sets of images land in the same place, but "
-                            "you've burned twice the work.</p>"
-                            "<p><strong>What happens if you re-enable:</strong> Emby starts "
-                            "extracting its own preview images during library scans in parallel "
-                            "to this app. Wasteful but non-destructive.</p>"
-                        ),
-                        "ok": True,
-                        "severity": "info",
-                        "current": vendor_current,
-                        "recommended": "stopped",
-                        "actions": {
-                            "disable": {
-                                "action": "set_vendor_extraction",
-                                "args": {"scan_extraction": False},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Stops Emby running its own trickplay + chapter-image "
-                                        "extraction during library scans across all libraries. "
-                                        "Recommended when this app owns preview generation. "
-                                        "Non-destructive — existing previews stay on disk and "
-                                        "continue to work."
-                                    ),
-                                },
-                            },
-                            "enable": {
-                                "action": "set_vendor_extraction",
-                                "args": {"scan_extraction": True},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Re-enables Emby's scan-time preview extraction across "
-                                        "all libraries. Emby will generate its OWN preview "
-                                        "images in parallel to this app — duplicate CPU, no "
-                                        "data loss. Useful only if you plan to stop using this "
-                                        "app for Emby previews."
-                                    ),
-                                },
+        return {
+            "id": "vendor_extraction",
+            "title": "Vendor-side preview generation",
+            "docs_anchor": "vendor-extraction",
+            "ok": True,
+            "severity": "info",
+            "checks": [
+                {
+                    "id": "vendor_extraction_state",
+                    "label": "Emby scan-time extraction",
+                    "docs_anchor": "vendor-extraction",
+                    "tooltip": "Stop Emby running its own preview extraction",
+                    "explanation": (
+                        "<p><strong>What this controls:</strong> a server-wide shortcut for "
+                        "disabling Emby's own preview extraction (trickplay + chapter images) "
+                        "across every configured library in one batch.</p>"
+                        "<p><strong>Why we recommend stopping it:</strong> this app handles "
+                        "preview generation end-to-end (GPU-accelerated, HDR-aware, frame-"
+                        "reuse caching). Letting Emby ALSO extract during scans is "
+                        "duplicate CPU — both sets of images land in the same place, but "
+                        "you've burned twice the work.</p>"
+                        "<p><strong>What happens if you re-enable:</strong> Emby starts "
+                        "extracting its own preview images during library scans in parallel "
+                        "to this app. Wasteful but non-destructive.</p>"
+                    ),
+                    "ok": True,
+                    "severity": "info",
+                    "current": vendor_current,
+                    "recommended": "stopped",
+                    "actions": {
+                        "disable": {
+                            "action": "set_vendor_extraction",
+                            "args": {"scan_extraction": False},
+                            "confirm": {
+                                "kind": "button",
+                                "phrase": "",
+                                "body": (
+                                    "Stops Emby running its own trickplay + chapter-image "
+                                    "extraction during library scans across all libraries. "
+                                    "Recommended when this app owns preview generation. "
+                                    "Non-destructive — existing previews stay on disk and "
+                                    "continue to work."
+                                ),
                             },
                         },
-                        "reason": None,
-                        "meta": extraction_status,
-                    }
-                ],
-            }
-        )
+                        "enable": {
+                            "action": "set_vendor_extraction",
+                            "args": {"scan_extraction": True},
+                            "confirm": {
+                                "kind": "button",
+                                "phrase": "",
+                                "body": (
+                                    "Re-enables Emby's scan-time preview extraction across "
+                                    "all libraries. Emby will generate its OWN preview "
+                                    "images in parallel to this app — duplicate CPU, no "
+                                    "data loss. Useful only if you plan to stop using this "
+                                    "app for Emby previews."
+                                ),
+                            },
+                        },
+                    },
+                    "reason": None,
+                    "meta": extraction_status,
+                }
+            ],
+        }
 
+    def _scheduled_trickplay_section(self) -> dict[str, Any] | None:
+        """Build the ``scheduled_trickplay`` section for Emby's daily trickplay task.
+
+        Returns:
+            The section dict, or ``None`` when the task isn't present.
+        """
         # --- Scheduled "Generate Trickplay Images" task --------------
         # Emby has no Bridge-plugin equivalent — this app publishes
         # sidecar tile files and relies on Emby's filename-based
@@ -1039,105 +1088,93 @@ class EmbyServer(EmbyApiClient):
         # path entirely, so the recommendation here is always "keep
         # enabled" — purely informational on Emby.
         sched_state = self.get_scheduled_trickplay_state()
-        if sched_state.get("found"):
-            triggers_count = int(sched_state.get("triggers_count") or 0)
-            task_running = (sched_state.get("state") or "").lower() == "running"
-            sched_explanation = (
-                "<p><strong>What this task does:</strong> Emby's built-in "
-                "<code>Generate Trickplay Images</code> scheduled task scans every video "
-                "in your libraries and ingests sidecar trickplay tiles (the ones this app "
-                "publishes) into Emby's database so the player can serve them.</p>"
-                "<p><strong>Why it matters on Emby:</strong> unlike Jellyfin (which has a "
-                "Bridge-plugin path for instant registration), Emby's only registration "
-                "path is this scheduled task. This app writes the tile files next to your "
-                "media; Emby's daily task discovers them and wires them up. Disable the "
-                "task and tiles sit on disk indefinitely — trickplay never appears in the "
-                "player.</p>"
-                "<p><strong>Recommendation:</strong> keep this enabled on Emby.</p>"
-            )
-            if triggers_count > 0:
-                running_note = " (currently running)" if task_running else ""
-                sched_check = {
-                    "id": "scheduled_trickplay_task",
-                    "label": "Emby's daily 'Generate Trickplay Images' task",
-                    "docs_anchor": "scheduled-trickplay",
-                    "tooltip": "Keep enabled — Emby's only path to register the tiles this app publishes.",
-                    "explanation": sched_explanation,
-                    "ok": True,
-                    "severity": "info",
-                    "current": f"enabled ({triggers_count} trigger{'s' if triggers_count != 1 else ''}){running_note}",
-                    "recommended": "keep enabled",
-                    "actions": {},
-                    "reason": None,
-                    "meta": sched_state,
-                }
-                sched_section_ok = True
-                sched_section_severity = "info"
-            else:
-                sched_check = {
-                    "id": "scheduled_trickplay_task",
-                    "label": "Emby's daily 'Generate Trickplay Images' task",
-                    "docs_anchor": "scheduled-trickplay",
-                    "tooltip": (
-                        "Critical: Emby has no other way to discover the tiles this app "
-                        "publishes — trickplay will never appear in the player."
-                    ),
-                    "explanation": (
-                        sched_explanation + "<p><strong>Your setup:</strong> the task has no triggers. Tiles "
-                        "this app publishes will never be registered. Re-enable the task in "
-                        "Emby → Dashboard → Scheduled Tasks.</p>"
-                    ),
-                    "ok": False,
-                    "severity": "critical",
-                    "current": "disabled (no triggers)",
-                    "recommended": "enabled (Emby has no other registration path)",
-                    # Recommended fix on Emby = re-enable. Without the
-                    # explicit hint, the JS direction-picker would treat
-                    # the string ``recommended`` as truthy and pick the
-                    # ``enable`` action by accident — same outcome in
-                    # this case but lucky, not principled. Pin it.
-                    "fix_action": "enable",
-                    "actions": {
-                        "enable": {
-                            "action": "set_scheduled_trickplay",
-                            "args": {"enabled": True},
-                            "confirm": {
-                                "kind": "button",
-                                "phrase": "",
-                                "body": (
-                                    "Restores the default daily 3 AM trigger. Without this "
-                                    "task running, Emby will never discover the tiles this "
-                                    "app publishes — trickplay will not appear in the player."
-                                ),
-                            },
+        if not sched_state.get("found"):
+            return None
+        triggers_count = int(sched_state.get("triggers_count") or 0)
+        task_running = (sched_state.get("state") or "").lower() == "running"
+        sched_explanation = (
+            "<p><strong>What this task does:</strong> Emby's built-in "
+            "<code>Generate Trickplay Images</code> scheduled task scans every video "
+            "in your libraries and ingests sidecar trickplay tiles (the ones this app "
+            "publishes) into Emby's database so the player can serve them.</p>"
+            "<p><strong>Why it matters on Emby:</strong> unlike Jellyfin (which has a "
+            "Bridge-plugin path for instant registration), Emby's only registration "
+            "path is this scheduled task. This app writes the tile files next to your "
+            "media; Emby's daily task discovers them and wires them up. Disable the "
+            "task and tiles sit on disk indefinitely — trickplay never appears in the "
+            "player.</p>"
+            "<p><strong>Recommendation:</strong> keep this enabled on Emby.</p>"
+        )
+        if triggers_count > 0:
+            running_note = " (currently running)" if task_running else ""
+            sched_check = {
+                "id": "scheduled_trickplay_task",
+                "label": "Emby's daily 'Generate Trickplay Images' task",
+                "docs_anchor": "scheduled-trickplay",
+                "tooltip": "Keep enabled — Emby's only path to register the tiles this app publishes.",
+                "explanation": sched_explanation,
+                "ok": True,
+                "severity": "info",
+                "current": f"enabled ({triggers_count} trigger{'s' if triggers_count != 1 else ''}){running_note}",
+                "recommended": "keep enabled",
+                "actions": {},
+                "reason": None,
+                "meta": sched_state,
+            }
+            sched_section_ok = True
+            sched_section_severity = "info"
+        else:
+            sched_check = {
+                "id": "scheduled_trickplay_task",
+                "label": "Emby's daily 'Generate Trickplay Images' task",
+                "docs_anchor": "scheduled-trickplay",
+                "tooltip": (
+                    "Critical: Emby has no other way to discover the tiles this app "
+                    "publishes — trickplay will never appear in the player."
+                ),
+                "explanation": (
+                    sched_explanation + "<p><strong>Your setup:</strong> the task has no triggers. Tiles "
+                    "this app publishes will never be registered. Re-enable the task in "
+                    "Emby → Dashboard → Scheduled Tasks.</p>"
+                ),
+                "ok": False,
+                "severity": "critical",
+                "current": "disabled (no triggers)",
+                "recommended": "enabled (Emby has no other registration path)",
+                # Recommended fix on Emby = re-enable. Without the
+                # explicit hint, the JS direction-picker would treat
+                # the string ``recommended`` as truthy and pick the
+                # ``enable`` action by accident — same outcome in
+                # this case but lucky, not principled. Pin it.
+                "fix_action": "enable",
+                "actions": {
+                    "enable": {
+                        "action": "set_scheduled_trickplay",
+                        "args": {"enabled": True},
+                        "confirm": {
+                            "kind": "button",
+                            "phrase": "",
+                            "body": (
+                                "Restores the default daily 3 AM trigger. Without this "
+                                "task running, Emby will never discover the tiles this "
+                                "app publishes — trickplay will not appear in the player."
+                            ),
                         },
                     },
-                    "reason": None,
-                    "meta": sched_state,
-                }
-                sched_section_ok = False
-                sched_section_severity = "critical"
-
-            sections.append(
-                {
-                    "id": "scheduled_trickplay",
-                    "title": "Scheduled trickplay task",
-                    "docs_anchor": "scheduled-trickplay",
-                    "ok": sched_section_ok,
-                    "severity": sched_section_severity,
-                    "checks": [sched_check],
-                }
-            )
-        else:
-            sched_section_ok = True
+                },
+                "reason": None,
+                "meta": sched_state,
+            }
+            sched_section_ok = False
+            sched_section_severity = "critical"
 
         return {
-            "vendor": "emby",
-            # Emby library-flag issues are advisory; scheduled-task absence
-            # breaks registration entirely, so it joins overall_ok. So does a
-            # missing markers plugin on a server set to receive markers.
-            "overall_ok": connection_ok and sched_section_ok and markers_section_ok,
-            "sections": sections,
+            "id": "scheduled_trickplay",
+            "title": "Scheduled trickplay task",
+            "docs_anchor": "scheduled-trickplay",
+            "ok": sched_section_ok,
+            "severity": sched_section_severity,
+            "checks": [sched_check],
         }
 
     def apply_recommended_settings(self, flags: list[str] | None = None) -> dict[str, str]:
