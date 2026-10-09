@@ -452,6 +452,71 @@ class TestEmbyWebhook:
         # Path mapping translated /em/movies/Foo.mkv -> /data/movies/Foo.mkv.
         assert proc.call_args.kwargs["canonical_path"] == "/data/movies/Foo.mkv"
 
+    def test_per_server_url_picks_the_named_server_when_two_emby_servers_exist(self, client, auth_headers, monkeypatch):
+        """The URL's id is ours, not Emby's ServerId; with two Emby servers it must still pick the named one."""
+
+        def emby(server_id: str, local: str) -> dict:
+            return {
+                "id": server_id,
+                "type": "emby",
+                "name": server_id,
+                "enabled": True,
+                "url": f"http://{server_id}:8096",
+                "auth": {"method": "api_key", "api_key": "k"},
+                "libraries": [{"id": "1", "name": "Movies", "remote_paths": ["/em/movies"], "enabled": True}],
+                "path_mappings": [{"remote_prefix": "/em", "local_prefix": local}],
+            }
+
+        _seed_servers([emby("emby-1", "/one"), emby("emby-2", "/two")])
+
+        from media_preview_generator.servers.emby import EmbyServer
+
+        monkeypatch.setattr(EmbyServer, "resolve_item_to_remote_path", lambda self, item_id: "/em/movies/Foo.mkv")
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job",
+            return_value="job-fake-12345678",
+        ) as proc:
+            response = client.post(
+                "/api/webhooks/server/emby-2",
+                headers={**auth_headers, "Content-Type": "application/json"},
+                data=json.dumps(
+                    {"Event": "library.new", "Item": {"Id": "em-42"}, "Server": {"Id": "vendor-server-id"}}
+                ),
+            )
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        proc.assert_called_once()
+        assert proc.call_args.kwargs["server_id_filter"] == "emby-2"
+        assert proc.call_args.kwargs["canonical_path"] == "/two/movies/Foo.mkv"
+
+    def test_per_server_url_ignores_another_vendors_payload(self, client, auth_headers):
+        _seed_servers(
+            [
+                {
+                    "id": "emby-1",
+                    "type": "emby",
+                    "name": "Emby",
+                    "enabled": True,
+                    "url": "http://emby:8096",
+                    "auth": {"method": "api_key", "api_key": "k"},
+                }
+            ]
+        )
+        plex_payload = {"event": "library.new", "Metadata": {"ratingKey": "1", "title": "Foo", "type": "movie"}}
+
+        with patch("media_preview_generator.web.webhook_router.create_vendor_webhook_job") as proc:
+            response = client.post(
+                "/api/webhooks/server/emby-1",
+                headers=auth_headers,
+                data={"payload": json.dumps(plex_payload)},
+                content_type="multipart/form-data",
+            )
+
+        assert response.status_code == 202
+        assert response.get_json()["status"] == "ignored"
+        proc.assert_not_called()
+
     def test_irrelevant_event_returns_202(self, client, auth_headers):
         """Emby's playback events shouldn't trigger preview work."""
         _seed_servers(

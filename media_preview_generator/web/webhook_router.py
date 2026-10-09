@@ -205,6 +205,30 @@ def _match_registry_server(
     return None, None
 
 
+def _explicit_registry_server(
+    registry: ServerRegistry,
+    *,
+    kind: str,
+    server_id: str,
+) -> tuple[MediaServer | None, ServerConfig | None]:
+    """Return the configured server a per-server webhook URL names, when it is enabled and of the payload's type.
+
+    Args:
+        registry: The live server registry.
+        kind: The payload's vendor (``plex``, ``emby`` or ``jellyfin``).
+        server_id: Our own server id from the URL.
+
+    Returns:
+        ``(live_server, config)``, or ``(None, None)`` when the id is unknown, disabled or another vendor's.
+    """
+    expected_type = {"plex": ServerType.PLEX, "emby": ServerType.EMBY, "jellyfin": ServerType.JELLYFIN}.get(kind)
+    server_cfg = registry.get_config(server_id)
+    live_server = registry.get(server_id)
+    if server_cfg is None or live_server is None or not server_cfg.enabled or server_cfg.type is not expected_type:
+        return None, None
+    return live_server, server_cfg
+
+
 def _path_from_path_payload(payload: dict[str, Any]) -> str | None:
     """Pull a path out of a Sonarr/Radarr/templated payload."""
     path = payload.get("path")
@@ -262,12 +286,16 @@ def _resolve_to_canonical_paths(
         return [(path, {})], ""
 
     if kind in ("plex", "emby", "jellyfin"):
-        server_id_hint = explicit_server_id or _server_id_from_payload(kind, payload)
-        live_server, server_cfg = _match_registry_server(
-            registry,
-            kind=kind,
-            server_id_hint=server_id_hint,
-        )
+        if explicit_server_id:
+            # The per-server URL names our own server id, not the vendor's self-reported identity, so look it up
+            # directly; matching it as an identity only worked while one server of that type was configured.
+            live_server, server_cfg = _explicit_registry_server(registry, kind=kind, server_id=explicit_server_id)
+        else:
+            live_server, server_cfg = _match_registry_server(
+                registry,
+                kind=kind,
+                server_id_hint=_server_id_from_payload(kind, payload),
+            )
         if live_server is None or server_cfg is None:
             return [], f"could not match {kind} webhook to a configured server"
 

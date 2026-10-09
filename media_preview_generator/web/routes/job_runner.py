@@ -48,6 +48,22 @@ _inflight_lock = threading.Lock()
 _CONFIG_ATTRIBUTE_OVERRIDES = frozenset({"regenerate_thumbnails", "sort_by"}) | FILTER_CONFIG_KEYS
 
 
+def _pins_non_plex_server(media_servers: object, server_id: str) -> bool:
+    """Whether ``server_id`` names a configured Emby or Jellyfin server rather than a Plex one.
+
+    Args:
+        media_servers: The ``media_servers`` setting.
+        server_id: The job's pinned server id.
+
+    Returns:
+        True when the pinned entry exists and is not Plex.
+    """
+    for entry in media_servers if isinstance(media_servers, list) else []:
+        if isinstance(entry, dict) and entry.get("id") == server_id:
+            return (entry.get("type") or "").lower() != "plex"
+    return False
+
+
 def job_freeze_check(jm, job_id: str):
     """The ``freeze_check`` for a previews job: True while its running files' ffmpeg must stop where it is.
 
@@ -829,9 +845,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             # say "Plex" with no disambiguation.
             if server_display_name:
                 config.server_display_name = server_display_name
-            elif pinned_server_id and not server_display_name:
-                # Caller asked for a specific server but derive_legacy_plex_view
-                # didn't find it — log a WARN so misuse is easy to spot.
+            elif pinned_server_id and not _pins_non_plex_server(settings.get("media_servers"), pinned_server_id):
+                # Caller asked for a specific Plex server but derive_legacy_plex_view didn't find it — log a WARN so
+                # misuse is easy to spot. A job pinned to an Emby or Jellyfin server has no Plex view by design.
                 logger.warning(
                     "Job pinned to server_id={!r} but no matching Plex entry was found; "
                     "falling back to the first-enabled Plex view. "
