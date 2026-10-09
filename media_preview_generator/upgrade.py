@@ -27,8 +27,7 @@ from .config.validation import MAX_CPU_THREADS, validate_processing_thread_total
 # -------------------------------------------------------------------------
 _CURRENT_SCHEMA_VERSION = 23
 
-#: Legacy request written by v16, v17, v18 and v20. Kept for migration compatibility; it no longer creates jobs.
-#: Existing decide-again jobs clear it when they complete. Manual and scheduled runs apply current marker rules.
+#: A flag earlier dev builds of v16, v17, v18 and v20 wrote and nothing reads; v23 deletes it.
 DECIDE_AGAIN_KEY = "_markers_decide_again"
 
 #: Count of consecutive v14 attempts that failed on IO. The version gate
@@ -174,8 +173,9 @@ _ENV_MIGRATION_MAP = [
     ("PLEX_CONFIG_FOLDER", "plex_config_folder", str, None),
     ("PLEX_VERIFY_SSL", "plex_verify_ssl", bool, True),
     ("PLEX_TIMEOUT", "plex_timeout", int, 60),
-    ("PLEX_BIF_FRAME_INTERVAL", "thumbnail_interval", int, None),
+    # Both seed thumbnail_interval; the first one set wins, so the current name goes first.
     ("THUMBNAIL_INTERVAL", "thumbnail_interval", int, None),
+    ("PLEX_BIF_FRAME_INTERVAL", "thumbnail_interval", int, None),
     ("THUMBNAIL_QUALITY", "thumbnail_quality", int, None),
     ("TONEMAP_ALGORITHM", "tonemap_algorithm", str, None),
     ("CPU_THREADS", "cpu_threads", int, None),
@@ -293,7 +293,7 @@ def _migrate_env_vars(sm) -> None:
     migrated_keys: list[str] = []
 
     for env_name, settings_key, val_type, _default in _ENV_MIGRATION_MAP:
-        if sm.get(settings_key) is not None:
+        if sm.get(settings_key) is not None or settings_key in updates:
             continue
         raw = os.environ.get(env_name, "").strip()
         if not raw:
@@ -421,9 +421,15 @@ def _migrate_schema(sm) -> None:
               has a server to route to.  Legacy ``plex_*`` keys are
               kept (read-path compatibility) and removed in a later
               migration once all callers have been updated.
+        v8 -- Moves global ``path_mappings`` / ``exclude_paths`` into ``media_servers[0]``.
+        v9 -- Dedupes per-server ``path_mappings`` and ``exclude_paths`` that v7 + v8 doubled.
+        v10 -- Rewrites the Plex Direct webhook URL ``/plex`` to ``/incoming`` and drops per-server
+               ``output.webhook_secret`` keys.
         v11 -- Seeds the ``frame_reuse`` block (enabled, ttl_minutes,
                max_cache_disk_mb) so cross-server webhook reuse is on
                by default. Tunable under Settings → Performance.
+        v12 -- Renames the legacy ``plex-default`` server id to a generated UUID, in the settings and the files that
+               name it.
         v13 -- Aligns per-server ``output.frame_interval`` with the global
                ``thumbnail_interval`` for upgraders whose Jellyfin/Emby
                entries pre-date the field or whose Plex entry drifted from
@@ -439,8 +445,8 @@ def _migrate_schema(sm) -> None:
         v17 -- Retains the legacy flag for season audio guard changes (network idents and cold-open music).
         v18 -- Retains the legacy flag for season audio timing and online/server marker rule changes.
                These flags no longer create jobs; the next manual or scheduled run uses current rules.
-        v19 -- Marks a pause with no workers configured as the zero-workers auto-pause, so the settings save that
-               adds workers back resumes processing on installs paused before that pause was flagged.
+        v19 -- Marks a pause with no workers configured as the zero-workers auto-pause, or removes a persisted flag the
+               settings no longer match, so a later save can't resume the user's own pause.
         v20 -- Retains the legacy flag for removing Needs review. The next manual or scheduled run decides
                existing files again; each type ends decided or with nothing found.
         v21 -- Introduces authoritative worker groups (from ``cpu_threads``/``gpu_config`` when absent) and separately
@@ -1350,8 +1356,9 @@ def _migrate_to_v12(sm) -> list:
                         h["server_id"] = new_id
                         n += 1
             if n:
-                with open(webhook_history, "w") as fh:
-                    json.dump(history, fh, indent=2)
+                from .utils import atomic_json_save_with_backup
+
+                atomic_json_save_with_backup(str(webhook_history), history)
                 runtime_notes.append(f"webhook_history.json: rewrote {n} entries")
         except Exception as exc:
             logger.warning(
@@ -1580,16 +1587,13 @@ def _migrate_to_v15(sm) -> list:
 
 
 def _migrate_to_v16(sm) -> list:
-    """Drop ``markers.publish_when`` and have the files in Needs review decided again (owner ruling 2026-09-24).
+    """Drop ``markers.publish_when``.
 
     The "Publish when" High/Medium choice is gone: every decision is made at Medium's rules
     (``markers.decide.APP_PUBLISH_WHEN``), where one source that checks the file itself may decide alone. High was the
     default and almost nobody chose it, and it left most of a library in Needs review, so the stored key carries no
     choice worth keeping. A settings.json that still has it reads fine without this step (``validate_global`` drops
     it); the step only tidies it away.
-
-    The historical :data:`DECIDE_AGAIN_KEY` is preserved for migration compatibility. Files previously held in
-    Needs review use the current rules on the next manual or scheduled Find markers run.
 
     Runs once, gated on ``_schema_version``.
 
@@ -1599,35 +1603,33 @@ def _migrate_to_v16(sm) -> list:
     """
     markers = sm.get("markers")
     if not isinstance(markers, dict) or "publish_when" not in markers:
-        sm.set(DECIDE_AGAIN_KEY, True)
         return []
     kept = {key: value for key, value in markers.items() if key != "publish_when"}
-    sm.apply_changes(updates={"markers": kept, DECIDE_AGAIN_KEY: True})
+    sm.apply_changes(updates={"markers": kept})
     if markers["publish_when"] != "high":
         return []
     return ["v16: removed the Intro & Credits publish rule High; every file is decided at Medium's rules now"]
 
 
 def _migrate_to_v17(sm) -> list:
-    """Have the files whose intro rests on season audio decided again (owner ruling 2026-09-24).
+    """Have the files whose intro rests on season audio decided again .
 
     Season audio's version 5 passes over a repeated stretch that is only a network ident, or music under the cold
     open, where version 4 took it for the intro (``markers.audio.season``: 13 of 15 intros of one A&E show were such a
-    stretch). A stored answer from version 4 is matched again on the file's next manual or scheduled run. The
-    historical :data:`DECIDE_AGAIN_KEY` is retained for compatibility and no longer creates a job.
+    stretch). A stored answer from version 4 is matched again on the file's next manual or scheduled run; nothing in the
+    settings changes.
 
     Runs once, gated on ``_schema_version``.
 
     Returns:
-        No notes: the historical request flag is retained for compatibility.
+        No notes.
     """
-    sm.set(DECIDE_AGAIN_KEY, True)
     return []
 
 
 def _migrate_to_v18(sm) -> list:
     """Have the files in Needs review, those whose intro rests on season audio, and those whose intro or credits rests
-    on an online answer and a server's own marker alone decided again (owner, 2026-09-24).
+    on an online answer and a server's own marker alone decided again .
 
     A 25 fps release of a film-rate show plays 4.3 % fast. Season audio matches a season that mixes such releases with
     film-rate ones at one speed (``markers.audio.season.SeasonClock``), where version 5 matched no pair across the two
@@ -1638,15 +1640,13 @@ def _migrate_to_v18(sm) -> list:
     online answer and a server's own marker alone may be film-rate times confirmed by a Plex marker made for an earlier
     file of the item: on the file's run Plex's answer is read again and flagged (``Candidate.stale``), or, from a Plex
     server that shows our markers now, an older version's answer stops counting (``pipeline._drop_older_reader_answer``).
-    A stored older answer is matched again on the file's next manual or scheduled run. The historical
-    :data:`DECIDE_AGAIN_KEY` is retained for compatibility and no longer creates a job.
+    A stored older answer is matched again on the file's next manual or scheduled run; nothing in the settings changes.
 
     Runs once, gated on ``_schema_version``.
 
     Returns:
-        No notes: the historical request flag is retained for compatibility.
+        No notes.
     """
-    sm.set(DECIDE_AGAIN_KEY, True)
     return []
 
 
@@ -1663,7 +1663,9 @@ def _migrate_to_v19(sm) -> list:
     The flag ends up exactly "paused and no workers": one that doesn't match (a ``settings.json.bak`` restored next
     to a pause of the user's, or to no pause at all) is removed, so a later save can't resume the user's own pause.
 
-    Runs once, gated on ``_schema_version``, and a re-run finds the flag already right.
+    Runs once, gated on ``_schema_version``, and a re-run finds the flag already right. ``_migrate_schema`` runs it
+    only when the flag is already persisted (inferring one would make v21 mistake an ambiguous manual pause for a
+    proven auto-pause), so in practice only the cleanup branch fires there.
 
     Returns:
         A note when the flag was set or removed.
@@ -1684,11 +1686,10 @@ def _migrate_to_v19(sm) -> list:
 
 
 def _migrate_to_v20(sm) -> list:
-    """Have the files the old rules left in Needs review decided again (owner, 2026-10-02).
+    """Have the files the old rules left in Needs review decided again .
 
     Needs review is gone: every marker type ends decided or with nothing found. Existing rows are decided again on
-    the next manual or scheduled Find markers run. The historical :data:`DECIDE_AGAIN_KEY` is retained for migration
-    compatibility and no longer creates a job. Until then the old row reads as nothing found (``store._status``).
+    the next manual or scheduled Find markers run. Until then the old row reads as nothing found (``store._status``).
 
     Runs once, gated on ``_schema_version``.
 
@@ -1698,7 +1699,6 @@ def _migrate_to_v20(sm) -> list:
         (``_migrate_schema._run``), and the dashboard tells the user where their Needs review files went. No note
         otherwise (every install has a ``markers`` block since v15, so the block alone says nothing).
     """
-    sm.set(DECIDE_AGAIN_KEY, True)
     if not _intro_credits_on_any_server(sm):
         return []
     return ["v20: removed Needs review; run Find markers manually or with a schedule to decide those files again"]
@@ -1733,7 +1733,7 @@ def _migrate_to_v21(sm) -> list[str]:
 
 
 def _migrate_to_v22(sm) -> list[str]:
-    """Give every worker group a member list: each v21 group becomes one group with one member (owner, 2026-10-07).
+    """Give every worker group a member list: each v21 group becomes one group with one member .
 
     Ids, names, hours, counts and job types are kept, and each member is ``m1``, so live worker ownership and the
     dashboard are unchanged. The revision moves on so an editor left open across the upgrade reloads instead of
@@ -1754,13 +1754,17 @@ def _migrate_to_v22(sm) -> list[str]:
 
 
 def _migrate_to_v23(sm) -> list[str]:
-    """Delete ``max_concurrent_jobs``: the worker groups decide how much runs at once (owner, 2026-10-09).
+    """Delete ``max_concurrent_jobs``: the worker groups decide how much runs at once.
 
     A job now holds a fixed start-up slot only until its files are submitted, so the old cap has nothing to bound.
+    Also drops the unread :data:`DECIDE_AGAIN_KEY` that earlier dev builds of v16-v20 left behind.
     """
-    if "max_concurrent_jobs" not in sm.get_all():
+    stored = sm.get_all()
+    stale = [key for key in ("max_concurrent_jobs", DECIDE_AGAIN_KEY) if key in stored]
+    if stale:
+        sm.apply_changes(deletes=stale)
+    if "max_concurrent_jobs" not in stale:
         return []
-    sm.apply_changes(deletes=["max_concurrent_jobs"])
     return ["v23: removed the Max concurrent jobs setting; workers now decide how much runs at once"]
 
 

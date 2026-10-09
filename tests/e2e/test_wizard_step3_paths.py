@@ -57,8 +57,6 @@ class TestPlexConfigFolderValidation:
 
         cfg = wizard_page.locator("#wizardPlexConfigFolder")
         cfg.fill("/plex")
-        # Validator is debounced 400ms; wait it out + a buffer.
-        wizard_page.wait_for_timeout(700)
         expect(cfg).to_have_class("form-control is-valid")
 
     def test_invalid_path_paints_is_invalid_with_error(self, wizard_page: Page, app_url_wizard: str) -> None:
@@ -70,7 +68,6 @@ class TestPlexConfigFolderValidation:
 
         cfg = wizard_page.locator("#wizardPlexConfigFolder")
         cfg.fill("/nope")
-        wizard_page.wait_for_timeout(700)
         expect(cfg).to_have_class("form-control is-invalid")
         # The error message lands in the sibling .invalid-feedback.
         feedback = cfg.locator("..").locator(".invalid-feedback")
@@ -125,7 +122,6 @@ class TestPathMappingRows:
         wizard_page.locator("#setupAdvancedDetails > summary").click()
         local_input = wizard_page.locator("#setupPathMappingsContainer .path-mapping-row .path-mapping-local").first
         local_input.fill("/nope/not/here")
-        wizard_page.wait_for_timeout(700)
         expect(local_input).to_have_class("form-control form-control-sm path-mapping-local is-invalid")
 
 

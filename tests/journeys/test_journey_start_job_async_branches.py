@@ -28,7 +28,6 @@ D34 dispatcher → ``process_canonical_path`` regression for months.
 from __future__ import annotations
 
 import json
-import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -102,15 +101,6 @@ def app(tmp_path, monkeypatch):
                 "webhook_delay": 0,
                 "webhook_retry_count": 3,
                 "webhook_retry_delay": 30,
-                # Retry chains re-enter _start_job_async from inside a job
-                # that already holds a JobGate slot. In production each
-                # attempt gets its own daemon thread, so the parent's slot
-                # is released while the child waits; under the conftest
-                # sync-thread shim the whole chain runs nested on ONE
-                # thread and every attempt holds a slot simultaneously.
-                # A 3-attempt chain therefore needs 3 concurrent slots —
-                # more than the default cap of 3 leaves to normal-priority
-                # work once one slot is reserved for high priority.
                 "media_servers": [
                     {
                         "id": "plex-1",
@@ -146,15 +136,6 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv("CONFIG_DIR", str(config_dir))
     reset_settings_manager()
     return create_app(config_dir=str(config_dir))
-
-
-def _wait_for(predicate, timeout=3.0, interval=0.02):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +469,9 @@ class TestStartJobAsyncRetryBranch:
             job = get_job_manager().create_job(
                 library_name="The Show",
                 config={"source": "sonarr"},
+                server_id="emby-1",
+                server_name="Living Room Emby",
+                server_type="emby",
             )
             _start_job_async(
                 job.id,
@@ -517,6 +501,9 @@ class TestStartJobAsyncRetryBranch:
             f"{[(j.id, j.library_name, (j.config or {}).get('is_retry')) for j in all_jobs]}"
         )
         retry = retry_jobs[0]
+        assert (retry.server_id, retry.server_name, retry.server_type) == ("emby-1", "Living Room Emby", "emby"), (
+            "the retry must stay scoped to the server that fired the webhook"
+        )
         assert retry.config.get("retry_attempt") == 1, (
             f"First retry must carry retry_attempt=1; got {retry.config.get('retry_attempt')!r}"
         )

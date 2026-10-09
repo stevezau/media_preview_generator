@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -38,35 +37,13 @@ from media_preview_generator.servers import ServerRegistry
 
 
 @pytest.fixture
-def dedup_config(tmp_path, plex_credentials):
-    config = MagicMock()
-    config.plex_url = plex_credentials["PLEX_URL"]
-    config.plex_token = plex_credentials["PLEX_ACCESS_TOKEN"]
-    config.plex_timeout = 60
-    config.plex_libraries = ["Movies"]
-    config.plex_config_folder = str(tmp_path / "plex_config")
-    Path(config.plex_config_folder).mkdir(parents=True, exist_ok=True)
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
+def dedup_config(live_config, tmp_path, plex_credentials):
+    live_config.plex_url = plex_credentials["PLEX_URL"]
+    live_config.plex_token = plex_credentials["PLEX_ACCESS_TOKEN"]
+    live_config.plex_libraries = ["Movies"]
+    live_config.plex_config_folder = str(tmp_path / "plex_config")
+    Path(live_config.plex_config_folder).mkdir(parents=True, exist_ok=True)
+    return live_config
 
 
 @pytest.fixture
@@ -144,6 +121,7 @@ class TestLateWebhookFollowsSonarr:
             return original_generate(*args, **kwargs)
 
         ms_module.generate_images = _spy
+        plex_bif = None
         try:
             # ----- 1st webhook (Sonarr) -----
             first = process_canonical_path(
@@ -184,12 +162,10 @@ class TestLateWebhookFollowsSonarr:
             ms_module.generate_images = original_generate
             if emby_sidecar.exists():
                 emby_sidecar.unlink()
-            try:
-                if plex_bif.exists():
-                    plex_bif.unlink()
-            except NameError:
-                pass
-            clear_meta([emby_sidecar, plex_bif] if "plex_bif" in locals() else [emby_sidecar])
+            outputs = [emby_sidecar] + ([plex_bif] if plex_bif else [])
+            for output in outputs:
+                output.unlink(missing_ok=True)
+            clear_meta(outputs)
 
 
 @pytest.mark.integration
@@ -228,6 +204,7 @@ class TestSourceReplacedRegens:
             return original_generate(*args, **kwargs)
 
         ms_module.generate_images = _spy
+        plex_bif = None
         try:
             # ----- 1st publish: real run, journal stamped -----
             first = process_canonical_path(
@@ -281,15 +258,10 @@ class TestSourceReplacedRegens:
 
             if emby_sidecar.exists():
                 emby_sidecar.unlink()
-            try:
-                if plex_bif.exists():
-                    plex_bif.unlink()
-            except NameError:
-                pass
-            try:
-                clear_meta([emby_sidecar, plex_bif])
-            except NameError:
-                clear_meta([emby_sidecar])
+            outputs = [emby_sidecar] + ([plex_bif] if plex_bif else [])
+            for output in outputs:
+                output.unlink(missing_ok=True)
+            clear_meta(outputs)
 
 
 @pytest.mark.integration
@@ -317,6 +289,7 @@ class TestRegenerateClearsJournal:
             return original_generate(*args, **kwargs)
 
         ms_module.generate_images = _spy
+        plex_bif = None
         try:
             # 1st: stamps the journal.
             first = process_canonical_path(
@@ -349,12 +322,7 @@ class TestRegenerateClearsJournal:
             ms_module.generate_images = original_generate
             if emby_sidecar.exists():
                 emby_sidecar.unlink()
-            try:
-                if plex_bif.exists():
-                    plex_bif.unlink()
-            except NameError:
-                pass
-            try:
-                clear_meta([emby_sidecar, plex_bif])
-            except NameError:
-                clear_meta([emby_sidecar])
+            outputs = [emby_sidecar] + ([plex_bif] if plex_bif else [])
+            for output in outputs:
+                output.unlink(missing_ok=True)
+            clear_meta(outputs)

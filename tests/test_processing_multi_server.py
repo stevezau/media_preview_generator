@@ -213,19 +213,19 @@ class TestSiblingMountProbe:
     disk after a post-import script), probe the other configured local
     mounts before declaring the source missing.
 
-    Reproduces job 1089f843: Plex returned /data_16tb3/Sports/X.mkv but
-    the file was actually at /data_16tb/Sports/X.mkv. Without the probe,
+    Plex returned /data_disk3/Sports/X.mkv but
+    the file was actually at /data_disk/Sports/X.mkv. Without the probe,
     the dispatcher hit SKIPPED_FILE_NOT_FOUND and (with D33) scheduled
     a retry that would have failed identically every time."""
 
     def test_finds_file_at_sibling_mount_when_canonical_stale(self, mock_config_for_processing, tmp_path):
-        # Create file at /data_16tb-equivalent (tmp_path / "live").
+        # Create file at /data_disk-equivalent (tmp_path / "live").
         live_dir = tmp_path / "live" / "Sports"
         live_dir.mkdir(parents=True)
         live_file = live_dir / "Wolves vs Sunderland.mkv"
         live_file.write_bytes(b"fake mkv")
 
-        # Plex (stale) reports it at /data_16tb3-equivalent (tmp_path / "stale").
+        # Plex (stale) reports it at /data_disk3-equivalent (tmp_path / "stale").
         stale_path = str(tmp_path / "stale" / "Sports" / "Wolves vs Sunderland.mkv")
 
         cfg_dict = _server_config(
@@ -333,7 +333,7 @@ class TestSiblingMountProbe:
         # The headline contract: Emby is now in the publisher list
         # (because its library covers the rebound /live path), and
         # Plex is NOT (because its library covers /stale only).
-        # Without the P3 fix the original publisher list (built from
+        # Without re-resolving owners for the rebound path the original publisher list (built from
         # /stale/Movies/X.mkv) would have only Plex, and Emby's
         # publish would be silently lost.
         publisher_ids = {p.server_id for p in result.publishers}
@@ -378,10 +378,9 @@ class TestSourceMissing:
         case retry was built for (Sonarr/Radarr fire at download-start
         in many setups, so the file is mid-copy when we look).
 
-        The user-flagged reproducer: job 1089f843 had two webhook paths,
-        both resolved by Plex, both failed with "Source video file is
-        missing on disk", and zero retries fired. With this status
-        change the retry path engages instead.
+        Two webhook paths, both resolved by Plex, both failing with
+        "Source video file is missing on disk", used to fire zero retries.
+        With this status the retry path engages instead.
         """
         registry = ServerRegistry.from_settings(
             [
@@ -1605,16 +1604,17 @@ class TestSkipIfExists:
             )
 
         assert result.publishers[0].status in _PUBLISHED_LIKE_STATUSES
+        assert result.publishers[0].frame_source == "extracted"
+        assert existing_sidecar.read_bytes() != b"placeholder"
 
 
 class TestCopiesSharingOnePlexBundle:
     """Two byte-identical files that Plex gives the same part hash — so one
     bundle and one ``index-sd.bif`` between them, as Plex itself lays it out.
 
-    Live case: Boxing S2026E94 and its "pt2" copy (item 689756, both parts
-    hash ``7bd4b8cf…``) rebuilt the shared BIF every night, each copy finding
-    the other's fingerprint on it. Each may build it once; after that a scan
-    must skip both.
+    Two copies sharing one bundle used to rebuild the shared BIF every night,
+    each copy finding the other's fingerprint on it. Each may build it once;
+    after that a scan must skip both.
     """
 
     _HASH = "7bd4b8cfed7b096007252de23fe3b71150b1c3af"
@@ -1649,10 +1649,10 @@ class TestCopiesSharingOnePlexBundle:
         return results
 
     def test_copies_are_not_regenerated_when_both_have_published(self, mock_config_for_processing, tmp_path):
-        media_dir = tmp_path / "data" / "Sports" / "Garcia vs Benn (2026-09-12) E94"
-        original = _seed_canonical_file(media_dir, name="Boxing - S2026E94 - Garcia vs Benn.mkv")
+        media_dir = tmp_path / "data" / "Sports" / "Event (2026-09-12) E94"
+        original = _seed_canonical_file(media_dir, name="Event - S2026E94.mkv")
         os.utime(original, (1_789_284_991, 1_789_284_991))
-        copy = media_dir / "Boxing - S2026E94 - pt2 - Garcia vs Benn.mkv"
+        copy = media_dir / "Event - S2026E94 - pt2.mkv"
         copy.write_bytes(original.read_bytes())
         os.utime(copy, (1_789_279_158, 1_789_279_158))
         plex_config = tmp_path / "plexcfg"
@@ -2340,7 +2340,7 @@ class TestSummariseResults:
 
 class TestItemIdLookupMissIsNotAWarning:
     """A server that hasn't indexed a file yet is the expected state right after an import: every lookup of every
-    attempt hits it (1,276 of ~2,000 WARNING lines in 3.6 days on the owner's server). The lookup says so at INFO; the
+    attempt hits it, which flooded the log with WARNING lines. The lookup says so at INFO; the
     line that ends a retry chain is the one that warns."""
 
     @staticmethod
@@ -2378,7 +2378,7 @@ class TestItemIdLookupMissIsNotAWarning:
 
 
 class TestItemIdResolverMemoisation:
-    """TEST_AUDIT P0.5 — closes commit 1f09c3a "90s gap" bug class.
+    """Guards against a ~90 s gap from repeated item-id lookups.
 
     ``_make_item_id_resolver`` wraps ``_resolve_item_id_for`` with a per-
     dispatch memoisation cache so the up-to-five sub-phases of

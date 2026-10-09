@@ -23,6 +23,7 @@ import time
 from loguru import logger
 
 from ..markers.probe import ffprobe_path_for, kill_and_collect
+from ..processing.filter_chain import build_hdr10_zscale_chain
 
 MAX_FRAMES = 14
 STEP_MS = 1000
@@ -83,10 +84,10 @@ def _own_cache(root: str) -> None:
             raise FramesError(f"Couldn't make the frame cache private ({type(exc).__name__})") from exc
 
 
-def _key(path: str, start_ms: int, count: int, width: int) -> str:
+def _key(path: str, start_ms: int, count: int, width: int, tonemap: str) -> str:
     st = os.stat(path)
     # The file's size and modification time are part of the key: a replaced file never gets the old file's frames.
-    raw = f"{path}\0{st.st_size}\0{st.st_mtime_ns}\0{start_ms}\0{count}\0{width}"
+    raw = f"{path}\0{st.st_size}\0{st.st_mtime_ns}\0{start_ms}\0{count}\0{width}\0{tonemap}"
     return hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()[:40]
 
 
@@ -142,10 +143,7 @@ def video_filter(width: int, *, hdr: bool, tonemap: str = "hable") -> str:
     base = f"fps=1,scale={width}:-2"
     if not hdr:
         return f"{base},format=yuvj420p"
-    return (
-        f"{base},zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap={tonemap}:desat=0,"
-        "zscale=t=bt709:m=bt709:r=tv,format=yuv420p,format=yuvj420p"
-    )
+    return f"{base},{build_hdr10_zscale_chain(tonemap)},format=yuvj420p"
 
 
 def _command(ffmpeg: str, path: str, start_ms: int, count: int, vf: str, out_dir: str) -> list[str]:
@@ -285,7 +283,7 @@ def exact_frames(
     root = cache_root()
     _own_cache(root)
     try:
-        folder = os.path.join(root, _key(path, start_ms, count, width))
+        folder = os.path.join(root, _key(path, start_ms, count, width, tonemap))
     except OSError as exc:
         raise FramesError(f"Couldn't read the file ({type(exc).__name__})") from exc
     cached = _frames_in(folder)

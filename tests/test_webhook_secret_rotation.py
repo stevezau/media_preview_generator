@@ -1,6 +1,6 @@
-"""TEST_AUDIT P2.7 — webhook secret rotation re-registers Plex webhooks.
+"""Webhook secret rotation re-registers Plex webhooks.
 
-Closes a real but uncovered gap. When the user rotates ``webhook_secret``
+When the user rotates ``webhook_secret``
 in Settings, Plex Media Server needs the NEW token to authenticate its
 webhooks. Without the post-save re-register hook,
 ``api_settings._reregister_plex_webhooks_after_secret_rotation`` never

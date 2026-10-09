@@ -262,7 +262,7 @@ class TestTestConnection:
 
         # Production format: "Emby URL is required".
         assert not result.ok
-        req.assert_not_called(), "missing-URL must short-circuit before any HTTP call"
+        req.assert_not_called()
         assert re.search(r"\bURL\b", result.message), (
             f"missing-URL error must mention 'URL' as a word, got {result.message!r}"
         )
@@ -275,7 +275,7 @@ class TestTestConnection:
 
         # Production format: "Emby access token / API key is required".
         assert not result.ok
-        req.assert_not_called(), "missing-token must short-circuit before any HTTP call"
+        req.assert_not_called()
         assert re.search(r"\b(token|API key)\b", result.message, re.IGNORECASE), (
             f"missing-token error must mention 'token' or 'API key', got {result.message!r}"
         )
@@ -823,6 +823,12 @@ class TestExtractTitlePrefix:
         assert prefix == "'71"
         assert is_episode is False
 
+    @pytest.mark.parametrize("folder", ["Specials", "S01", "Series 1", "Staffel 1"])
+    def test_non_season_named_folders_resolve_to_the_show(self, emby, folder):
+        prefix, is_episode = emby._extract_title_prefix(f"/library/TV/Therapy (2020)/{folder}/Therapy - S01E01.mkv")
+        assert prefix == "Therapy"
+        assert is_episode is True
+
     def test_strips_leading_article_the(self, emby):
         # "The 'Burbs" → SortName "'Burbs"; first word after article-strip is "'Burbs".
         prefix, _ = emby._extract_title_prefix("/library/Movies/The 'Burbs (1989)/The 'Burbs.mkv")
@@ -1096,6 +1102,26 @@ class TestPass0NameStartsWithFastPath:
                 f"Expected 3 requests (Path=, NameStartsWith, episode enumerate); "
                 f"got {req.call_count}: {[(c.args, c.kwargs.get('params')) for c in req.call_args_list]}"
             )
+
+    def test_specials_folder_resolves_via_the_show_not_a_false_miss(self, emby_with_tv_lib):
+        path = "/library/TV/DMV (2025)/Specials/DMV - S00E01 - Pilot.mkv"
+        path_empty = self._resp({"Items": []})
+        ns_series = self._resp({"TotalRecordCount": 1, "Items": [{"Id": "ser-1", "Name": "DMV"}]})
+        ep_enum = self._resp({"Items": [{"Id": "ep-0", "Path": path}]})
+        with patch.object(EmbyServer, "_request", side_effect=[path_empty, ns_series, ep_enum]) as req:
+            assert emby_with_tv_lib._uncached_resolve_remote_path_to_item_id(path) == "ep-0"
+            assert req.call_args_list[1].kwargs["params"]["NameStartsWith"] == "DMV"
+
+    def test_pass2_pages_past_the_first_thousand_items(self, emby_with_tv_lib):
+        path = "/library/TV/Zzz/Season 01/Zzz - S01E01.mkv"
+        empty = self._resp({"Items": []})
+        page1 = self._resp({"Items": [{"Id": f"x{i}", "Path": f"/library/TV/Other/{i}.mkv"} for i in range(1000)]})
+        page2 = self._resp({"Items": [{"Id": "target", "Path": path}]})
+        # Path= miss, Pass 0 NameStartsWith miss (indeterminate via cap-bust), Pass 1 miss, then two Pass 2 pages.
+        ns_busted = self._resp({"TotalRecordCount": 9999, "Items": [{"Id": "s"}]})
+        with patch.object(EmbyServer, "_request", side_effect=[empty, ns_busted, empty, page1, page2]) as req:
+            assert emby_with_tv_lib._uncached_resolve_remote_path_to_item_id(path) == "target"
+            assert req.call_args_list[-1].kwargs["params"]["StartIndex"] == 1000
 
     def test_falls_through_when_series_enumerate_errors(self, emby_with_tv_lib):
         """Recall safety net for perf #44 episode-walk short-circuit:
@@ -2170,7 +2196,7 @@ class TestPluginNames:
 
 
 class TestEmbyMarkersReadiness:
-    """Intro & Credits on Emby's Setup Health card (plan phase 4 Task 9 Step 2).
+    """Intro & Credits on Emby's Setup Health card.
 
     Emby's previews need no plugin, so both rows are new here. They use the section id ``plugin`` and the
     first-check ``current`` convention ("not installed" or a version) that the shipped install controls read.
@@ -2417,3 +2443,21 @@ class TestEmbyMarkersReadiness:
         rows = [c for s in payload["sections"] for c in s["checks"] if c["id"].startswith("markers_")]
         assert rows, "expected at least one Intro & Credits row"
         assert all(row["severity"] in ("critical", "recommended") for row in rows)
+
+
+class TestSetVendorExtraction:
+    def test_skips_music_libraries_and_absent_trickplay_key(self, emby):
+        folders = [
+            {"ItemId": "m1", "Name": "Movies", "CollectionType": "movies", "LibraryOptions": {}},
+            {"ItemId": "mu", "Name": "Music", "CollectionType": "music", "LibraryOptions": {}},
+        ]
+        get_resp = MagicMock()
+        get_resp.json.return_value = folders
+        post_resp = MagicMock()
+        with patch.object(EmbyServer, "_request", side_effect=[get_resp, post_resp]) as req:
+            result = emby.set_vendor_extraction(scan_extraction=False)
+
+        assert result == {"m1": "ok"}
+        posted = req.call_args_list[1].kwargs["json_body"]
+        assert posted["Id"] == "m1"
+        assert posted["LibraryOptions"] == {"ExtractChapterImagesDuringLibraryScan": False}

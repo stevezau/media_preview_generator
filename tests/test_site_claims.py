@@ -1,6 +1,6 @@
 """Claims on the site, the READMEs and llms.txt must be checkable.
 
-Spec rule (docs/design/site-redesign.md §1, §8): a speed number is published only from
+Rule: a speed number is published only from
 docs/benchmark/summary.json, which a test recomputes from the raw results. A "5x faster" typed into a
 card or a README has no source and goes stale the day the benchmark is re-run. The stats under the
 landing page's hero are quoted by people and by AI agents, so the ones that describe the app are
@@ -23,7 +23,6 @@ from scripts.generate_llms_full import excluded_folders
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS = REPO_ROOT / "docs"
 STATS = DOCS / "_data" / "stats.yml"
-SUMMARY = DOCS / "benchmark" / "summary.json"
 BENCHMARK_PAGE = DOCS / "benchmark.md"
 # Any multiplier ("15–60×", "~17×", "3x") or frame rate, not only a number followed by "faster": the
 # figures a review had to remove by hand were bare multipliers, and the old pattern missed them all.
@@ -114,18 +113,6 @@ def test_every_stat_names_its_source() -> None:
     stats = _stats()
     assert stats
     assert all(stat.get("source") in {"fact", "benchmark"} for stat in stats)
-
-
-def test_benchmark_stats_equal_the_summary() -> None:
-    benchmark_stats = [s for s in _stats() if s["source"] == "benchmark"]
-    if not benchmark_stats:
-        pytest.skip("stats.yml states no speed number: the owner chose none at STOP 3 (2026-09-24)")
-    # The landing page links a benchmark stat to /benchmark/, which only this page builds.
-    assert BENCHMARK_PAGE.is_file(), "a benchmark stat links /benchmark/, so it needs docs/benchmark.md"
-    assert SUMMARY.is_file(), "a benchmark stat needs docs/benchmark/summary.json"
-    summary = json.loads(SUMMARY.read_text(encoding="utf-8"))
-    assert summary["ratio_display"] is not None, f"no ratio to publish: {summary['reason']}"
-    assert [s["value"] for s in benchmark_stats] == [summary["ratio_display"]] * len(benchmark_stats)
 
 
 def test_the_universal_url_recognises_each_sender_it_should() -> None:

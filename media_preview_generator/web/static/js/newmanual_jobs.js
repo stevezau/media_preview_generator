@@ -135,7 +135,7 @@ function _manualKindIcon(kind) {
 function _manualServerBadges(servers) {
     const known = ['plex', 'emby', 'jellyfin'];
     return (servers || []).map(s =>
-        `<span class="ov-vtag ov-vtag-${known.includes(s.type) ? s.type : 'other'}" title="${escapeHtmlAttr((s.type || '').toUpperCase())}">${escapeHtmlText(s.name)}</span>`
+        `<span class="ov-vtag ov-vtag-${known.includes(s.type) ? s.type : 'other'}" title="${escapeHtml((s.type || '').toUpperCase())}">${escapeHtml(s.name)}</span>`
     ).join('');
 }
 
@@ -166,10 +166,10 @@ function manualRenderChips() {
     empty.classList.toggle('d-none', !!_manualSelections.length);
     wrap.innerHTML = _manualSelections.map(selection => {
         const tip = (selection.sublabel ? selection.sublabel + '\n' : '') + selection.paths.join('\n');
-        return `<div class="manual-chip" title="${escapeHtmlAttr(tip)}">
+        return `<div class="manual-chip" title="${escapeHtml(tip)}">
             <span class="ov-chip-ic" aria-hidden="true"><i class="bi ${_manualKindIcon(selection.kind)}"></i></span>
-            <div class="manual-chip-label"><b>${escapeHtmlText(selection.label)}</b><details class="manual-chip-paths"><summary>Paths</summary>${selection.paths.map(path => `<code>${escapeHtmlText(path)}</code>`).join('')}</details></div>
-            <button type="button" class="ov-ibtn manual-chip-rm" data-key="${escapeHtmlAttr(selection.key)}" aria-label="Remove ${escapeHtmlAttr(selection.label)}"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
+            <div class="manual-chip-label"><b>${escapeHtml(selection.label)}</b><details class="manual-chip-paths"><summary>Paths</summary>${selection.paths.map(path => `<code>${escapeHtml(path)}</code>`).join('')}</details></div>
+            <button type="button" class="ov-ibtn manual-chip-rm" data-key="${escapeHtml(selection.key)}" aria-label="Remove ${escapeHtml(selection.label)}"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
         </div>`;
     }).join('');
     wrap.querySelectorAll('.manual-chip-rm').forEach(button => button.addEventListener('click', () => manualRemoveSelection(button.dataset.key)));
@@ -194,8 +194,6 @@ function manualRenderSearchResults(results) {
         box.classList.remove('d-none');
         return;
     }
-    _manualSearchResults = results;
-    _manualChecked = new Set();
     const kindLabel = { show: 'Shows', movie: 'Movies', episode: 'Episodes' };
     let lastKind = null;
     const rows = [];
@@ -210,13 +208,13 @@ function manualRenderSearchResults(results) {
             if (r.child_count) bits.push(`${r.child_count} eps`);
             if ((r.paths || []).length > 1) bits.push(`${r.paths.length} folders`);
         }
-        const meta = bits.length ? `<span class="ov-meta">${escapeHtmlText(bits.join(' · '))}</span>` : '';
+        const meta = bits.length ? `<span class="ov-meta">${escapeHtml(bits.join(' · '))}</span>` : '';
         // A row is a checkbox (batch-pick) + a clickable title (add-one-now) +
         // metadata/badges. The checkbox toggles selection without closing the
         // dropdown; clicking the title adds just that item immediately.
         rows.push(`<div class="ov-ri" data-idx="${idx}">
-            <input type="checkbox" class="form-check-input manual-row-check" data-idx="${idx}" aria-label="Select ${escapeHtmlAttr(r.title)}">
-            <button type="button" class="manual-row-add" data-idx="${idx}"><i class="bi ${_manualKindIcon(r.kind)}" aria-hidden="true"></i>${escapeHtmlText(r.title)}${year}</button>
+            <input type="checkbox" class="form-check-input manual-row-check" data-idx="${idx}" aria-label="Select ${escapeHtml(r.title)}">
+            <button type="button" class="manual-row-add" data-idx="${idx}"><i class="bi ${_manualKindIcon(r.kind)}" aria-hidden="true"></i>${escapeHtml(r.title)}${year}</button>
             ${meta}${_manualServerBadges(r.servers)}
         </div>`);
     });
@@ -299,7 +297,7 @@ async function manualRunSearch() {
         manualRenderSearchResults(data.results || []);
     } catch (e) {
         if (seq !== _manualSearchSeq) return;
-        if (box) box.innerHTML = `<div class="ov-r-state ov-r-error">${escapeHtmlText((e && e.message) || 'Search failed')}</div>`;
+        if (box) box.innerHTML = `<div class="ov-r-state ov-r-error">${escapeHtml((e && e.message) || 'Search failed')}</div>`;
     }
 }
 

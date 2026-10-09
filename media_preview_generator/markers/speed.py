@@ -1,7 +1,7 @@
 """Playback speed families: film-rate and 25 fps releases of the same show (a PAL speed-up).
 
 A 25 fps release of a 23.976 fps show plays every frame and every sound 25 / 23.976 (4.3 %) faster, pitch raised with
-it: Bones seasons 5-8 on the owner's library mix 25 fps WEB releases with 23.976 Blu-rays, and IntroDB's times for
+it: a library can mix 25 fps WEB releases with 23.976 Blu-rays of one show, and IntroDB's times for
 them come from a 23.976 release. Two speeds are handled, named by their nominal frame rate: film (23.976 and 24 fps)
 and PAL (25 fps). Any other rate (29.97, 30, 50, ...) is left alone: nothing measured says how its audio relates to
 the others'.

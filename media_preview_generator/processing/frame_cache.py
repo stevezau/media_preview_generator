@@ -36,7 +36,7 @@ Cache validity rules:
 The cache directory is set up under
 ``{working_tmp_folder}/frame_cache``; entries are subdirectories named
 ``frames-<sha256[:16]>`` so they can coexist with the ad-hoc tmp dirs
-from the legacy single-Plex orchestrator.
+used when the cache is disabled.
 """
 
 from __future__ import annotations
@@ -75,6 +75,21 @@ class CacheEntry:
     cached_at: float
     extraction_key: tuple
     source_fingerprint: SourceFingerprint | None = None
+    size_bytes: int = 0
+
+
+def _dir_size_bytes(frame_dir: Path) -> int:
+    """Total size of the files directly under ``frame_dir``; 0 when it cannot be read."""
+    total = 0
+    try:
+        for child in frame_dir.iterdir():
+            try:
+                total += child.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return 0
+    return total
 
 
 class FrameCache:
@@ -271,6 +286,7 @@ class FrameCache:
             cached_at=time.time(),
             extraction_key=extraction_key,
             source_fingerprint=source_fingerprint,
+            size_bytes=_dir_size_bytes(Path(frame_dir)),
         )
         key = self._key(canonical_path)
         with self._lock:
@@ -378,32 +394,16 @@ class FrameCache:
                 break
             self._remove_slot_if_idle(key)
 
-        # Disk-size cap. Walk MRU order (insertion-oldest first) and
-        # drop until we're under the limit. Stat failures are skipped
-        # — the entry stays, but the count may be slightly off until
-        # the next put. Cheaper than locking on disk I/O for every
-        # eviction decision.
+        # Disk-size cap. Walk insertion order (oldest first) and drop until under the limit.
         if self._max_disk_bytes <= 0 or not self._entries:
             return
 
-        def _entry_size(entry: CacheEntry) -> int:
-            try:
-                total = 0
-                for child in entry.frame_dir.iterdir():
-                    try:
-                        total += child.stat().st_size
-                    except OSError:
-                        continue
-                return total
-            except OSError:
-                return 0
-
         # Iterate in insertion order (oldest first); evict until under cap.
-        # Build the size list once to avoid re-statting after each eviction.
+        # Sizes were measured once at put time, so no file is stat'ed here.
         # Always keep at least the most recently inserted entry — the user
         # just paid for that extraction; evicting it on the same put would
         # leave them with nothing and force a re-extract on the next get.
-        sizes = {key: _entry_size(entry) for key, entry in self._entries.items()}
+        sizes = {key: entry.size_bytes for key, entry in self._entries.items()}
         total = sum(sizes.values())
         keys_in_order = list(self._entries.keys())
         for key in keys_in_order[:-1]:  # skip the most recent entry
@@ -422,7 +422,7 @@ def _read_frame_reuse_setting() -> tuple[int, int]:
     """Return ``(ttl_seconds, max_disk_mb)`` from the user's ``frame_reuse`` block.
 
     Defaults: 1 hour TTL, 2 GB disk cap. When ``enabled`` is False the TTL
-    falls back to the legacy 600s value to preserve pre-v? behaviour for
+    falls back to a 600s TTL for
     users who explicitly opt out of cross-server reuse. Settings access is
     best-effort — if the manager isn't reachable (e.g. early-boot test
     contexts), we return defaults rather than crashing the cache.

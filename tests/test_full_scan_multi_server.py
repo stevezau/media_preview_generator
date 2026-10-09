@@ -83,10 +83,8 @@ class TestMultiServerFullScan:
     def test_no_servers_configured_returns_zero_counts(self, tmp_path):
         """No servers → zero counts AND no dispatch attempts.
 
-        Audit fix — original asserted only the counts. A regression that
-        called process_canonical_path with an empty registry would still
-        produce zero counts (because no items to dispatch) but represents
-        broken behaviour. Patch and assert no dispatch.
+        Dispatch is patched and asserted absent: zero counts alone would also
+        result from a broken call with an empty registry.
         """
         with (
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
@@ -603,7 +601,7 @@ class TestPinnedFilterForwardedToProcessCanonicalPath:
             )
 
     def test_regenerate_thumbnails_propagates_to_process_canonical_path(self, tmp_path):
-        """TEST_AUDIT P0.10 (commit 0092f8d "silent skip" class).
+        """The "Regenerate" toggle must reach ``process_canonical_path``.
 
         When the user toggles "Regenerate" in the scan modal, the chain is:
         UI → /api/jobs config_overrides["regenerate_thumbnails"]=True →
@@ -1164,7 +1162,7 @@ class TestPauseGate:
 
 
 class TestMultiPlexDeduping:
-    """Phase P4: when the same canonical_path appears on more than one
+    """When the same canonical_path appears on more than one
     enabled server (e.g. two Plex servers sharing storage, or Plex+Jellyfin
     over the same media), the dispatcher dedups by canonical_path and
     merges every server's vendor item-id into a single ProcessableItem
@@ -1226,7 +1224,7 @@ class TestMultiPlexDeduping:
             _run_full_scan_multi_server(_config(), selected_gpus=[])
 
         # process_canonical_path fired EXACTLY once despite the path
-        # appearing twice in enumeration — Phase P4 dedup.
+        # appearing twice in enumeration.
         assert mock_process.call_count == 1
         # And the merged hint includes BOTH servers' item-ids so each
         # PlexBundleAdapter call (plex-a's and plex-b's) can resolve
@@ -2240,7 +2238,7 @@ class TestWorkerFFmpegStartedFlag:
     the percent text with ``"Working…"`` or the (also-absent)
     ``current_phase``. The legacy ``WorkerPool`` flips
     ``worker.ffmpeg_started = True`` the first time
-    ``_update_worker_progress`` is called (``worker.py:1624``).
+    ``_update_worker_progress`` is called.
     The multi-server dispatcher's ``_slot_progress_callback``
     updated ``progress_percent`` / ``speed`` / ``remaining_time``
     in place but never flipped the flag, so the UI stayed in the

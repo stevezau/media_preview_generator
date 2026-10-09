@@ -5,18 +5,17 @@ from __future__ import annotations
 import base64
 import json
 import os
-import struct
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from media_preview_generator.bif_reader import BIF_MAGIC
 from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import FileIdentity, Marker, MarkerType
 from media_preview_generator.web.app import create_app
 from media_preview_generator.web.routes._helpers import limiter
 from media_preview_generator.web.settings_manager import get_settings_manager, reset_settings_manager
+from tests.conftest import write_bif as _write_bif
 
 TOKEN = "test-token-12345678"
 EMBY_KEY = "emby-key-SECRET-4242"
@@ -25,22 +24,6 @@ FFMPEG = "/opt/ffmpeg/bin/ffmpeg"
 
 def _headers() -> dict:
     return {"Authorization": f"Bearer {TOKEN}"}
-
-
-def _write_bif(path, *, frames: int, multiplier_ms: int, timestamps: list[int] | None = None) -> str:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    timestamps = timestamps if timestamps is not None else list(range(frames))
-    jpegs = [b"\xff\xd8\xff" + bytes([i]) * 10 for i in range(frames)]
-    header = BIF_MAGIC + struct.pack("<III", 0, frames, multiplier_ms) + b"\x00" * 44
-    offset = len(header) + 8 * (frames + 1)
-    index = b""
-    for ts, jpeg in zip(timestamps, jpegs, strict=True):
-        index += struct.pack("<II", ts, offset)
-        offset += len(jpeg)
-    index += struct.pack("<II", 0xFFFFFFFF, offset)
-    with open(path, "wb") as f:
-        f.write(header + index + b"".join(jpegs))
-    return str(path)
 
 
 # --------------------------------------------------------------------------- fixtures

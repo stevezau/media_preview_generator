@@ -1,5 +1,5 @@
 """Credit text detection in helper processes: one per GPU device, and one per request on the CPU up to the CPU worker
-count (spec §5.4, §6.4 item 7).
+count.
 
 A GPU worker's text detection runs on its GPU, as its previews do, whenever the GPU's WebGPU session is on a hardware
 adapter and finds exactly the CPU's boxes; how fast it is doesn't matter. A failure costs that request only (it is read
@@ -14,7 +14,7 @@ Protocol, one request at a time per helper:
 - helper → parent, once: ``{"ready": true, "backend": "webgpu"|"cpu", "selftest": {...}|null, "reason": str}``, plus
   ``"failed": true`` when a GPU helper is on the CPU because its WebGPU session failed this time
 - parent → helper: ``{"id": n, "frames": N, "height": H, "width": W}`` and a newline, then N×H×W bytes of luma; with
-  ``"read": true`` the frames' words are asked for instead of their boxes (a card at a credits start, spec §5.4)
+  ``"read": true`` the frames' words are asked for instead of their boxes (a card at a credits start)
 - helper → parent: ``{"id": n, "boxes": [N lists of [left, top, right, bottom]]}`` (one list per frame, in frame
   order), ``{"id": n, "text": [N lists of strings]}`` for a read, or ``{"id": n, "error": str}``
 - stdin closed → the helper exits 0; no request for ``--idle-exit-s`` → it exits 75.
@@ -646,7 +646,7 @@ class TextDetectorPool:
     the saved CPU worker count of them at once (at least one), and a GPU worker's request always gets one, as a
     preview's CPU rerun runs on its own worker. A request with no GPU counts as a CPU worker's unless it says
     ``gpu_worker=True``, as a GPU worker's rerun after a failed GPU decode does (the worker's type reaches the detector
-    through ``process_fn``, spec §5.4 CPU). A CPU helper is held by one request at a time, so it is started and used by
+    through ``process_fn``). A CPU helper is held by one request at a time, so it is started and used by
     one thread at a time.
     """
 
@@ -977,7 +977,7 @@ class TextDetectorPool:
         pci_bus_id = worker_pci_bus_id(gpu, gpu_device_path)
         env = dict(os.environ)
         if gpu == "NVIDIA":
-            # NVIDIA's ICD only loads with these (spec §5.4); they hide other vendors' GPUs, so only NVIDIA helpers
+            # NVIDIA's ICD only loads with these; they hide other vendors' GPUs, so only NVIDIA helpers
             # get them.
             env.update(self._vulkan_env())
         # Note N1: the EP device object picks the provider, not the GPU. This is what puts the helper on the
@@ -1187,7 +1187,7 @@ class TextDetectorPool:
                 if not _is_cpu_helper_key(key) and code != IDLE_EXIT_CODE:
                     raise HelperError(f"it exited {code} between requests")
             elif _monotonic() - helper.last_used > IDLE_EXIT_S - IDLE_RESTART_MARGIN_S:
-                self._drop(key)  # about to leave on its idle timer (T-R8): start a new one rather than race it
+                self._drop(key)  # about to leave on its idle timer: start a new one rather than race it
                 helper = None
         if helper is not None:
             return helper

@@ -24,7 +24,7 @@ from media_preview_generator.processing.multi_server import (
     MultiServerResult,
     MultiServerStatus,
 )
-from tests.conftest import _ms, _pi_list_or_passthrough  # noqa: F401
+from tests.conftest import _ms, _pi_list_or_passthrough
 
 PCP = "media_preview_generator.processing.multi_server.process_canonical_path"
 
@@ -274,9 +274,13 @@ def test_cancel_during_checking_completes_cleanly():
     pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
     dispatcher = JobDispatcher(pool)
     cancelled = {"v": False}
+    checked = []
 
     def pcp(**kwargs):
         if kwargs.get("check_only"):
+            checked.append(kwargs["canonical_path"])
+            if len(checked) == 5:
+                cancelled["v"] = True
             time.sleep(0.01)
             return _ms("skipped", canonical_path=kwargs["canonical_path"])
         return _ms("generated", canonical_path=kwargs["canonical_path"])
@@ -290,10 +294,10 @@ def test_cancel_during_checking_completes_cleanly():
             registry=MagicMock(),
             callbacks={"cancel_check": lambda: cancelled["v"]},
         )
-        cancelled["v"] = True
         # Must terminate (not hang) and mark done.
         assert tracker.wait(timeout=10)
         assert tracker.done_event.is_set()
+    assert len(checked) < 50, "the check stage must stop checking once cancel_check turns true"
     # Accounting invariant on cancel: no item is recorded more than once
     # (over-count would mean a check + a cancel-drain both counted it). An
     # item in-flight in a check thread at cancel time may legitimately be

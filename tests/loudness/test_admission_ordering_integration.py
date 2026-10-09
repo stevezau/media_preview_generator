@@ -13,8 +13,7 @@ from media_preview_generator.web import job_gate
 from media_preview_generator.web.jobs import JobStatus
 from media_preview_generator.web.routes import api_jobs
 
-from .test_job_lifecycle import Lifecycle
-from .test_job_lifecycle import lifecycle as lifecycle
+from .conftest import Lifecycle
 
 
 def _wait_until(predicate, timeout: float = 3) -> None:
@@ -26,7 +25,7 @@ def _wait_until(predicate, timeout: float = 3) -> None:
 
 @pytest.mark.parametrize(("initial_priority", "admitted_priority"), [(3, 1), (1, 3)])
 def test_priority_api_updates_waiting_runner_start_up_order(
-    lifecycle: Lifecycle,  # noqa: F811
+    lifecycle: Lifecycle,
     make_gate,
     monkeypatch,
     initial_priority: int,
@@ -116,7 +115,7 @@ def test_priority_api_updates_waiting_runner_start_up_order(
 
 
 def _recovery_scenario(
-    lifecycle,  # noqa: F811
+    lifecycle,
     monkeypatch,
     trigger: str,
     *,
@@ -197,15 +196,15 @@ def _recovery_scenario(
     return old, new, calls, threads, allow_old, release_old, cancel, new_entered, admitted
 
 
-def test_startup_older_job_keeps_place_when_new_capacity_wait_thread_runs_first(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_startup_older_job_keeps_place_when_new_capacity_wait_thread_runs_first(lifecycle: Lifecycle, monkeypatch):
     _assert_delayed_older_keeps_place(lifecycle, monkeypatch, "startup")
 
 
-def test_global_resume_older_job_keeps_place_when_its_thread_starts_late(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_global_resume_older_job_keeps_place_when_its_thread_starts_late(lifecycle: Lifecycle, monkeypatch):
     _assert_delayed_older_keeps_place(lifecycle, monkeypatch, "resume")
 
 
-def _assert_delayed_older_keeps_place(lifecycle, monkeypatch, trigger: str) -> None:  # noqa: F811
+def _assert_delayed_older_keeps_place(lifecycle, monkeypatch, trigger: str) -> None:
     old, new, calls, threads, allow_old, release_old, cancel, new_entered, admitted = _recovery_scenario(
         lifecycle, monkeypatch, trigger
     )
@@ -228,7 +227,7 @@ def _assert_delayed_older_keeps_place(lifecycle, monkeypatch, trigger: str) -> N
 
 
 @pytest.mark.parametrize("blocked_old", ["dependency", "future_retry", "manual_pause"])
-def test_deferred_older_job_does_not_block_ready_recovered_job(lifecycle: Lifecycle, monkeypatch, blocked_old):  # noqa: F811
+def test_deferred_older_job_does_not_block_ready_recovered_job(lifecycle: Lifecycle, monkeypatch, blocked_old):
     old, new, calls, threads, allow_old, release_old, cancel, new_entered, admitted = _recovery_scenario(
         lifecycle, monkeypatch, "startup", blocked_old=blocked_old
     )
@@ -246,7 +245,7 @@ def test_deferred_older_job_does_not_block_ready_recovered_job(lifecycle: Lifecy
             assert not thread.is_alive()
 
 
-def test_recovery_failed_older_launcher_does_not_leave_a_reservation(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_recovery_failed_older_launcher_does_not_leave_a_reservation(lifecycle: Lifecycle, monkeypatch):
     old, new, calls, threads, allow_old, release_old, cancel, new_entered, admitted = _recovery_scenario(
         lifecycle, monkeypatch, "startup", failed_old=True
     )
@@ -264,7 +263,7 @@ def test_recovery_failed_older_launcher_does_not_leave_a_reservation(lifecycle: 
             assert not thread.is_alive()
 
 
-def test_failed_async_thread_start_releases_ownership_and_allows_retry(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_failed_async_thread_start_releases_ownership_and_allows_retry(lifecycle: Lifecycle, monkeypatch):
     from types import SimpleNamespace
 
     lifecycle.api_ready = True

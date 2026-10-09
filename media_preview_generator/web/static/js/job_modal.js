@@ -141,8 +141,8 @@ function _renderModalHeader(job) {
         : { label: job.status || '?', cls: 'bg-secondary', tip: '' };
     const tone = ({ 'bg-success': 'ok', 'bg-danger': 'bad', 'bg-warning': 'warn', 'bg-primary': 'run', 'bg-info': 'run' })[meta.cls.split(' ')[0]] || '';
     const statusBadge = `<span class="ov-pill ${tone}"`
-        + (meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '')
-        + `>${escapeHtmlText(meta.label)}</span>`;
+        + (meta.tip ? ` title="${escapeHtml(meta.tip)}"` : '')
+        + `>${escapeHtml(meta.label)}</span>`;
 
     const chips = [];
     if (typeof _jobKindBadgeHtml === 'function') {
@@ -151,16 +151,16 @@ function _renderModalHeader(job) {
     if (cfg.source) {
         chips.push('<span class="ov-tag">'
             + '<i class="bi bi-' + _sourceIcon(cfg.source) + '" aria-hidden="true"></i>'
-            + escapeHtmlText(cfg.source) + '</span>');
+            + escapeHtml(cfg.source) + '</span>');
     }
     if (job.server_name) {
         chips.push('<span class="ov-tag">'
-            + escapeHtmlText(job.server_name) + '</span>');
+            + escapeHtml(job.server_name) + '</span>');
     }
     const dur = _jobDurationLabel(job);
     if (dur) {
         chips.push('<span class="ov-tag">'
-            + '<i class="bi bi-clock" aria-hidden="true"></i>' + escapeHtmlText(dur) + '</span>');
+            + '<i class="bi bi-clock" aria-hidden="true"></i>' + escapeHtml(dur) + '</span>');
     }
     if (isChain) {
         // While the next retry is waiting, ``retry_attempt`` is that retry's number, so it has not run yet.
@@ -173,24 +173,24 @@ function _renderModalHeader(job) {
             : '1 run · original only';
         if (_chainRetryIsWaiting(job, cfg)) runsLabel += ' · retry ' + (cfg.retry_attempt || 0) + ' scheduled';
         chips.push('<span class="ov-tag">'
-            + '<i class="bi bi-arrow-clockwise" aria-hidden="true"></i>' + escapeHtmlText(runsLabel)
+            + '<i class="bi bi-arrow-clockwise" aria-hidden="true"></i>' + escapeHtml(runsLabel)
             + ' <span class="ov-faint">/ ' + (rmax + 1) + ' max</span></span>');
     }
 
     // Job ID, copy-on-click: shared and pasted often, so it sits in the header (its own line on a phone). The id
     // stays ``logsJobId`` so the modal's ``aria-describedby`` keeps working.
-    const jid = escapeHtmlText(job.id || '');
+    const jid = escapeHtml(job.id || '');
     const jidBlock = '<div class="ov-jobid" id="logsJobId">'
         + '<span title="Job ID">' + jid + '</span>'
         + '<button type="button" class="ov-ibtn" title="Copy Job ID" aria-label="Copy Job ID"'
-        + ' onclick="onCopyJobId(\'' + escapeHtmlAttr(job.id || '') + '\', this)">'
+        + ' onclick="onCopyJobId(\'' + escapeHtml(job.id || '') + '\', this)">'
         + '<i class="bi bi-clipboard" aria-hidden="true"></i>'
         + '</button>'
         + '</div>';
 
     headerEl.innerHTML =
         '<div class="job-details-title-row">'
-        +   '<h5 class="modal-title job-details-title mb-0">' + escapeHtmlText(title) + '</h5>'
+        +   '<h5 class="modal-title job-details-title mb-0">' + escapeHtml(title) + '</h5>'
         +   statusBadge
         +   jidBlock
         + '</div>'
@@ -249,13 +249,13 @@ function _renderModalContext(job) {
     if (liveHint) liveHint.hidden = !(job && job.status === 'running');
     if (errorBox) {
         errorBox.hidden = !(job && job.error);
-        errorBox.innerHTML = job && job.error ? '<b>Job error</b>' + escapeHtmlText(job.error) : '';
+        errorBox.innerHTML = job && job.error ? '<b>Job error</b>' + escapeHtml(job.error) : '';
     }
     if (!job) { body.replaceChildren(); return; }
     const cfg = job.config || {};
     const progress = job.progress || {};
     const rows = [];
-    const add = (label, value) => rows.push('<div><dt>' + label + '</dt><dd>' + escapeHtmlText(String(value)) + '</dd></div>');
+    const add = (label, value) => rows.push('<div><dt>' + label + '</dt><dd>' + escapeHtml(String(value)) + '</dd></div>');
     const processed = Number(progress.processed_items) || 0;
     const total = Number(progress.total_items) || 0;
     const filesText = total ? processed.toLocaleString() + ' of ' + total.toLocaleString() + ' processed' : processed.toLocaleString() + ' processed · total not reported';
@@ -273,8 +273,8 @@ function _renderModalContext(job) {
     const activityLabel = waitReason ? 'Waiting' : active ? 'Current activity' : 'Last activity';
     const activity = current || progress.current_file
         ? '<div class="ov-cur"><span class="ov-k">' + activityLabel + '</span>'
-            + (current ? '<span>' + escapeHtmlText(current) + '</span>' : '')
-            + (progress.current_file ? '<details class="job-file-path"><summary>Current file path</summary><code>' + escapeHtmlText(progress.current_file) + '</code></details>' : '')
+            + (current ? '<span>' + escapeHtml(current) + '</span>' : '')
+            + (progress.current_file ? '<details class="job-file-path"><summary>Current file path</summary><code>' + escapeHtml(progress.current_file) + '</code></details>' : '')
             + '</div>'
         : '';
     body.innerHTML = '<dl class="job-details-facts">' + rows.join('') + '</dl>' + activity;
@@ -308,18 +308,13 @@ function _renderLogsSubtitle() {
     const label = pill.getAttribute('title') || pill.getAttribute('aria-label') || 'Selected attempt';
     el.classList.remove('d-none');
     el.innerHTML = '<i class="bi bi-funnel me-1"></i>Showing logs for '
-        + '<strong>' + escapeHtmlText(label) + '</strong>';
+        + '<strong>' + escapeHtml(label) + '</strong>';
 }
 
-// Copy the Job ID to the clipboard and flash the button to confirm.
-// Reuses the ``navigator.clipboard.writeText`` pattern already used by
-// ``copyLogs()`` (~line 1500). Falls back silently when the clipboard
-// API is unavailable (HTTP context, very old browsers).
-function onCopyJobId(jobId, btn) {
+// Copy the Job ID to the clipboard and flash the button when the copy worked.
+async function onCopyJobId(jobId, btn) {
     if (!jobId) return;
-    try {
-        navigator.clipboard.writeText(jobId);
-    } catch (e) { /* silently no-op */ }
+    if (!await copyToClipboard(jobId, 'Job ID copied')) return;
     if (btn) {
         const icon = btn.querySelector('i');
         if (icon) {
@@ -332,23 +327,6 @@ function onCopyJobId(jobId, btn) {
 window.onCopyJobId = onCopyJobId;
 
 // Find the first BIF path on disk across all servers' publisher rows.
-// Used by the "Open BIF" footer action so the operator gets one-click
-// access to scrub the generated preview right from the modal. Returns
-// '' when no BIF was generated (or only-skipped jobs where output_path
-// isn't on the publisher row).
-function _firstBifPathFromJob(job) {
-    if (!job || !Array.isArray(job.publishers)) return '';
-    for (let i = 0; i < job.publishers.length; i++) {
-        const p = job.publishers[i];
-        // Per-publisher aggregate doesn't carry output paths — those
-        // live in the per-file results. ``last_bif_path`` is a forward-
-        // compat field; today we fall back to scanning the file results
-        // if it's absent (caller may choose to do its own lookup).
-        if (p && p.last_bif_path) return p.last_bif_path;
-    }
-    return '';
-}
-
 // Toggle the footer's operator-action buttons based on chain state.
 // Hide-vs-disable: a disabled button invites repeated clicks before the
 // operator reads the tooltip; hiding clearly signals "not available
@@ -356,21 +334,18 @@ function _firstBifPathFromJob(job) {
 // template — we just flip ``d-none``.
 //
 // State -> visible buttons:
-//   * Chain pending (back-off countdown active) -> Retry now + Cancel chain + Open BIF
-//   * Chain running                              -> Cancel chain + Open BIF
-//   * Terminal job -> Re-run job + Open BIF (only if any BIF on disk)
-//   * Non-chain (single dispatch)                -> Open BIF (only if any BIF on disk)
+//   * Chain pending (back-off countdown active) -> Retry now + Cancel chain
+//   * Chain running                              -> Cancel chain
+//   * Terminal job                               -> Re-run job
 function _updateOperatorActions(job) {
     const retryBtn = document.getElementById('opActionRetryNow');
     const cancelBtn = document.getElementById('opActionCancelChain');
-    const openBifBtn = document.getElementById('opActionOpenBif');
     const reprocessBtn = document.getElementById('opActionReprocess');
-    if (!retryBtn || !cancelBtn || !openBifBtn) return;
+    if (!retryBtn || !cancelBtn) return;
 
     // Start hidden — each branch below opts in.
     retryBtn.classList.add('d-none');
     cancelBtn.classList.add('d-none');
-    openBifBtn.classList.add('d-none');
     if (reprocessBtn) reprocessBtn.classList.add('d-none');
     if (!job) return;
 
@@ -385,18 +360,6 @@ function _updateOperatorActions(job) {
     if (isActiveChain) cancelBtn.classList.remove('d-none');
     if (reprocessBtn && ['completed', 'failed', 'cancelled'].includes(status)) {
         reprocessBtn.classList.remove('d-none');
-    }
-
-    const bif = _firstBifPathFromJob(job);
-    const onlyFile = (cfg.webhook_paths || []).length === 1 ? cfg.webhook_paths[0] : '';
-    if (bif) {
-        // The job's one file opens the whole Inspector; a bare preview path opens just its frames.
-        openBifBtn.href = onlyFile
-            ? '/inspector?path=' + encodeURIComponent(onlyFile)
-            : '/inspector?bif=' + encodeURIComponent(bif);
-        openBifBtn.classList.remove('d-none');
-    } else {
-        openBifBtn.removeAttribute('href');
     }
 }
 
@@ -433,7 +396,7 @@ async function onOperatorRetryNow() {
     } catch (err) {
         console.error('retry-now failed:', err);
         const msg = (err && err.message) ? err.message : 'Retry-now request failed';
-        alert(msg);
+        showToast('Error', msg, 'danger');
     } finally {
         if (btn) { btn.disabled = false; btn.classList.remove('disabled'); }
     }
@@ -441,7 +404,7 @@ async function onOperatorRetryNow() {
 
 // "Cancel chain" footer button — POST /api/jobs/<id>/cancel. The
 // existing endpoint already handles chain semantics (cancel timer +
-// mark child attempts cancelled). Browser ``confirm()`` prevents a
+// mark child attempts cancelled). The confirmation prevents a
 // stray click from killing a chain that's making progress.
 // Overview tab + timeline + retry-reason banner + recent-log preview +
 // log-level filter + SSE streaming + keyboard shortcuts were stripped in
@@ -455,7 +418,8 @@ async function onOperatorRetryNow() {
 
 async function onOperatorCancelChain() {
     if (!_logsModalJobId) return;
-    if (!confirm('Cancel this retry chain? Any pending back-off timer will be dropped and in-flight attempts will receive a cancellation signal.')) {
+    if (!await appConfirm('Cancel this retry chain? Any pending back-off timer will be dropped and in-flight attempts will receive a cancellation signal.',
+        { title: 'Cancel retry chain', confirmText: 'Cancel chain', cancelText: 'Keep running' })) {
         return;
     }
     const btn = document.getElementById('opActionCancelChain');
@@ -470,7 +434,7 @@ async function onOperatorCancelChain() {
         _updateOperatorActions(refreshed);
     } catch (err) {
         console.error('cancel-chain failed:', err);
-        alert((err && err.message) ? err.message : 'Cancel request failed');
+        showToast('Error', (err && err.message) ? err.message : 'Cancel request failed', 'danger');
     } finally {
         if (btn) { btn.disabled = false; btn.classList.remove('disabled'); }
     }
@@ -790,7 +754,8 @@ async function refreshLogs() {
     if (!targetId) return;
 
     try {
-        const probe = await apiGet(`/api/jobs/${targetId}/logs?offset=0&limit=0`);
+        const probe = await apiGet(`/api/jobs/${encodeURIComponent(targetId)}/logs?offset=0&limit=0`);
+        if (_logsTargetId() !== targetId) return;
         const total = probe.total_lines || 0;
         _logsTotalLines = total;
 
@@ -824,7 +789,8 @@ async function refreshLogs() {
         }
 
         const startOffset = Math.max(0, total - _LOGS_CHUNK_SIZE);
-        const data = await apiGet(`/api/jobs/${targetId}/logs?offset=${startOffset}&limit=${_LOGS_CHUNK_SIZE}`);
+        const data = await apiGet(`/api/jobs/${encodeURIComponent(targetId)}/logs?offset=${startOffset}&limit=${_LOGS_CHUNK_SIZE}`);
+        if (_logsTargetId() !== targetId) return;
         const lines = data.logs || [];
 
         _rawLogs = lines;
@@ -848,6 +814,9 @@ async function refreshLogs() {
         }
     } catch (error) {
         console.error('Failed to load logs:', error);
+        if (_logsTargetId() === targetId && _rawLogs.length === 0) {
+            document.getElementById('logsContent').innerHTML = '<span class="text-danger">Could not load logs.</span>';
+        }
     }
 }
 
@@ -856,7 +825,8 @@ async function pollNewLogs() {
     if (!targetId) return;
 
     try {
-        const data = await apiGet(`/api/jobs/${targetId}/logs?offset=${_logsKnownCount}&limit=${_LOGS_CHUNK_SIZE}`);
+        const data = await apiGet(`/api/jobs/${encodeURIComponent(targetId)}/logs?offset=${_logsKnownCount}&limit=${_LOGS_CHUNK_SIZE}`);
+        if (_logsTargetId() !== targetId) return;
         const newLines = data.logs || [];
         const newTotal = data.total_lines || _logsKnownCount;
 
@@ -920,7 +890,8 @@ async function loadEarlierLogs() {
     try {
         const newStart = Math.max(0, _logsLoadedOffset - _LOGS_CHUNK_SIZE);
         const limit = _logsLoadedOffset - newStart;
-        const data = await apiGet(`/api/jobs/${targetId}/logs?offset=${newStart}&limit=${limit}`);
+        const data = await apiGet(`/api/jobs/${encodeURIComponent(targetId)}/logs?offset=${newStart}&limit=${limit}`);
+        if (_logsTargetId() !== targetId) return;
         const earlierLines = data.logs || [];
 
         if (earlierLines.length === 0) {
@@ -975,7 +946,8 @@ async function loadAllLogs() {
     if (btn) { btn.disabled = true; btn.textContent = 'Loading...'; }
 
     try {
-        const data = await apiGet(`/api/jobs/${targetId}/logs`);
+        const data = await apiGet(`/api/jobs/${encodeURIComponent(targetId)}/logs`);
+        if (_logsTargetId() !== targetId) return;
         const allLines = data.logs || [];
 
         _rawLogs = allLines;
@@ -1015,15 +987,6 @@ async function loadAllLogs() {
 // rendered by the existing data-scheduled-at tick loop in app.js
 // (see ``_updateElapsedTimers``); the modal header doesn't need its
 // own — the user can glance back at the row for that.
-
-const _ATTEMPT_STATUS_GLYPH = {
-    'completed': '✓',
-    'failed':    '✗',
-    'cancelled': '⊘',
-    'running':   '⏳',
-    'pending':   '·',
-    'deleted':   '⊘',  // sentinel for an originating dispatch that no longer exists
-};
 
 function _formatAttemptDuration(secs) {
     if (secs === null || secs === undefined) return '';
@@ -1523,8 +1486,14 @@ async function _refreshAttemptsDropdown(chainId) {
         if (targetId) {
             const target = wrap.querySelector(`button[data-attempt-id="${CSS.escape(targetId)}"]`);
             if (target) _setActivePill(target);
+            const targetChanged = targetId !== previouslySelected;
             _logsModalAttemptId = targetId;
             _renderLogsSubtitle();
+            if (targetChanged) {
+                // The logs on screen belong to the chain row, not this attempt.
+                _resetLogsState();
+                refreshLogs();
+            }
         }
         // Re-render the chain-state chip — the chain Job's status /
         // retry_eta might have changed since modal-open (new firing,
@@ -1541,21 +1510,23 @@ async function _refreshAttemptsDropdown(chainId) {
 }
 
 
-function onAttemptSelected(button) {
-    const attemptId = button?.dataset?.attemptId;
-    if (!attemptId) return;
-    if (attemptId === _logsModalAttemptId) return;  // already selected — no-op
-    _logsModalAttemptId = attemptId;
-    _setActivePill(button);
-    // Reset log state so refreshLogs() loads from offset 0 for the
-    // newly-selected attempt instead of continuing the previous
-    // attempt's pagination.
+// Forget the loaded log lines so the next refreshLogs() starts from the newly targeted job or attempt.
+function _resetLogsState() {
     _rawLogs = [];
     _logsTotalLines = 0;
     _logsLoadedOffset = 0;
     _logsKnownCount = 0;
     document.getElementById('logsContent').innerHTML = '<span class="text-muted">Loading…</span>';
     _updateEarlierLogsButton();
+}
+
+function onAttemptSelected(button) {
+    const attemptId = button?.dataset?.attemptId;
+    if (!attemptId) return;
+    if (attemptId === _logsModalAttemptId) return;  // already selected — no-op
+    _logsModalAttemptId = attemptId;
+    _setActivePill(button);
+    _resetLogsState();
     _renderLogsSubtitle();
     refreshLogs();
     // Refresh the Files tab too: per-file results are written per
@@ -1756,8 +1727,8 @@ function _renderRequestedPaths(data) {
     document.getElementById('fileResultsBody').innerHTML = page.length ? page.map(path => {
         const name = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
         return '<tr><td colspan="5" class="job-file-name"><div class="job-file-heading"><small class="text-truncate" title="'
-            + escapeHtmlAttr(path) + '">' + escapeHtmlText(name) + '</small></div><details class="job-file-path"><summary>Full path</summary><code>'
-            + escapeHtmlText(path) + '</code></details></td></tr>';
+            + escapeHtml(path) + '">' + escapeHtml(name) + '</small></div><details class="job-file-path"><summary>Full path</summary><code>'
+            + escapeHtml(path) + '</code></details></td></tr>';
     }).join('') : '<tr><td colspan="5" class="text-body-secondary text-center">No matching requested paths</td></tr>';
     document.getElementById('fileResultsCount').textContent = page.length
         ? 'Showing ' + (offset + 1).toLocaleString() + '–' + (offset + page.length).toLocaleString() + ' of ' + _fileFilteredCount.toLocaleString() + ' requested paths'
@@ -1908,14 +1879,14 @@ function renderFileResultsTable(files) {
         html += '<tr>'
             + '<td class="job-file-name">'
             +   '<div class="job-file-heading">'
-            +     '<small class="text-truncate" title="' + escapeHtmlAttr(fileName) + '">' + escapeHtml(shortName) + '</small>'
+            +     '<small class="text-truncate" title="' + escapeHtml(fileName) + '">' + escapeHtml(shortName) + '</small>'
             +     inspectorBtn
             +   '</div>'
             +   (fileName ? '<details class="job-file-path"><summary>Full path</summary><code>' + escapeHtml(fileName) + '</code></details>' : '')
             + '</td>'
-            + '<td data-label="Outcome"><span class="badge ' + meta.badge + '">' + meta.label + '</span></td>'
+            + '<td data-label="Outcome"><span class="badge ' + escapeHtml(meta.badge) + '">' + escapeHtml(meta.label) + '</span></td>'
             + '<td data-label="Servers">' + serversHtml + '</td>'
-            + '<td data-label="Details">' + serverNotes + '<small class="text-body-secondary" title="' + escapeHtmlAttr(f.reason || '') + '">' + reason + '</small></td>'
+            + '<td data-label="Details">' + serverNotes + '<small class="text-body-secondary" title="' + escapeHtml(f.reason || '') + '">' + reason + '</small></td>'
             + '<td data-label="Worker">' + (workerBadge || '<small class="text-body-secondary" aria-label="Worker not recorded">—</small>') + '</td>'
             + '</tr>';
     }
@@ -1983,7 +1954,7 @@ function _compactWorkerBadge(worker) {
     var prefix = match[1].toUpperCase() === 'GPU' ? 'G' : 'C';
     var idx = match[2];
     return '<span class="badge bg-light text-dark border font-monospace"'
-        + ' title="' + escapeHtmlAttr(worker) + '" aria-label="' + escapeHtmlAttr(worker) + '" style="font-size: 0.7rem;">'
+        + ' title="' + escapeHtml(worker) + '" aria-label="' + escapeHtml(worker) + '" style="font-size: 0.7rem;">'
         + prefix + idx + '</span>';
 }
 
@@ -2019,7 +1990,7 @@ function _renderFileServerPills(servers, showStatus) {
             ? MARKERS_NOT_IN_LIBRARY_LABEL
             : chapterTip || (showStatus && s.message && !MARKERS_ROUTINE_MESSAGE.test(s.message) && s.message)
                 || meta.label || status || '';
-        var title = tip ? (escapeHtmlAttr(label) + ' \u2014 ' + escapeHtmlAttr(tip)) : escapeHtmlAttr(label);
+        var title = tip ? (escapeHtml(label) + ' \u2014 ' + escapeHtml(tip)) : escapeHtml(label);
         html += '<span class="badge me-1 ' + cls + '"' + dim + ' title="' + title + '">'
             + escapeHtml(label) + (showStatus && status ? ' \u00b7 ' + escapeHtml(meta.label) : '') + '</span>';
     }

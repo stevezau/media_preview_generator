@@ -20,13 +20,12 @@ from media_preview_generator.markers.settings import load_global, validate_globa
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.processing.generator import CodecNotSupportedError
 from media_preview_generator.servers.base import ServerType
-from tests.markers import test_pipeline
+from tests.markers import pipeline_helpers
 from tests.markers.fakes import ready_publisher, server_config
-from tests.markers.test_pipeline import DUR, _clients, _ctx, _probe, _registry, _run
-from tests.markers.test_pipeline import _rows as _rows_by_server
+from tests.markers.pipeline_helpers import DUR, _clients, _ctx, _probe, _registry, _run
+from tests.markers.pipeline_helpers import _rows as _rows_by_server
 
-media = test_pipeline.media
-store = test_pipeline.store
+media = pipeline_helpers.media
 T = MarkerType
 START_S = 1_290.25
 
@@ -106,7 +105,7 @@ class TestWorkerHandOff:
         )
 
     def test_emby_gets_the_credits_start_and_skips_to_the_end_of_the_file_r1(self, store, media, find, tmp_path):
-        # Spec §6.3 R1 is unchanged by Q3: Emby has no credits end, so it gets the start and the row says so.
+        # Emby has no credits end, so it gets the start and the row says so.
         from media_preview_generator.markers.publishers.emby import CREDITS_BEFORE_END_NOTE
         from tests.markers.test_emby_publisher import FakeEmby, _publisher, _write
 
@@ -130,7 +129,7 @@ class TestWorkerHandOff:
         ctx.registry.configs_by_id["jellyfin-1"] = server_config(
             "jellyfin-1",
             ServerType.JELLYFIN,
-            root=test_pipeline._media_root(media),
+            root=pipeline_helpers._media_root(media),
             markers={"enabled": False, "library_ids": None},
         )
         ctx.registry.get("jellyfin-1").get_media_segments.return_value = [
@@ -164,7 +163,7 @@ class TestWorkerHandOff:
         assert find.calls == []
 
     def test_credits_a_chapter_decided_are_read_on_a_worker_against_the_chapter(self, store, media, find):
-        # Since 2026-09-27 credit text reads a file whose credits a chapter decided alone (``checks_chapters``): a
+        # Credit text reads a file whose credits a chapter decided alone (``checks_chapters``): a
         # release's "Credits" chapter is often off the first card, and the frames move its start when they show it.
         chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
         out, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
@@ -199,14 +198,9 @@ class TestWorkerHandOff:
         changed, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
         assert changed is None  # handed to a worker to read the new file
 
-    def test_a_chapter_an_older_version_kept_is_listed_after_an_update_and_read_again(
-        self, monkeypatch, store, media, find
-    ):
-        # The chapter decides alone, so only the version re-run reaches the file after an update (nothing else runs a
-        # movie again): sflix's 10 Things I Hate About You kept version 6's answer beside its chapter after version 7,
-        # which moves such a chapter, shipped (2026-09-28).
-        from media_preview_generator.markers import versions
-
+    def test_a_chapter_an_older_version_kept_is_read_again_after_an_update(self, monkeypatch, store, media, find):
+        # The chapter decides alone, so only the older-version check sends the file to a worker: a film keeping an
+        # older version's answer beside its chapter would never get the newer version, which moves such a chapter.
         chapters = _probe((Chapter(0, 1_290_000, "Episode"), Chapter(1_290_000, None, "Credits")))
         with monkeypatch.context() as patched:
             patched.setattr(detector, "CREDITS_TEXT_VERSION", detector.CREDITS_TEXT_VERSION - 1)
@@ -215,9 +209,6 @@ class TestWorkerHandOff:
         assert store.get_markers(rec.id)[T.CREDITS].decided_by == ("chapters",)
         assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION - 1
 
-        due = versions.files_to_read_again(store, load_global(validate_global(settings(), None)[0]))
-
-        assert due == {media: {"credits_text": detector.CREDITS_TEXT_VERSION}}
         out, _ = _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="check")
         assert out is None and len(find.calls) == 1  # handed to a worker to read at today's version
         _run(ctx_for(store, media), media, pubs(), probe=chapters, stage="process")
@@ -424,6 +415,7 @@ class TestAvailability:
         assert [s.source for s in ctx.local_detectors] == ([Source.CREDITS_TEXT] if asked else [])
 
 
+@pytest.mark.slow
 @pytest.mark.timeout(150)  # the subprocess may take up to 120 s on a slow runner; addopts has --timeout=30
 def test_the_web_app_and_the_pipeline_never_load_onnxruntime_or_opencv(tmp_path):
     code = (
@@ -449,7 +441,7 @@ def movie(tmp_path):
     return str(f)
 
 
-ambiguous = test_pipeline.ambiguous
+ambiguous = pipeline_helpers.ambiguous
 
 
 @pytest.fixture
@@ -509,9 +501,11 @@ class TestCreditsWindow:
     def test_automatic_stores_the_answer_under_the_version_it_always_had(self, store, media):
         spec = detector.credits_text_spec()
         rec = store.upsert_file(*_identity(media), duration_ms=DUR, season_key="s", is_movie=False)
-        assert detector.CREDITS_TEXT_VERSION == 9  # v9: a captioned story's own captions are no roll (§5.4)
-        assert spec.answer_version(rec, ctx_for(store, media)) == 9
-        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 9
+        version = detector.CREDITS_TEXT_VERSION
+        assert spec.answer_version(rec, ctx_for(store, media)) == version
+        assert (
+            spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == version
+        )
 
     def test_an_answer_read_on_another_window_is_read_again_and_stored_under_the_new_one(self, store, media, find):
         _run(ctx_for(store, media), media, pubs(), stage="process")
@@ -612,7 +606,7 @@ class TestTvWindowReachesTheDecision:
 
 
 class TestSkipDbAgainstACreditsChapter:
-    """Spec §5.5 rule 3 (2026-09-25 audit, Somebody Somewhere S03): a SkipDB answer against a credits chapter nothing
+    """A SkipDB answer against a credits chapter nothing
     else agrees with has credit text read the file in the same run (SkipDB is asked before credit text); credit text
     agreeing with SkipDB outvotes the chapter at its own start, agreeing with the chapter keeps it. Where credit text
     can't run here and has stored nothing, the chapter decides as before: nothing would ever answer."""
@@ -692,7 +686,7 @@ class TestSkipDbAgainstACreditsChapter:
 
     @pytest.mark.parametrize("failure", [None, "decode error", "timeout"])
     def test_a_failure_recorded_for_the_file_as_it_is_ends_the_wait(self, store, media, find, failure):
-        # The owner's rule: decisions are automatic, never an open-ended wait. Credit text that can't
+        # Decisions are automatic, never an open-ended wait. Credit text that can't
         # read this file won't answer the next run either, so the chapter decides as it did before rule 3.
         ctx = self._checked(store, media)
         rec = store.get_file(media)

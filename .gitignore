@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 
 # Python build artifacts
 build/
@@ -58,12 +60,8 @@ CLAUDE.local.md
 # Playwright MCP session artifacts (snapshots, console logs)
 .playwright-mcp/
 
-# setuptools-scm auto-generated version file
-plex_generate_previews/_version.py
-# setuptools-scm writes this at build time. The entry above still names the
-# PRE-RENAME package, so after the rename the real one was committed and
-# froze at 3.7.6.dev142 — then shadowed every image whose wheel metadata was
-# the 0.0.0 fallback, making :dev report a version from four releases ago.
+# setuptools-scm writes this at build time; it must never be committed (a committed copy
+# freezes the version and shadows the real one).
 media_preview_generator/_version.py
 
 # CI-generated release-notes bundle. Source of truth is GitHub Releases;
@@ -76,28 +74,8 @@ media_preview_generator/release_notes.json
 *.png
 !docs/**/*.png
 
-# Intro & Credits evidence: local-only files (tokens, large dumps, regenerable media, Emby's proprietary DLLs)
+# Local lab credentials (sourced by docs/design/lab-servers.md tooling)
 docs/design/intro-credits/evidence/lab/env
-docs/design/intro-credits/evidence/lab/synth/
-docs/design/intro-credits/evidence/lab/results/
-docs/design/intro-credits/evidence/lab/plugins-old/
-docs/design/intro-credits/evidence/lab/scale_mounts.sh
-docs/design/intro-credits/evidence/online/skipdb-dump.json
-docs/design/intro-credits/evidence/detect/fpcache*/
-docs/design/intro-credits/evidence/credits/bench/
-# Truth sets / results list real library file paths (public repo): local only
-docs/design/intro-credits/evidence/**/*.json
-docs/design/intro-credits/evidence/**/*.jsonl
-# Phase-4 anime id maps: third-party data, multi-MB, and neither upstream repo carries a licence
-docs/design/intro-credits/evidence/online/phase4/animelists.xml
-docs/design/intro-credits/evidence/lab/*_truth.txt
-docs/design/intro-credits/evidence/lab/prod_plex_baseline.txt
-docs/design/intro-credits/evidence/credits/spot.txt
-docs/design/intro-credits/evidence/credits/framechecks/
-# Run logs, tables and other text outputs name real library paths: local only (a topic's outputs go in local/)
-docs/design/intro-credits/evidence/**/*.log
-docs/design/intro-credits/evidence/**/*.tsv
-docs/design/intro-credits/evidence/**/local/
 
 # Emby plugin build output (`dotnet build` locally and in CI)
 emby-plugin/bin/

@@ -150,6 +150,13 @@ def _save_history_to_disk() -> None:
         logger.debug("Failed to persist webhook history: {}", exc)
 
 
+def _tokens_match(supplied: str, expected: str) -> bool:
+    """Constant-time token comparison that is False, not an exception, for non-ASCII or non-str input."""
+    if not isinstance(supplied, str) or not isinstance(expected, str):
+        return False
+    return secrets.compare_digest(supplied.encode(), expected.encode())
+
+
 def _authenticate_webhook(f):
     """Check X-Auth-Token, Authorization Bearer, Basic auth, or ``?token=`` query param.
 
@@ -213,7 +220,7 @@ def _authenticate_webhook(f):
         # Plex sent the event). Auth itself uses only the global webhook
         # secret, then falls back to the API auth token.
         for _method, token in candidates:
-            if webhook_secret and secrets.compare_digest(token, webhook_secret):
+            if webhook_secret and _tokens_match(token, webhook_secret):
                 return f(*args, **kwargs)
             if validate_token(token):
                 return f(*args, **kwargs)
@@ -361,7 +368,9 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
 
     * Same ``(source, server_id, path)`` seen within ``_RECENT_DISPATCH_TTL_SECONDS``
       → return age in seconds (caller drops the webhook).
-    * Else → record the entry under ``now`` and return None.
+    * Else → record the entry under ``now`` and return None. A caller whose
+      Job creation then fails must undo it with ``_forget_dispatch``, or the
+      sender's retry would be dropped as a duplicate.
     * Expired entries are evicted opportunistically so the table stays
       bounded on long-running installs.
 
@@ -381,6 +390,11 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
         return int(now_ts - last)
     _recent_dispatches[dedup_key] = now_ts
     return None
+
+
+def _forget_dispatch(source: str, server_id: str | None, canonical_path: str) -> None:
+    """Undo ``_check_and_record_dedup`` after a failed Job creation. Caller must hold ``_pending_lock``."""
+    _recent_dispatches.pop((source, server_id or "", canonical_path), None)
 
 
 def _was_recently_dispatched(source: str, server_id: str | None, canonical_path: str) -> bool:
@@ -473,68 +487,72 @@ def create_vendor_webhook_job(
         )
         return None
 
-    basename = os.path.basename(canonical_path)
-    # Vendor-webhook callers (Plex/Emby/Jellyfin via /webhook/incoming)
-    # don't pass a payload-derived title, so fall back to a basename-
-    # parsed clean title — keeps the Job-Queue Library column readable
-    # and consistent with Sonarr/Radarr rows that already get
-    # "Show SxxEyy" / "Movie (Year)" from their structured payload.
-    library_display = (title or "").strip() or _clean_title_from_basename(basename)
+    try:
+        basename = os.path.basename(canonical_path)
+        # Vendor-webhook callers (Plex/Emby/Jellyfin via /webhook/incoming)
+        # don't pass a payload-derived title, so fall back to a basename-
+        # parsed clean title — keeps the Job-Queue Library column readable
+        # and consistent with Sonarr/Radarr rows that already get
+        # "Show SxxEyy" / "Movie (Year)" from their structured payload.
+        library_display = (title or "").strip() or _clean_title_from_basename(basename)
 
-    b_sid, b_sname, b_stype = _resolve_webhook_server_context(server_id)
+        b_sid, b_sname, b_stype = _resolve_webhook_server_context(server_id)
 
-    settings = get_settings_manager()
-    retry_count, retry_delay = retry_policy(settings)
-    delay = _effective_webhook_delay(delay)
+        settings = get_settings_manager()
+        retry_count, retry_delay = retry_policy(settings)
+        delay = _effective_webhook_delay(delay)
 
-    overrides: dict[str, object] = {
-        "sort_by": "newest",
-        "webhook_paths": [canonical_path],
-        "webhook_retry_count": retry_count,
-        "webhook_retry_delay": retry_delay,
-        # Source pill (sonarr/radarr/sportarr/plex/emby/jellyfin/...)
-        # MUST appear in overrides so the job runner's _apply_overrides
-        # pass copies it onto Config.webhook_source — without that, the
-        # worker hands None to process_canonical_path and any spawned
-        # retry-chain row falls back to the raw filename + has no
-        # source pill (live regression: chain retry-c5cdf6e337bf for
-        # World's Most Secret Hotels S02E04, 2026-05-10).
-        "source": safe_source,
-    }
-    if item_id_by_server:
-        # Wrap as {path: {server_id: item_id}} so the orchestrator can
-        # short-circuit Plex resolution and pass hints straight through.
-        clean_hints = {str(sid): str(item_id) for sid, item_id in item_id_by_server.items() if sid and item_id}
-        if clean_hints:
-            overrides["webhook_item_id_hints"] = {canonical_path: clean_hints}
-    if server_id_filter:
-        overrides["server_id"] = server_id_filter
-    if regenerate:
-        overrides["force_generate"] = True
+        overrides: dict[str, object] = {
+            "sort_by": "newest",
+            "webhook_paths": [canonical_path],
+            "webhook_retry_count": retry_count,
+            "webhook_retry_delay": retry_delay,
+            # Source pill (sonarr/radarr/sportarr/plex/emby/jellyfin/...)
+            # MUST appear in overrides so the job runner's _apply_overrides
+            # pass copies it onto Config.webhook_source — without that, the
+            # worker hands None to process_canonical_path and any spawned
+            # retry-chain row falls back to the raw filename + has no
+            # source pill.
+            "source": safe_source,
+        }
+        if item_id_by_server:
+            # Wrap as {path: {server_id: item_id}} so the orchestrator can
+            # short-circuit Plex resolution and pass hints straight through.
+            clean_hints = {str(sid): str(item_id) for sid, item_id in item_id_by_server.items() if sid and item_id}
+            if clean_hints:
+                overrides["webhook_item_id_hints"] = {canonical_path: clean_hints}
+        if server_id_filter:
+            overrides["server_id"] = server_id_filter
+        if regenerate:
+            overrides["force_generate"] = True
 
-    # Save the complete executable config before the job is visible to recovery.
-    # Vendor jobs retain their item hints and one-job-per-version response shape;
-    # they do not join the path-only source batches used by dedicated routes.
-    with _pending_lock:
-        fire_at = datetime.now(UTC).timestamp() + delay
-        job = get_job_manager().create_job(
-            library_name=library_display,
-            config={
-                **overrides,
-                "path_count": 1,
-                "webhook_basenames": [basename],
-                INTRO_CREDITS_FOLLOW_UP: True,
-                "webhook_debounce_pending": True,
-                "webhook_delay_mode": "vendor",
-                "webhook_fire_at": datetime.fromtimestamp(fire_at, tz=UTC).isoformat(),
-                "webhook_server_id": server_id,
-            },
-            server_id=b_sid,
-            server_name=b_sname,
-            server_type=b_stype,
-            priority=incoming_job_priority(),
-        )
-        ensure_pending_webhook(job.id)
+        # Save the complete executable config before the job is visible to recovery.
+        # Vendor jobs retain their item hints and one-job-per-version response shape;
+        # they do not join the path-only source batches used by dedicated routes.
+        with _pending_lock:
+            fire_at = datetime.now(UTC).timestamp() + delay
+            job = get_job_manager().create_job(
+                library_name=library_display,
+                config={
+                    **overrides,
+                    "path_count": 1,
+                    "webhook_basenames": [basename],
+                    INTRO_CREDITS_FOLLOW_UP: True,
+                    "webhook_debounce_pending": True,
+                    "webhook_delay_mode": "vendor",
+                    "webhook_fire_at": datetime.fromtimestamp(fire_at, tz=UTC).isoformat(),
+                    "webhook_server_id": server_id,
+                },
+                server_id=b_sid,
+                server_name=b_sname,
+                server_type=b_stype,
+                priority=incoming_job_priority(),
+            )
+            ensure_pending_webhook(job.id)
+    except Exception:
+        with _pending_lock:
+            _forget_dispatch(safe_source, server_id, canonical_path)
+        raise
     _add_history_entry(
         safe_source,
         "Webhook",
@@ -1027,157 +1045,160 @@ def _schedule_webhook_job(
         dedup_skip = age_sec is not None
 
         if not dedup_skip:
-            batch = _pending_batches.get(debounce_key)
-            is_fresh_batch = batch is None
+            try:
+                batch = _pending_batches.get(debounce_key)
+                is_fresh_batch = batch is None
 
-            # Compute fire_at up-front so we can persist it onto the
-            # Job's config in BOTH the fresh-batch and merge paths.
-            # Pre-fix this lived only on the in-memory ``batch`` dict
-            # — meaning the dashboard's per-row countdown had no Job
-            # field to bind to and we leaned on the /api/webhooks/pending
-            # banner instead. Now the timestamp travels with the Job,
-            # the row renders the countdown natively, and the banner
-            # becomes redundant (issue: webhook countdown UX, May 2026).
-            now_ts = datetime.now(UTC).timestamp()
-            opened_at = now_ts if is_fresh_batch else float(batch.get("opened_at", now_ts))
-            elapsed = now_ts - opened_at
-            max_wait = max(_WEBHOOK_BATCH_MAX_WAIT_SECONDS, delay, float(batch.get("max_wait", 0)) if batch else 0)
-            wait_s = min(delay, max(0.0, max_wait - elapsed))
-            fire_at_ts = now_ts + wait_s
-            fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=UTC).isoformat()
+                # Compute fire_at up-front so we can persist it onto the
+                # Job's config in BOTH the fresh-batch and merge paths.
+                # Pre-fix this lived only on the in-memory ``batch`` dict
+                # — meaning the dashboard's per-row countdown had no Job
+                # field to bind to and we leaned on the /api/webhooks/pending
+                # banner instead. Now the timestamp travels with the Job,
+                # the row renders the countdown natively, and the banner
+                # becomes redundant.
+                now_ts = datetime.now(UTC).timestamp()
+                opened_at = now_ts if is_fresh_batch else float(batch.get("opened_at", now_ts))
+                elapsed = now_ts - opened_at
+                max_wait = max(_WEBHOOK_BATCH_MAX_WAIT_SECONDS, delay, float(batch.get("max_wait", 0)) if batch else 0)
+                wait_s = min(delay, max(0.0, max_wait - elapsed))
+                fire_at_ts = now_ts + wait_s
+                fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=UTC).isoformat()
 
-            if is_fresh_batch:
-                # Pull server-context resolution forward so the Job can be
-                # created with the correct pinned-server fields. Previously
-                # this happened inside ``_execute_webhook_job`` 60s later.
-                b_sid, b_sname, b_stype = _resolve_webhook_server_context(server_id)
+                if is_fresh_batch:
+                    # Pull server-context resolution forward so the Job can be
+                    # created with the correct pinned-server fields. Previously
+                    # this happened inside ``_execute_webhook_job`` 60s later.
+                    b_sid, b_sname, b_stype = _resolve_webhook_server_context(server_id)
 
-                job_manager = get_job_manager()
-                job = job_manager.create_job(
-                    library_name=safe_title,
-                    priority=incoming_job_priority(),
-                    config={
-                        "source": source,
-                        "path_count": 1,
-                        "webhook_basenames": [basename],
-                        # webhook_paths MUST be persisted at batch-open.
-                        # If the container restarts during the debounce
-                        # window, requeue_interrupted_jobs revives the
-                        # Job with this exact ``job.config``; without
-                        # ``webhook_paths`` here the orchestrator's
-                        # branch at ``run_processing`` falls through to
-                        # _run_plex_full_scan_phase under the webhook's
-                        # Job ID. See Job e7968486 (May 2026): one
-                        # Sonarr webhook for one TV episode produced
-                        # eight full-library scans of 128k items each
-                        # across eleven revivals.
-                        "webhook_paths": [normalized_path],
-                        # ISO timestamp the debounce timer will fire at;
-                        # the dashboard's job-row countdown reads this.
-                        "webhook_fire_at": fire_at_iso,
-                        # Like webhook_paths, persisted now so a job revived
-                        # after a restart during the debounce keeps what the
-                        # fire would have given it: its publish pin, and the
-                        # Intro & Credits job that follows it (queued by the
-                        # preview runner when it starts the job).
-                        **({"server_id": b_sid} if b_sid else {}),
-                        INTRO_CREDITS_FOLLOW_UP: True,
-                        "webhook_debounce_pending": True,
-                        "webhook_batch_opened_at": opened_at,
-                        "webhook_batch_max_wait": max_wait,
-                        "webhook_server_id": server_id,
-                        "webhook_deleted_paths": sorted({p for p in (deleted_paths or []) if p}),
-                    },
-                    server_id=b_sid,
-                    server_name=b_sname,
-                    server_type=b_stype,
-                )
-                job_manager.add_log(
-                    job.id,
-                    f"INFO - Webhook accepted from {source}: {safe_title} — processing in ~{delay}s",
-                )
-                batch = {
-                    "source": source,
-                    "file_paths": set(),
-                    "titles": [],
-                    "server_id": server_id,
-                    # The configured server the webhook named (None when unknown): the job's publish pin.
-                    "server_id_pin": b_sid,
-                    "deleted_paths": set(),
-                    "job_id": job.id,
-                    "opened_at": opened_at,
-                    "max_wait": max_wait,
-                }
-                _pending_batches[debounce_key] = batch
-
-            batch["file_paths"].add(normalized_path)
-            batch["titles"].append(safe_title)
-            if deleted_paths:
-                # Defensive: older batches may not have the field if they
-                # were created by a stale code path concurrently.
-                batch.setdefault("deleted_paths", set())
-                for old in deleted_paths:
-                    if old:
-                        batch["deleted_paths"].add(old)
-
-            path_count = len(batch["file_paths"])
-
-            # On batch-merge, refresh the Job's config + library_name so
-            # the UI reflects the growing batch. Skipped on the fresh-batch
-            # path because ``create_job`` already set both correctly.
-            if not is_fresh_batch:
-                job_manager = get_job_manager()
-                batch_paths_sorted = sorted(batch["file_paths"])
-                batch_basenames = [os.path.basename(p) for p in batch_paths_sorted]
-                job_manager.update_job_config(
-                    batch["job_id"],
-                    {
-                        **job_manager.get_job(batch["job_id"]).config,
-                        "source": source,
-                        "path_count": path_count,
-                        "webhook_basenames": batch_basenames[:_HISTORY_FILES_PREVIEW_CAP],
-                        # Persist the full path list (no display-cap) so
-                        # a restart-revival still finds every path the
-                        # batch had accumulated. See the matching
-                        # comment in the fresh-batch branch above.
-                        "webhook_paths": batch_paths_sorted,
-                        # Persist the new countdown before replacing the timer
-                        # below so recovery and the job row share its deadline.
-                        "webhook_fire_at": fire_at_iso,
-                        # This call replaces the config: keep what batch-open
-                        # persisted for a revival (see the fresh-batch branch).
-                        **({"server_id": batch["server_id_pin"]} if batch.get("server_id_pin") else {}),
-                        INTRO_CREDITS_FOLLOW_UP: True,
-                        "webhook_debounce_pending": True,
-                        "webhook_batch_opened_at": opened_at,
-                        "webhook_batch_max_wait": max_wait,
-                        "webhook_server_id": server_id,
-                        "webhook_deleted_paths": sorted(batch["deleted_paths"]),
-                    },
-                )
-                # Flip single-title → "N files" once the batch grows past 1.
-                if path_count > 1:
-                    job_manager.update_job_library_name(
-                        batch["job_id"],
-                        f"{path_count} files",
+                    job_manager = get_job_manager()
+                    job = job_manager.create_job(
+                        library_name=safe_title,
+                        priority=incoming_job_priority(),
+                        config={
+                            "source": source,
+                            "path_count": 1,
+                            "webhook_basenames": [basename],
+                            # webhook_paths MUST be persisted at batch-open.
+                            # If the container restarts during the debounce
+                            # window, requeue_interrupted_jobs revives the
+                            # Job with this exact ``job.config``; without
+                            # ``webhook_paths`` here the orchestrator's
+                            # branch at ``run_processing`` falls through to
+                            # _run_plex_full_scan_phase under the webhook's
+                            # Job ID: one
+                            # Sonarr webhook for one episode once produced
+                            # eight full-library scans.
+                            "webhook_paths": [normalized_path],
+                            # ISO timestamp the debounce timer will fire at;
+                            # the dashboard's job-row countdown reads this.
+                            "webhook_fire_at": fire_at_iso,
+                            # Like webhook_paths, persisted now so a job revived
+                            # after a restart during the debounce keeps what the
+                            # fire would have given it: its publish pin, and the
+                            # Intro & Credits job that follows it (queued by the
+                            # preview runner when it starts the job).
+                            **({"server_id": b_sid} if b_sid else {}),
+                            INTRO_CREDITS_FOLLOW_UP: True,
+                            "webhook_debounce_pending": True,
+                            "webhook_batch_opened_at": opened_at,
+                            "webhook_batch_max_wait": max_wait,
+                            "webhook_server_id": server_id,
+                            "webhook_deleted_paths": sorted({p for p in (deleted_paths or []) if p}),
+                        },
+                        server_id=b_sid,
+                        server_name=b_sname,
+                        server_type=b_stype,
                     )
-                job_manager.add_log(
-                    batch["job_id"],
-                    f"INFO - Webhook merged into batch: {safe_title} (batch now has {path_count} path(s))",
-                )
-                if wait_s < delay:
+                    job_manager.add_log(
+                        job.id,
+                        f"INFO - Webhook accepted from {source}: {safe_title} — processing in ~{delay}s",
+                    )
+                    batch = {
+                        "source": source,
+                        "file_paths": set(),
+                        "titles": [],
+                        "server_id": server_id,
+                        # The configured server the webhook named (None when unknown): the job's publish pin.
+                        "server_id_pin": b_sid,
+                        "deleted_paths": set(),
+                        "job_id": job.id,
+                        "opened_at": opened_at,
+                        "max_wait": max_wait,
+                    }
+                    _pending_batches[debounce_key] = batch
+
+                batch["file_paths"].add(normalized_path)
+                batch["titles"].append(safe_title)
+                if deleted_paths:
+                    # Defensive: older batches may not have the field if they
+                    # were created by a stale code path concurrently.
+                    batch.setdefault("deleted_paths", set())
+                    for old in deleted_paths:
+                        if old:
+                            batch["deleted_paths"].add(old)
+
+                path_count = len(batch["file_paths"])
+
+                # On batch-merge, refresh the Job's config + library_name so
+                # the UI reflects the growing batch. Skipped on the fresh-batch
+                # path because ``create_job`` already set both correctly.
+                if not is_fresh_batch:
+                    job_manager = get_job_manager()
+                    batch_paths_sorted = sorted(batch["file_paths"])
+                    batch_basenames = [os.path.basename(p) for p in batch_paths_sorted]
+                    job_manager.update_job_config(
+                        batch["job_id"],
+                        {
+                            **job_manager.get_job(batch["job_id"]).config,
+                            "source": source,
+                            "path_count": path_count,
+                            "webhook_basenames": batch_basenames[:_HISTORY_FILES_PREVIEW_CAP],
+                            # Persist the full path list (no display-cap) so
+                            # a restart-revival still finds every path the
+                            # batch had accumulated. See the matching
+                            # comment in the fresh-batch branch above.
+                            "webhook_paths": batch_paths_sorted,
+                            # Persist the new countdown before replacing the timer
+                            # below so recovery and the job row share its deadline.
+                            "webhook_fire_at": fire_at_iso,
+                            # This call replaces the config: keep what batch-open
+                            # persisted for a revival (see the fresh-batch branch).
+                            **({"server_id": batch["server_id_pin"]} if batch.get("server_id_pin") else {}),
+                            INTRO_CREDITS_FOLLOW_UP: True,
+                            "webhook_debounce_pending": True,
+                            "webhook_batch_opened_at": opened_at,
+                            "webhook_batch_max_wait": max_wait,
+                            "webhook_server_id": server_id,
+                            "webhook_deleted_paths": sorted(batch["deleted_paths"]),
+                        },
+                    )
+                    # Flip single-title → "N files" once the batch grows past 1.
+                    if path_count > 1:
+                        job_manager.update_job_library_name(
+                            batch["job_id"],
+                            f"{path_count} files",
+                        )
                     job_manager.add_log(
                         batch["job_id"],
-                        f"INFO - Batch runs in {round(wait_s)}s: a batch waits at most "
-                        f"{round(max_wait / 60)} minutes from its first webhook; "
-                        "webhooks after that start a new batch",
+                        f"INFO - Webhook merged into batch: {safe_title} (batch now has {path_count} path(s))",
                     )
+                    if wait_s < delay:
+                        job_manager.add_log(
+                            batch["job_id"],
+                            f"INFO - Batch runs in {round(wait_s)}s: a batch waits at most "
+                            f"{round(max_wait / 60)} minutes from its first webhook; "
+                            "webhooks after that start a new batch",
+                        )
 
-            batch["fire_at"] = fire_at_ts
-            batch["max_wait"] = max_wait
+                batch["fire_at"] = fire_at_ts
+                batch["max_wait"] = max_wait
 
-            _arm_webhook_timer(debounce_key, batch, wait_s)
-            early_scan_job_id = batch["job_id"]
+                _arm_webhook_timer(debounce_key, batch, wait_s)
+                early_scan_job_id = batch["job_id"]
+            except Exception:
+                _forget_dispatch(safe_source, server_id, normalized_path)
+                raise
 
     if dedup_skip:
         logger.info(
@@ -1376,7 +1397,7 @@ def _dispatch_webhook_batch(debounce_key: str, batch: dict) -> None:
         # debounce-schedule time. We deliberately do NOT refresh the
         # timestamps here — refreshing would extend the dedup window past
         # the configured TTL, blocking legitimate re-imports for up to
-        # 2x TTL after the original fire (audit M5).
+        # 2x TTL after the original fire.
 
         # ``deleted_paths`` carries Radarr/Sonarr ``deletedFiles[]`` from
         # upgrade events through to ``process_canonical_path`` so the
@@ -1438,13 +1459,45 @@ def _dispatch_webhook_batch(debounce_key: str, batch: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _ignore_no_path_response(source: str, label: str, title: str, data: dict):
+    """Record and answer a Radarr/Sonarr "Download" payload that carried no file path."""
+    logger.debug(
+        "Webhook: {} payload had no extractable file path. Structure: {}\nFull payload: {}",
+        label,
+        _summarize_payload(data),
+        json.dumps(data, default=str, ensure_ascii=False),
+    )
+    _add_history_entry(source, "Download", title, "ignored_no_path")
+    return (
+        jsonify({"success": True, "message": f"Ignored '{title}' download: no file path in payload"}),
+        200,
+    )
+
+
+def _duplicate_response(title: str):
+    """Answer a webhook whose path was dispatched within the dedup window (history already says "deduped")."""
+    return jsonify({"success": True, "message": f"Ignored '{title}': already queued recently"}), 200
+
+
+def _nudge_once_per_folder(queued_paths: list[str], source: str, server_id: str | None) -> None:
+    """Send one early scan-nudge per folder for the paths just batched (a server scans a folder at a time)."""
+    with _pending_lock:
+        batch = _pending_batches.get(_debounce_key(source, server_id))
+        job_id = batch.get("job_id") if batch else None
+    if not job_id:
+        return
+    first_per_folder = {os.path.dirname(path): path for path in reversed(queued_paths)}
+    for path in sorted(first_per_folder.values()):
+        _kick_early_scan(path, server_id, job_id)
+
+
 @webhooks_bp.route("/radarr", methods=["POST"])
 @_authenticate_webhook
 @_validate_webhook_delay
 def radarr_webhook():
     """Receive Radarr webhook payloads."""
     data = request.get_json(force=True, silent=True)
-    if not data:
+    if not data or not isinstance(data, dict):
         logger.warning(
             "Webhook from {}: Radarr request ignored — the body wasn't valid JSON "
             "(Content-Type={}, Content-Length={}). Other webhooks are still being accepted. "
@@ -1482,23 +1535,10 @@ def radarr_webhook():
     kwargs = _webhook_job_kwargs(server_id)
     if deleted_paths:
         kwargs["deleted_paths"] = deleted_paths
-    was_queued = _schedule_webhook_job("radarr", movie_title, movie_file_path, **kwargs)
-    if not was_queued:
-        logger.debug(
-            "Webhook: Radarr payload had no extractable file path. Structure: {}\nFull payload: {}",
-            _summarize_payload(data),
-            json.dumps(data, default=str, ensure_ascii=False),
-        )
-        _add_history_entry("radarr", "Download", movie_title, "ignored_no_path")
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "message": f"Ignored '{movie_title}' download: no file path in payload",
-                }
-            ),
-            200,
-        )
+    if not _schedule_webhook_job("radarr", movie_title, movie_file_path, **kwargs):
+        if not (movie_file_path or "").strip():
+            return _ignore_no_path_response("radarr", "Radarr", movie_title, data)
+        return _duplicate_response(movie_title)
 
     _add_history_entry("radarr", "Download", movie_title, "queued")
 
@@ -1519,7 +1559,7 @@ def _handle_sonarr_compatible_webhook(source: str):
     """
     label = source.title()
     data = request.get_json(force=True, silent=True)
-    if not data:
+    if not data or not isinstance(data, dict):
         logger.warning(
             "Webhook from {}: {} request ignored — the body wasn't valid JSON "
             "(Content-Type={}, Content-Length={}). Other webhooks are still being accepted. "
@@ -1575,24 +1615,10 @@ def _handle_sonarr_compatible_webhook(source: str):
     kwargs = _webhook_job_kwargs(server_id)
     if deleted_paths:
         kwargs["deleted_paths"] = deleted_paths
-    was_queued = _schedule_webhook_job(source, display_title, episode_file_path, **kwargs)
-    if not was_queued:
-        logger.debug(
-            "Webhook: {} payload had no extractable file path. Structure: {}\nFull payload: {}",
-            label,
-            _summarize_payload(data),
-            json.dumps(data, default=str, ensure_ascii=False),
-        )
-        _add_history_entry(source, "Download", display_title, "ignored_no_path")
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "message": f"Ignored '{display_title}' download: no file path in payload",
-                }
-            ),
-            200,
-        )
+    if not _schedule_webhook_job(source, display_title, episode_file_path, **kwargs):
+        if not (episode_file_path or "").strip():
+            return _ignore_no_path_response(source, label, display_title, data)
+        return _duplicate_response(display_title)
 
     _add_history_entry(source, "Download", display_title, "queued")
 
@@ -1642,14 +1668,7 @@ def _handle_sonarr_import_complete(
         )
         return jsonify({"success": True, "message": f"'{display_title}': every file was already queued"}), 200
 
-    with _pending_lock:
-        batch = _pending_batches.get(_debounce_key(source, server_id))
-        job_id = batch.get("job_id") if batch else None
-    if job_id:
-        # A server scans a folder at a time: one nudge per season folder, not one per episode.
-        first_per_folder = {os.path.dirname(path): path for path in reversed(queued)}
-        for path in sorted(first_per_folder.values()):
-            _kick_early_scan(path, server_id, job_id)
+    _nudge_once_per_folder(queued, source, server_id)
     _add_history_entry(source, "Download", display_title, "queued")
     return (
         jsonify({"success": True, "message": f"Processing queued for '{display_title}' ({len(queued)} file(s))"}),
@@ -2153,25 +2172,17 @@ def plex_webhook():
     #      path out to both Plex servers (double processing).
     # Mirrors the Sonarr handler at line 1325-1329.
     job_kwargs = _webhook_job_kwargs(resolved_server_id)
-    # Schedule EVERY resolved path. A list comprehension (not a generator)
-    # is load-bearing here: ``any(generator)`` short-circuits on the first
-    # truthy result, so when one library.new resolves to multiple episode
-    # paths (a show/season add — see _walk_to_leaf_items) only the first
-    # episode would ever get queued. Regression #257: the reporter's batch
-    # showed only S01E01 of each multi-episode show.
-    queued_any = any([_schedule_webhook_job("plex", display_title, path, **job_kwargs) for path in paths])
+    # Schedule EVERY resolved path (a show/season add resolves to many episodes — see _walk_to_leaf_items; a
+    # short-circuiting any() once queued only S01E01, regression #257). The early scan-nudge is sent once per
+    # folder below, not once per episode.
+    queued = [
+        path for path in paths if _schedule_webhook_job("plex", display_title, path, early_scan=False, **job_kwargs)
+    ]
 
-    if not queued_any:
-        _add_history_entry("plex", "library.new", display_title, "ignored_no_path")
-        return (
-            jsonify(
-                {
-                    "success": True,
-                    "message": f"No valid paths queued for '{display_title}'",
-                }
-            ),
-            200,
-        )
+    if not queued:
+        return _duplicate_response(display_title)
+
+    _nudge_once_per_folder(queued, "plex", resolved_server_id)
 
     _add_history_entry("plex", "library.new", display_title, "queued")
     return (
@@ -2195,7 +2206,7 @@ def custom_webhook():
     At least one of ``file_path`` or ``file_paths`` is required (unless eventType is "Test").
     """
     data = request.get_json(force=True, silent=True)
-    if not data:
+    if not data or not isinstance(data, dict):
         logger.warning(
             "Webhook from {}: Custom request ignored — the body wasn't valid JSON "
             "(Content-Type={}, Content-Length={}). Other webhooks are still being accepted. "
@@ -2241,17 +2252,18 @@ def custom_webhook():
 
     server_id = (request.args.get("server_id") or "").strip() or None
     kwargs = _webhook_job_kwargs(server_id)
-    for path in paths:
-        _schedule_webhook_job("custom", title, path, **kwargs)
+    queued = [path for path in paths if _schedule_webhook_job("custom", title, path, **kwargs)]
+    if not queued:
+        return _duplicate_response(title)
 
     _add_history_entry("custom", "Custom", title, "queued")
 
-    noun = "file" if len(paths) == 1 else "files"
+    noun = "file" if len(queued) == 1 else "files"
     return (
         jsonify(
             {
                 "success": True,
-                "message": f"Processing queued for {len(paths)} {noun}",
+                "message": f"Processing queued for {len(queued)} {noun}",
             }
         ),
         202,
@@ -2336,12 +2348,16 @@ def _fire_pending_batch_now(debounce_key: str, job_id: str | None = None) -> boo
         if batch is None or (job_id is not None and batch["job_id"] != job_id):
             return False
         job = get_job_manager().get_job(batch.get("job_id"))
-        if job is None or job.status in (JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.RUNNING):
-            _execute_webhook_job(debounce_key)
-            return False
-        logger.info("Webhook batch {!r}: user requested fire-now; dispatching immediately.", debounce_key)
+        fired = job is not None and job.status not in (
+            JobStatus.CANCELLED,
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.RUNNING,
+        )
+        if fired:
+            logger.info("Webhook batch {!r}: user requested fire-now; dispatching immediately.", debounce_key)
         _execute_webhook_job(debounce_key)
-        return True
+        return fired
 
 
 def find_pending_batch_key_for_job(job_id: str) -> str | None:

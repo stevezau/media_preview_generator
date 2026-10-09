@@ -678,8 +678,8 @@ class TestLanding:
         assert [tag for tag in pictures if not re.search(r'alt="[^"]+"', tag)] == []
 
     def test_no_placeholder_figure_ships(self, site: Path) -> None:
-        # The hero, three-player and HDR figures stood in as marked placeholders until the lab
-        # captures were approved (plan Task 9 Step 8). None may come back, and each figure shows its
+        # The hero, three-player and HDR figures once stood in as marked placeholders until the lab
+        # captures were approved. None may come back, and each figure shows its
         # capture; test_landing_pictures_reserve_half_their_pixel_size opens every one.
         home = (site / "index.html").read_text(encoding="utf-8")
         assert re.findall(r'data-placeholder="([^"]+)"', home) == []

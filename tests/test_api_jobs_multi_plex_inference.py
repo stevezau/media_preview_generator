@@ -25,10 +25,9 @@ Plex's id — for a scan the operator pinned to the SECOND).
 
 from __future__ import annotations
 
-import io
 import json
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -268,8 +267,7 @@ class TestCreateJobExplicitServerId:
         mock_start.assert_called_once()
         # The async-start kwargs carry the config_overrides — pin the
         # contract that ``server_id`` survives the round-trip into the
-        # job runner's overrides dict (where job_runner.py:498 will
-        # translate it to ``config.server_id_filter``).
+        # job runner's overrides dict.
         call_args = mock_start.call_args
         # _start_job_async(job_id, config_overrides) — kwargs vary by
         # endpoint, so look at positional args too.
@@ -318,50 +316,44 @@ class TestCreateJobExplicitServerId:
 
 
 class TestServerIdSurvivesIntoConfigServerIdFilter:
-    """End-to-end pin: the explicit ``server_id`` in the request body
-    must propagate all the way into ``Config.server_id_filter`` — that's
-    the attribute the multi-server dispatcher reads (orchestrator.py:399,
-    multi_server.py:1196). A refactor that renames the overrides key
-    but forgets to update the translation in job_runner.py:498 would
-    silently regress this back into the #244 bug shape (D34's exact
-    failure mode in a different form)."""
+    """The ``server_id`` in the request body must reach ``Config.server_id_filter``.
 
-    def test_server_id_override_translates_to_config_server_id_filter(self):
-        """The translation at job_runner.py:498 turns
-        ``config_overrides["server_id"]`` into
-        ``config.server_id_filter``. Pin it directly."""
-        from types import SimpleNamespace
+    That attribute is what the multi-server dispatcher reads. These tests run
+    the real job runner and capture the config handed to ``run_processing``.
+    """
 
-        config = SimpleNamespace(server_id_filter=None)
-        overrides = {"server_id": "plex-calypso-4k"}
+    @pytest.mark.parametrize(
+        ("body_server_id", "expected_filter"), [("plex-calypso-4k", "plex-calypso-4k"), ("", None)]
+    )
+    def test_server_id_reaches_config_server_id_filter(
+        self, client, tmp_path, two_plex_servers_overlapping_ids, body_server_id, expected_filter
+    ):
+        captured = []
+        mock_config = MagicMock()
+        mock_config.path_mappings = []
+        mock_config.tmp_folder = str(tmp_path)
+        mock_config.server_id_filter = None
 
-        # Mirror the loop body at job_runner.py:495-498.
-        for key, value in overrides.items():
-            if key == "server_id":
-                config.server_id_filter = str(value) if value else None
-            elif hasattr(config, key):
-                setattr(config, key, value)
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator.run_processing",
+                side_effect=lambda config, *args, **kwargs: captured.append(config),
+            ),
+            patch("media_preview_generator.config.load_config", return_value=mock_config),
+            patch(
+                "media_preview_generator.processing.generator._verify_tmp_folder_health",
+                return_value=(True, []),
+            ),
+            patch("media_preview_generator.utils.setup_working_directory", return_value=str(tmp_path / "work")),
+            patch("media_preview_generator.gpu.detect.detect_all_gpus", return_value=[]),
+        ):
+            resp = client.post(
+                "/api/jobs",
+                data=json.dumps({"library_ids": ["1"], "server_id": body_server_id, "priority": 2, "config": {}}),
+                content_type="application/json",
+                headers={"X-Auth-Token": "test-token-12345678"},
+            )
 
-        assert config.server_id_filter == "plex-calypso-4k", (
-            f"server_id override MUST translate to config.server_id_filter; "
-            f"got config.server_id_filter={config.server_id_filter!r}"
-        )
-
-    def test_empty_string_server_id_translates_to_none(self):
-        """Defensive: ``server_id=""`` is "no pin", not "pin to id-with-
-        empty-string". The translator coerces to ``None`` so the
-        dispatcher's ``if server_id_filter:`` check correctly falls
-        through to fan-out. Matches the empty-string case the
-        tightened ambiguous test above also covers."""
-        from types import SimpleNamespace
-
-        config = SimpleNamespace(server_id_filter=None)
-        for key, value in {"server_id": ""}.items():
-            if key == "server_id":
-                config.server_id_filter = str(value) if value else None
-            elif hasattr(config, key):
-                setattr(config, key, value)
-        assert config.server_id_filter is None
-
-
-_ = io  # imports kept for symmetry with sibling test files
+        assert resp.status_code in (200, 201), resp.get_data(as_text=True)
+        assert len(captured) == 1
+        assert captured[0].server_id_filter == expected_filter

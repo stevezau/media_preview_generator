@@ -1,4 +1,4 @@
-"""Header-driven pacing for online sources (spec §4 "Limits").
+"""Header-driven pacing for online sources.
 
 One limiter per source, shared by every job and thread. ``acquire`` reserves the next free time slot under a lock, so
 concurrent check threads never burst past the per-window limit, then waits outside the lock in short polls so a
@@ -197,7 +197,7 @@ class SourceLimiter:
         """Start a new UTC day's count. Caller holds the lock.
 
         The day, not ``x-usagelimit-reset``, ends the budget: TheIntroDB sends that header as ``0`` while 173 of 500
-        requests remain (measured 2026-09-14), so it can't mean "seconds until reset".
+        requests remain (measured), so it can't mean "seconds until reset".
         """
         day = self._utc_day()
         if day != self._day:

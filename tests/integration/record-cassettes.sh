@@ -53,10 +53,7 @@ if [[ "${1:-}" == "--clean" ]]; then
     find "${CASSETTE_DIR}" -mindepth 2 -maxdepth 2 -name '*.yaml' -path '*/test_servers_*_vcr/*' -print -delete || true
 fi
 
-PYTHON="${PYTHON:-/home/data/.venv/bin/python}"
-if [[ ! -x "${PYTHON}" ]]; then
-    PYTHON="$(command -v python3 || command -v python)"
-fi
+PYTHON="${PYTHON:-$(command -v python3 || command -v python)}"
 
 echo
 echo "==> recording cassettes (PLEX=${PLEX_URL}  EMBY=${EMBY_URL}  JELLYFIN=${JELLYFIN_URL})"

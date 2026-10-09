@@ -16,11 +16,10 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: POSIX :: Linux",
-    "Operating System :: Microsoft :: Windows",
-    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Multimedia :: Video",
     "Topic :: System :: Archiving",
 ]
@@ -28,11 +27,9 @@ keywords = ["plex", "emby", "jellyfin", "media-server", "video", "thumbnails", "
 dependencies = [
     "requests==2.33.0",
     "defusedxml>=0.7.1,<1",
-    # urllib3 >=2.6.3 covers CVE-2025-50181/50182 (redirect-handling),
-    # CVE-2025-66418/66471 (chunked encoding), CVE-2026-21441
-    # (proxy-auth). python>=3.11 is already required so dropping 1.x
-    # support is safe.
-    "urllib3>=2.6.3,<3.0.0",
+    # urllib3 >=2.8.0 covers PYSEC-2026-4175/4176/4177 on top of the earlier CVE-2025-50181/50182 (redirect
+    # handling), CVE-2025-66418/66471 (chunked encoding) and CVE-2026-21441 (proxy-auth).
+    "urllib3>=2.8.0,<3.0.0",
     # python-dotenv >=1.2.2 covers CVE-2026-28684.
     "python-dotenv>=1.2.2,<2",
     "plexapi==4.17.1",
@@ -40,6 +37,7 @@ dependencies = [
     "rich>=13.9,<14",
     "pymediainfo==7.0.1",
     "flask>=3.0.0,<4",
+    "markupsafe>=2.1",  # imported directly by web/notifications.py
     "werkzeug>=3.1.9,<3.2",  # 3.1.7 rejected underscores in Host (#196); 3.1.9 accepts them and patches the safe_join CVE
     "flask-wtf>=1.2.0,<2",
     "flask-socketio>=5.3.0,<6",
@@ -64,8 +62,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-nvidia = ["pynvml==11.6.0"]
-amd = ["amdsmi==6.2.1"]
 test = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
@@ -73,15 +69,6 @@ test = [
     "pytest-xdist>=3.0.0",
     "pytest-timeout>=2.3.0",
     "pytest-playwright>=0.4.0",
-    # Auto-retry Chromium-and-runner-induced flakes on CI. Sharding
-    # (see pytest-shard below) handles the Chromium SIGSEGV-class
-    # accumulation flakes by giving each shard a fresh runner. But
-    # a separate flake class — "element is not stable" wizard
-    # transitions on GH's slow CPU — needs up to 3 attempts to
-    # clear. ``--reruns 2`` (set in ci.yml) covers both classes;
-    # 3 consecutive failures still flag real regressions. Local
-    # runs (32-core box) pass without reruns.
-    "pytest-rerunfailures>=14.0",
     # Shard the e2e suite across multiple GH Actions jobs. Each
     # shard runs an independent ubuntu-latest runner = fresh
     # Chromium, fresh memory budget, so no cross-test state
@@ -93,7 +80,6 @@ test = [
     # shard size — is what bounds memory accumulation now.
     "pytest-shard>=0.1.2",
     "playwright>=1.40.0",
-    "flask-cors>=6.0.0,<7",
     # vcrpy + pytest-recording for vendor-API contract cassettes.
     # Records real HTTP request/response shapes against live Plex / Emby /
     # Jellyfin to YAML cassettes; replays in CI so tests run offline AND
@@ -113,7 +99,6 @@ dev = [
     "media-preview-generator[test]",
     "ruff>=0.6.0",
     "pre-commit>=3.6.0",
-    "httpie>=3.2.0",
 ]
 
 [project.urls]
@@ -130,6 +115,8 @@ include = ["media_preview_generator*"]
 # The GPU decode check's reference clips (markers/credits/decode_check.py), in the wheel even where the build can't
 # ask git which files it tracks (the Docker builder has no .git).
 "media_preview_generator.markers.credits" = ["reference_clips/*.mkv"]
+# The GPU detection smoke-test clip (gpu/detect.py), same reason.
+"media_preview_generator.gpu" = ["assets/test_video.mp4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -207,7 +194,6 @@ extend-exclude = [
     ".venv-test",
     "htmlcov",
     "tmp_migration_test",
-    "docs/design/intro-credits/evidence",
 ]
 
 [tool.ruff.lint]

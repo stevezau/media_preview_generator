@@ -50,7 +50,7 @@
 .dashboard-layout .queue-filter select { height: 36px; min-width: 0; width: 100%; padding: 0 28px 0 30px; border-radius: 9px; border: 1px solid var(--line-strong); background-color: transparent; color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; text-overflow: ellipsis; }
 .dashboard-layout .queue-filter select:hover { color: var(--bs-body-color); background-color: var(--inset); }
 .dashboard-layout .queue-filter select option { background: var(--bs-body-bg); color: var(--bs-body-color); }
-.dashboard-layout .dashboard-layout .queue-clear-filters { flex: none; }
+.dashboard-layout .queue-clear-filters { flex: none; }
 .dashboard-layout .queue-filter-count { flex: none; margin-left: auto; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Table */

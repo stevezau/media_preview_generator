@@ -3,7 +3,7 @@ HDR/DV detection, retry orchestration, BIF packing.
 
 Sub-modules:
 
-* :mod:`.orchestrator`   — :func:`generate_images` drives the per-item
+* :mod:`.generator`      — :func:`generate_images` drives the per-item
   pipeline (4-tier retry cascade, BIF packing, failure tracking).
   Higher-level dispatch lives in :mod:`.multi_server.process_canonical_path`,
   which fans out to every owning publisher.
@@ -70,16 +70,7 @@ from .hdr_detection import (  # noqa: F401
 )
 from .registry import get_processor_for, register_processor, registered_types  # noqa: F401
 from .retry_cascade import (  # noqa: F401
-    RetryTier,
     classify_cpu_fallback_reason,
     classify_dv_safe_retry_reason,
 )
 from .types import ProcessableItem, ScanOutcome  # noqa: F401
-
-# Legacy underscore-prefixed aliases — the HDR helpers used to live in
-# ``media_processing`` as private names; keep them importable under the
-# old spelling so existing tests / third-party code doesn't break.
-_is_dolby_vision = is_dolby_vision
-_is_dv_no_backward_compat = is_dv_no_backward_compat
-_detect_dolby_vision_rpu_error = detect_dolby_vision_rpu_error
-_detect_zscale_colorspace_error = detect_zscale_colorspace_error

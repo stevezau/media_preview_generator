@@ -20,7 +20,7 @@ class TestValidateGlobal:
 
     @pytest.mark.parametrize("value", ["high", "medium", "low", None, 5])
     def test_drops_the_removed_publish_when_whatever_it_says(self, value):
-        # An older settings.json or client still sends it; every decision is made at "medium" now (2026-09-24).
+        # An older settings.json or client still sends it; every decision is made at "medium" now.
         block, err = ms.validate_global({"publish_when": value}, None)
         assert (block, err) == (ms.DEFAULT_GLOBAL_MARKERS, "")
 
@@ -477,7 +477,7 @@ class TestLoadGlobal:
 # The default block's detection fingerprint as the build before `credits_window` (and with `respect_locks`) made it,
 # at "medium": an install that never touches the window must keep it, or every stored decision is restamped on upgrade.
 FINGERPRINT_BEFORE_CREDITS_WINDOW = "733d535f44b29c37f3d39708ef2867ae53089845"
-# The same block at "high", the default until 2026-09-24: such an install's decisions were made under other rules.
+# The same block at "high", the former default: such an install's decisions were made under other rules.
 FINGERPRINT_AT_HIGH_BEFORE_IT_WAS_REMOVED = "06fa6eaf506e60d492ae5a862514be2ac35a3ce0"
 
 
@@ -567,7 +567,7 @@ class TestCreditsWindow:
 
 
 class TestPublishWhenIsGone:
-    """The High/Medium choice was removed (owner, 2026-09-24): every decision is made at "medium"."""
+    """The High/Medium choice was removed: every decision is made at "medium"."""
 
     @pytest.mark.parametrize("old", ["high", "medium", "sometimes"])
     def test_an_old_settings_json_that_still_has_it_loads_as_the_defaults_without_a_warning(self, old, loguru_caplog):

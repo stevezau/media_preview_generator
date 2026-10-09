@@ -1,4 +1,4 @@
-"""Decision rules (spec §5.5): locks, sanity bounds, chapters, agreeing independent sources, a single source at
+"""Decision rules: locks, sanity bounds, chapters, agreeing independent sources, a single source at
 "Medium", the cross-type overlap checks, and then shortening credits/previews to the servers' own markers.
 
 Every result depends only on the set of candidates, never on the order they arrive in.
@@ -19,14 +19,9 @@ from .speed import online_time_scale
 
 # These rules' version: a change that can decide stored answers differently raises it, and every file decided under
 # older rules is decided again from what it has stored (``markers.versions``; each run records the version a file was
-# decided under in ``version_reruns``, under ``DECIDE_RULES``). 1: the 2026-09-25 rules (SkipDB never decides alone,
-# credit text checks a credits chapter SkipDB disagrees with, online credits may end up to 5 s past the file, another
-# release's intro beside season audio; spec §5.5 rules 2, 3, 6 and 14). 2: the 2026-09-27 rules (credit text moves a
-# credits chapter's start to the roll it reads, and wins a credits start from an online answer more than 5 s from it;
-# season audio checks an intro chapter an online answer ends inside; a lone online answer kept through a rule change
-# goes once a detector reading the file has found nothing to agree with it; spec §5.5 rules 3, 4 and 16). 3: the
-# 2026-09-28 carry-over (a replaced file's marker only content detectors decided isn't carried to a file they read now
-# and found nothing in; spec §5.5 rule 15): the version re-run lists the files holding a carried marker too.
+# decided under in ``version_reruns``, under ``DECIDE_RULES``). The version also covers the carry-over: a replaced
+# file's marker only content detectors decided isn't carried to a file they read now and found nothing in, so the
+# version re-run lists the files holding a carried marker too.
 DECIDE_RULES = "decide_rules"
 DECIDE_RULES_VERSION = 3
 # A decided type whose published marker today's rules would leave without one keeps it, until new or changed evidence
@@ -46,26 +41,26 @@ PREVIEW_CREDITS_MAX_OVERLAP_MS = 10_000
 SEASON_INTRO_CHAPTERS_MIN_OTHERS = 2
 SEASON_INTRO_CHAPTER_MIN_MARGIN_MS = 30_000
 LONG_INTRO_CHAPTER_REASON = "Intro chapter is much longer than the rest of the season's"
-# Rule 3 for credits (2026-09-25 audit, Somebody Somewhere S03): a SkipDB answer against a credits chapter nothing else
+# Rule 3 for credits: a SkipDB answer against a credits chapter nothing else
 # agrees with has credit text read the file's frames; credit text with an independent source outvotes the chapter.
 TEXT_CHECKS_CHAPTER_REASON = "chapters contradicted by skipdb; waiting for credit text to check them"
 TEXT_OVER_CHAPTER_REASON = "credit text and agreeing sources contradict the chapters: "
 TEXT_MOVES_CHAPTER_REASON = "chapters, the start moved to the credit roll the frames show"
-# The same for an intro chapter (2026-09-27 audit: a streaming release's "Intro" chapter ran 28 s into the episode, where
-# IntroDB ended at the title card): an online answer ending before it has season audio read the file, and season audio
+# The same for an intro chapter (a streaming release's "Intro" chapter ran 28 s into the episode, where IntroDB ended
+# at the title card): an online answer ending before it has season audio read the file, and season audio
 # with an independent source outvotes the chapter.
 AUDIO_CHECKS_CHAPTER_REASON = "chapters contradicted by an online answer; waiting for season audio to check them"
 AUDIO_OVER_CHAPTER_REASON = "season audio and agreeing sources contradict the chapters: "
 # Credit text reads this file's own frames; an online credits start was timed on whichever release its users had. In a
 # cluster of agreeing credits answers, credit text supplies the start whenever the source-order winner starts further
-# than this from it (2026-09-27 audit: one show's IntroDB, read on this file's clock, 6-7 s into the roll where credit
-# text had its first card).
+# than this from it (one show's IntroDB, read on this file's clock, was 6-7 s into the roll where credit text had its
+# first card).
 TEXT_OVER_ONLINE_MS = 5_000
 # The note a credits decision's reason carries when credit text supplied the start of agreeing answers over another
 # source that isn't a server's marker, by ``TEXT_OVER_ONLINE_MS`` or by the user's order (:func:`took_start_from_text`).
 # A server's marker may still move that start later afterwards (rule 7), which the reason then adds.
 TEXT_START_NOTE = "start from credit text"
-# IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
+# IntroDB data looks partly seeded from other sources, so IntroDB and TheIntroDB are always one
 # independence group -- never two votes, whether or not they agree with each other.
 _INTRODB_GROUP = "introdb/theintrodb"
 _INDEPENDENCE_GROUP = {
@@ -76,20 +71,19 @@ _INDEPENDENCE_GROUP = {
     # The previous season's audio is the same method on the same show: never a second opinion for season audio.
     Source.SEASON_AUDIO_PREVIOUS: Source.SEASON_AUDIO.value,
 }
-# Markers an importer plugin wrote on a Jellyfin/Emby server are the database it imports again (rule 8; ruling
-# 2026-09-16): a SkipDB importer's copy never agrees with SkipDB. AniSkip isn't a source yet and nothing has measured
-# what it copies, so its copies stay with the crowd group until phase 4 does (precision first). Only the SkipDB row
+# Markers an importer plugin wrote on a Jellyfin/Emby server are the database it imports again (rule 8): a SkipDB
+# importer's copy never agrees with SkipDB. AniSkip isn't a source yet and nothing has measured what it copies, so its
+# copies stay with the crowd group (precision first). Only the SkipDB row
 # changes a result today: the other two restate the default above, spelled out so the AniSkip choice is a visible
 # decision, not a fallback someone "simplifies" away.
 _IMPORTED_GROUP = {"introdb": _INTRODB_GROUP, "skipdb": Source.SKIPDB.value, "aniskip": _INTRODB_GROUP}
 # At "Medium" a lone source publishes only when it reads this file itself (rule 6): chapters, credits text, which reads
-# this file's own frames (owner, Q1, 2026-09-16), and season audio's intros (owner, 2026-09-24, overriding R2: alone 91
-# useful / 13 wrong / 14 missed on 118 episodes, against Plex's own 23 right / 15 wrong; "if it doesn't exist online
-# then use the GPU/CPU check"). IntroDB takes no duration and TheIntroDB answers the closest cut it has. SkipDB's
-# duration match proves the cut, not the segment's edges (2026-09-25 audit: three episodes of one show alone covered 20 s
-# of a 97 s title sequence, a season of another show ended 5-11 s late on 4 of 4 online cases), so it too waits for a check against
-# the file. Markers already on servers never decide alone (rule 7). The previous season's audio stays a hint: alone it
-# was 48 useful / 10 wrong / 24 missed (precision 83 %), and the owner ruled on 2026-09-13 that it needs a second source.
+# this file's own frames, and season audio's intros (alone 91 useful / 13 wrong / 14 missed on 118 episodes, against
+# Plex's own 23 right / 15 wrong). IntroDB takes no duration and TheIntroDB answers the closest cut it has. SkipDB's
+# duration match proves the cut, not the segment's edges (three episodes of one show alone covered 20 s of a 97 s
+# title sequence, a season of another show ended 5-11 s late on 4 of 4 online cases), so it too waits for a check
+# against the file. Markers already on servers never decide alone (rule 7). The previous season's audio stays a hint: alone it
+# was 48 useful / 10 wrong / 24 missed (precision 83 %), so it needs a second source.
 _AGREEMENT_ONLY = SERVER_SOURCES | {
     Source.INTRODB,
     Source.THEINTRODB,
@@ -97,14 +91,13 @@ _AGREEMENT_ONLY = SERVER_SOURCES | {
     Source.SEASON_AUDIO_PREVIOUS,
 }
 # Season audio doesn't confirm markers already on a server on its own: a server's own intro detection matches audio across
-# episodes too (ruling G3, precision first). Agreement needs a source outside these.
+# episodes too (precision first). Agreement needs a source outside these.
 _AUDIO_OR_SERVER = SERVER_SOURCES | {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}
 SEASON_AUDIO_WITH_SERVER_REASON = (
     "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
 )
 # The level the app decides at: one source that checks the file itself may decide alone (rule 6). The stricter "high"
-# (always two agreeing sources) left most of a library undecided and was removed from Settings (owner ruling
-# 2026-09-24); ``DecisionContext`` still takes it for the evaluation harness.
+# (always two agreeing sources) left most of a library undecided and was removed from Settings; ``DecisionContext`` still takes it for the evaluation harness.
 APP_PUBLISH_WHEN = "medium"
 # How a reason names a source (the words Settings uses for it).
 _SOURCE_LABELS = {
@@ -121,7 +114,7 @@ _SOURCE_LABELS = {
 _READS_THE_FILE = frozenset({Source.CHAPTERS, Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS, Source.CREDITS_TEXT})
 # The file reads that win a disagreement with online or server answers: where those can't settle credits, credit text
 # decides, and an agreeing pair of them doesn't overrule it. Season audio doesn't: an intro disagreement writes nothing.
-# Measured 2026-10-03 (evidence/decide-rules/local/policy-measure.log): where season audio and an online or server
+# Measured: where season audio and an online or server
 # intro disagreed, both sides were wrong 6/10; where credit text disagreed it was right or late 45/60 while the
 # disagreeing Plex/SkipDB answer was early twice as often. Chapters are a release's labels, not a read of the file.
 _WINS_A_DISAGREEMENT = frozenset({Source.CREDITS_TEXT})
@@ -597,7 +590,7 @@ def _compose_cluster(
     (source order first, see :func:`_sort_key`). The unchecked edge is the safer value across every confirming candidate, server markers
     included -- intro/recap start = the latest start, credits/preview end = the earliest end (a
     missing/EOF end resolves to duration first) -- so a server marker can shorten the skip but
-    never lengthen it or set the checked edge (spec §5.5 rule 7). :func:`_agreeing_cliques` only
+    never lengthen it or set the checked edge. :func:`_agreeing_cliques` only
     returns clusters holding a non-server candidate, and every member of one confirms.
 
     decided_by names the winner, whichever candidate(s) supplied the unchecked edge, and every
@@ -636,8 +629,8 @@ def _partial_season_match(candidate: Candidate, confirmed: list[Candidate]) -> b
     """Whether a season audio intro may be only part of the opening, so it doesn't set an agreed intro's start (rule 4):
     one other episode supports it (its label ``support/others``), and an agreeing answer of another source that isn't a
     server's marker starts more than ``OTHER_RELEASE_MIN_SHIFT_MS`` (15 s) before it. Two files can share only part of their
-    opening (2026-09-27 audit: a season split over three disks left two episodes matched with each other alone, at
-    63-112 s of a 5-112 s title sequence IntroDB had right), where a stretch more episodes share is the opening itself.
+    opening (a season split over three disks left two episodes matched with each other alone, at 63-112 s of a 5-112 s
+    title sequence IntroDB had right), where a stretch more episodes share is the opening itself.
     """
     if candidate.source is not Source.SEASON_AUDIO or candidate.origin.split("/")[0] != "1":
         return False
@@ -722,7 +715,7 @@ def _decide_from_chapters(
     7); the agreeing candidates then shorten the skip the same way and are always credited.
 
     Agreeing clusters that contradict the chapter leave the type undecided, unless credit text (``_WINS_A_DISAGREEMENT``)
-    agrees with the chapter: the chapter then stands, credited with it. Credits (rule 3, 2026-09-25):
+    agrees with the chapter: the chapter then stands, credited with it. Credits (rule 3):
     a cluster holding credit text is weighed at credit text's start. When every cluster that contradicts the chapter
     holds credit text and a source of another group that isn't a server's marker, they decide instead
     (:func:`_text_over_chapter`). A SkipDB answer contradicting a chapter nothing else agrees with leaves it undecided
@@ -900,7 +893,7 @@ def credits_chapter_start_ms(
 def _text_moves_chapter(
     chosen: Candidate, chapter: Marker, others: list[Candidate], ctx: DecisionContext
 ) -> TypeDecision | None:
-    """Credits whose start credit text moved off the chapter (rule 3, 2026-09-27): the detector read the frames against
+    """Credits whose start credit text moved off the chapter (rule 3): the detector read the frames against
     this chapter and found it off the roll its answer starts (:func:`chapter_hint` with ``moves``,
     ``credits.rule_j.chapter_moves_to``: inside the roll, or on the last shot before it). The chapter gives the window
     and its end; credit text the start -- the hint's own start when it names one (the first text after a chapter on the
@@ -939,7 +932,7 @@ def _audio_over_chapter(clusters: list[list[Candidate]], chapter: Marker, ctx: D
     """An intro decided by the agreeing clusters that contradict an intro chapter, when each holds this season's audio
     answer and a source of another group that isn't a server's marker, and they end the intro inside the chapter (rule
     3): the chapter then runs past the intro the file's own audio and an independent answer both end, into the episode
-    (2026-09-27 audit: a streaming release's "Intro" chapter ran 28 s into the episode). Composed as rule 4 composes, so
+    (a streaming release's "Intro" chapter ran 28 s into the episode). Composed as rule 4 composes, so
     season audio supplies the end (rule 13). A chapter that ends *before* them is left undecided, as before: on the
     library chapter set the chapter was the right one every time (Family Guy S14, a 15 s title card where season audio
     and SkipDB ran on 15 s into the episode).
@@ -1051,8 +1044,7 @@ def _may_decide_alone(candidate: Candidate) -> bool:
 
     Season audio was only ever measured on intros (its credits were rejected at 54 % precision), so only an intro of it
     decides. SkipDB never does (``_AGREEMENT_ONLY``): its lone credits started early on the lab scale run, some by
-    minutes (one episode: 6.7 min of story), and its lone intros missed their edges in the 2026-09-25
-    audit.
+    minutes (one episode: 6.7 min of story), and its lone intros missed their edges.
     """
     if candidate.source in _AGREEMENT_ONLY:
         return False
@@ -1067,9 +1059,9 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     already on servers; season audio only for an intro).
 
     Any second independent group here stops "medium" when it disagrees, or when it agrees without being able to
-    form a cluster (a server's own markers and an importer plugin's copy). The one exception is G3's: markers already
+    form a cluster (a server's own markers and an importer plugin's copy). The one exception: markers already
     on a server that agree with season audio are no second source (a server's intro detection matches audio too), but
-    they don't hold it back either (owner's rule 2026-09-24, "use the file check if nothing else"), so season audio
+    they don't hold it back either (the file check is used if nothing else is), so season audio
     decides exactly as it would alone and decided_by doesn't name them. Only season audio gets here that way: any
     other source that may decide alone forms a cluster with an agreeing server marker. A group whose own candidates
     don't all agree pairwise contradicts itself. The checked edge comes from the best-ranked candidate, the unchecked
@@ -1077,8 +1069,7 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
 
     Where a second group disagrees, or the group's own candidates give an insane other edge, credit text
     (``_WINS_A_DISAGREEMENT``) still decides at "medium" with its own edges: the file's own frames outrank an online
-    answer timed on whichever release. Season audio doesn't: an intro disagreement writes nothing (measured
-    2026-10-03, both sides wrong 6/10). A group that contradicts itself, or sources none of which may decide alone,
+    answer timed on whichever release. Season audio doesn't: an intro disagreement writes nothing (measured: both sides wrong 6/10). A group that contradicts itself, or sources none of which may decide alone,
     decide nothing.
     """
     ranked = sorted(sane, key=_sort_key(ctx))
@@ -1142,7 +1133,7 @@ def _lone_answer_reason(mtype: MarkerType, sane: list[Candidate], best: Candidat
 
 
 def _only_audio_and_server_markers(sources: set[Source]) -> bool:
-    """Whether the sources are season audio plus markers already on a server and nothing else (ruling G3)."""
+    """Whether the sources are season audio plus markers already on a server and nothing else."""
     return bool(sources <= _AUDIO_OR_SERVER and sources & SERVER_SOURCES and sources - SERVER_SOURCES)
 
 
@@ -1184,8 +1175,7 @@ def file_clock_may_matter(candidates: Iterable[Candidate], duration_ms: int) -> 
 
 def _on_file_clock(of_type: list[Candidate], ctx: DecisionContext) -> list[Candidate]:
     """One type's candidates that pass :func:`sanity_problem`, with online times read on the file's own clock where
-    they were timed on a release at the other speed (``speed.online_time_scale``: a 25 fps file and a film-rate one),
-    spec §5.5 rule 12.
+    they were timed on a release at the other speed (``speed.online_time_scale``: a 25 fps file and a film-rate one).
 
     An answer :func:`timed_on_any_release` is read scaled only when, as it is, it agrees with no sane candidate of
     another independent group and, scaled, it is sane and agrees with one; that includes an answer that fails sanity as
@@ -1381,8 +1371,7 @@ def keep_published(
 ) -> TypeDecision:
     """Today's decision for a type, or the marker published before the rules changed, kept in its place.
 
-    A re-decide that only a rule change causes never takes a published marker off the servers (owner ruling
-    2026-09-25): where today's rules leave the type without a marker, the marker stays while a source
+    A re-decide that only a rule change causes never takes a published marker off the servers: where today's rules leave the type without a marker, the marker stays while a source
     it was decided by still gives an answer that agrees with it, and no new or changed answer disagrees with it. An
     answer that disagreed before and is only stored again (a forced run, a parser's new version reading the same
     answer) is no news. An answer agrees as two sources do (rule 4): its end within 5 s for an intro or recap, its start
@@ -1392,8 +1381,7 @@ def keep_published(
     A marker resting only on sources that never decide alone (an online answer, rule 6) was kept for installs with
     nothing that reads the file to check it. Where something did read the file, the check has been made: it isn't kept
     when a source that reads the file answers the type and disagrees, or when a detector that reads the file for the
-    type (``read_by``) read it at its version now and gave no agreeing answer (2026-09-27 audit: a lone SkipDB intro
-    season audio found nothing to match, 9 s into the story).
+    type (``read_by``) read it at its version now and gave no agreeing answer (a lone SkipDB intro that season audio found nothing to match, 9 s into the story).
 
     Args:
         decision: Today's decision for the type.
@@ -1498,7 +1486,7 @@ def decide(
             is returned with `locked=True` so the cross-type overlap checks never demote it, whatever
             the passed value's own flag says. A value that isn't a :class:`Marker`, or whose type
             doesn't match its key, is ignored. The flag carries on to the publishers, which read it to
-            override "Keep Plex's" / "Keep Emby's" for that type (spec §5.5 rule 1, §14 2026-09-20) —
+            override "Keep Plex's" / "Keep Emby's" for that type —
             so nothing here may drop it from a decided marker.
 
     Returns:

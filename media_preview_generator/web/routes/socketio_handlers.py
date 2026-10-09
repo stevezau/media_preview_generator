@@ -47,7 +47,7 @@ def register_socketio_handlers(socketio):
         if not is_authenticated():
             disconnect()
             return
-        job_id = data.get("job_id")
+        job_id = data.get("job_id") if isinstance(data, dict) else None
         if job_id:
             join_room(job_id)
             logger.debug("Client subscribed to job {}", job_id)
@@ -58,7 +58,7 @@ def register_socketio_handlers(socketio):
         if not is_authenticated():
             disconnect()
             return
-        job_id = data.get("job_id")
+        job_id = data.get("job_id") if isinstance(data, dict) else None
         if job_id:
             leave_room(job_id)
 
@@ -72,15 +72,10 @@ def register_socketio_handlers(socketio):
             return False
         from ..settings_manager import get_settings_manager
 
-        default_level = get_settings_manager().get("log_level", "INFO").upper()
+        default_level = str(get_settings_manager().get("log_level") or "INFO").upper()
         if default_level not in _VALID_LEVELS:
             default_level = "INFO"
         _join_rooms_for_level(default_level)
-
-    @socketio.on("disconnect", namespace="/logs")
-    def handle_logs_disconnect():
-        """Clean up on disconnect (rooms are auto-removed by Flask-SocketIO)."""
-        pass
 
     @socketio.on("set_level", namespace="/logs")
     def handle_set_level(data):
@@ -88,7 +83,7 @@ def register_socketio_handlers(socketio):
         if not is_authenticated():
             disconnect()
             return
-        level = (data.get("level") or "INFO").upper()
+        level = str((data.get("level") if isinstance(data, dict) else None) or "INFO").upper()
         if level not in _VALID_LEVELS:
             level = "INFO"
         _leave_all_level_rooms()

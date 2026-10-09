@@ -1,4 +1,4 @@
-"""JellyfinMarkerPublisher against an autospec'd JellyfinServer (Bridge plugin HTTP contract, spec §3.2, §6.3)."""
+"""JellyfinMarkerPublisher against an autospec'd JellyfinServer (Bridge plugin HTTP contract)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import requests
 from media_preview_generator.markers.models import Marker, MarkerType
 from media_preview_generator.markers.publishers.base import Capability, ItemNotFoundError, PublishError
 from media_preview_generator.markers.publishers.jellyfin import (
-    TICKS_PER_MS,
     JellyfinMarkerPublisher,
     bridge_key,
     core_key,
@@ -65,10 +64,6 @@ def _media(tmp_path, size=4321):
     path = tmp_path / "S01E01.mkv"
     path.write_bytes(b"\0" * size)
     return str(path)
-
-
-def test_ticks_per_ms_is_jellyfin_tick_size():
-    assert TICKS_PER_MS == 10_000
 
 
 @pytest.mark.parametrize(
@@ -230,7 +225,8 @@ def test_write_accepts_other_providers_segments_next_to_ours():
     server.get_media_segments.return_value = _core(
         INTRO, other_provider=[{"type": "Intro", "startTicks": 1, "endTicks": 900_000_000}]
     )
-    _pub(server).write("abc", [INTRO_MARKER], previous=[], duration_ms=1_321_472, canonical_path=MISSING)
+    ours = _pub(server).write("abc", [INTRO_MARKER], previous=[], duration_ms=1_321_472, canonical_path=MISSING)
+    assert ours == [INTRO_MARKER]
     server.get_media_segments.assert_called_once_with("abc")
 
 

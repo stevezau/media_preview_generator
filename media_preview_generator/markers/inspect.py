@@ -72,7 +72,7 @@ UI_STALE_WAIT_S = 2.0
 # that outlives the page finishes (or gives up) here. Two threads: at most two slow reads are ever in hand.
 _STALE_CHECKS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inspector-stale")
 # How long a caller waits for a check already in flight before it is served the answer that check is refreshing.
-# Without it the readiness probes of 8 gunicorn threads queue behind one slow server (wrapper.sh:53).
+# Without it the readiness probes of 8 gunicorn threads queue behind one slow server.
 CACHE_LOCK_WAIT_S = 1.0
 # Not a publisher Capability: the check itself failed, so nothing is known about the server.
 CAPABILITY_UNKNOWN = "unknown"
@@ -628,7 +628,6 @@ def _expected(
     server_type: ServerType,
     wanted: list[Marker],
     ours: tuple[Marker, ...],
-    shown: list[dict],
     duration_ms: int,
     *,
     other_versions: bool = False,
@@ -715,7 +714,7 @@ def _plan(
     # Only the types we manage here: Plex keeps its own marker of a type we didn't decide.
     managed = {m.type.value for m in wanted} | {m.type.value for m in ours}
     shown = [c for c in current if c["type"] in managed]
-    expected = _expected(server_type, wanted, ours, shown, duration_ms, other_versions=other_versions)
+    expected = _expected(server_type, wanted, ours, duration_ms, other_versions=other_versions)
     if server_type is ServerType.JELLYFIN:
         # Jellyfin serves every provider's segments side by side: another provider's beside ours changes nothing
         # (the job reads ours as shown and sends nothing).

@@ -1,4 +1,4 @@
-"""PlexMarkerPublisher against a real SQLite file with Plex 1.43's schema (spec §3.1)."""
+"""PlexMarkerPublisher against a real SQLite file with Plex 1.43's schema."""
 
 from __future__ import annotations
 
@@ -87,25 +87,8 @@ def journal_mode(request, monkeypatch):
     return request.param
 
 
-@pytest.fixture(autouse=True)
-def plex_holds_the_database(monkeypatch):
-    """Stand in for Plex having its DB open; TestLockDomain overrides this and uses the real probe."""
-    monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
-
-
-@pytest.fixture
-def sql_log(monkeypatch):
-    """Every statement the publisher runs, with bound values expanded."""
-    log: list[str] = []
-    original = LocalPlexDb._connect
-
-    def connect(self, *, read_only, **kwargs):
-        conn = original(self, read_only=read_only, **kwargs)
-        conn.set_trace_callback(log.append)
-        return conn
-
-    monkeypatch.setattr(LocalPlexDb, "_connect", connect)
-    return log
+# TestLockDomain overrides plex_holds_the_database and uses the real probe.
+pytestmark = pytest.mark.usefixtures("plex_holds_the_database")
 
 
 def _writes(log: list[str]) -> list[str]:
@@ -321,8 +304,8 @@ class TestExtraDataEncoding:
         assert ei.value.state is Capability.UNSUPPORTED_SCHEMA
 
 
-# A real part Plex 1.43.4's one-time CreditsFinalAttributeMigration rewrote in its older URL-encoded form (lab, first
-# database optimize, 2026-09-17): our non-final credits there got "final":1.
+# A real part Plex 1.43.4's one-time CreditsFinalAttributeMigration rewrote in its older URL-encoded form (first
+# database optimize): our non-final credits there got "final":1.
 URL_FORM_PART = (FIX / "plex_part_extra_data_url_form.txt").read_text().strip()
 # The same part as this app wrote it before the migration: the credits entry without "final".
 URL_FORM_PART_NOT_FINAL = URL_FORM_PART.replace("%2C%22final%22%3A1%7D%5D", "%7D%5D")
@@ -479,7 +462,7 @@ class TestWrite:
             "SELECT metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, thumb_url, "
             "typeof(created_at), extra_data FROM taggings ORDER BY [index]",
         )
-        # Plex's own numbering (lab DB, spec §3.1): by text, then start, so credits come before intro.
+        # Plex's own numbering: by text, then start, so credits come before intro.
         assert rows == [
             (7, 563, 0, "credits", 1_297_000, DUR, "", "integer", CREDITS_FINAL_ROW_EXTRA),
             (7, 563, 1, "intro", 11_000, 37_000, "", "integer", INTRO_ROW_EXTRA),
@@ -743,8 +726,7 @@ class TestMultiVersion:
 
 
 class TestSavedSettingsBeforeEveryWrite:
-    """With a ``settings_provider`` the switch and the confirmation are read at each check, not when the job started
-    (audit C MED-2)."""
+    """With a ``settings_provider`` the switch and the confirmation are read at each check, not when the job started."""
 
     @pytest.mark.parametrize(
         ("saved", "state"),
@@ -1415,7 +1397,7 @@ class TestLockDomain:
 
 
 class TestRemoval:
-    """Removing a type we published removes only what is still ours (spec §14; ruling: delete the key)."""
+    """Removing a type we published removes only what is still ours."""
 
     def _published(self, tmp_path):
         folder = tmp_path / "Plex Media Server"
@@ -1586,7 +1568,7 @@ class TestNoOp:
 
 
 class TestUrlFormParts:
-    """Parts Plex rewrote in its URL-encoded form (lab, 2026-09-17) publish, read back and clean up like JSON ones."""
+    """Parts Plex rewrote in its URL-encoded form publish, read back and clean up like JSON ones."""
 
     MIGRATED_ROWS = (
         (7, 563, 0, "credits", 1_324_000, 1_417_000, CREDITS_FINAL_ROW_EXTRA),
@@ -1795,7 +1777,7 @@ class TestKeepPlexs:
         ids=["movie", "episode-first-run", "episode-later-run"],
     )
     def test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would(self, tmp_path, others, previous):
-        # The pipeline doesn't read a file for a type every server keeps its own of (spec §6.2, §14 2026-09-23), so
+        # The pipeline doesn't read a file for a type every server keeps its own of, so
         # that type reaches the write undecided. The item must come out byte for byte as when it was decided and kept.
         def item_after(name, markers):
             folder = tmp_path / name / "Plex Media Server"
@@ -1836,7 +1818,7 @@ class TestKeepPlexs:
         ids=["keep-rows", "keep-no-rows", "restore"],
     )
     def test_nothing_to_write_still_reads_the_rows_of_a_kept_type(self, tmp_path, redetect, rows, kept):
-        # keepplex re-review LOW-1: no early return while a type is kept, so one Plex no longer shows is released.
+        # No early return while a type is kept, so one Plex no longer shows is released.
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)
         if rows:
@@ -1847,7 +1829,7 @@ class TestKeepPlexs:
         )
         assert (ours, pub.last_kept_types, pub.last_write_changed) == ([], kept, False)
 
-    # Bones S07E01 on production: Plex's credits start and end after the 2498304 ms file does, so they can never fire.
+    # Plex's credits start and end after the 2498304 ms file does, so they can never fire.
     # Ours, from the credit text, start at 2464 s.
     BONES_DUR = 2_498_304
     BONES_LIMITS = FileLimits(BONES_DUR)
@@ -1967,8 +1949,7 @@ class TestKeepPlexs:
 
 
 class TestNotMadeForThisFile:
-    """Plex's markers belong to the metadata item, so they outlive a file replacement (proven on production 2026-09-24:
-    Bones' markers were detected 2025-06-17 against the old Blu-ray files, which Sonarr replaced 2026-09-23). A type's
+    """Plex's markers belong to the metadata item, so they outlive a file replacement (markers detected against the old Blu-ray files stay after Sonarr replaces them). A type's
     rows are stale when BOTH hold: no live part carries Plex's own detection record of them (``pv:intros`` /
     ``pv:credits`` holding those times), and every row was created before every live part was last updated (the
     file's mtime)."""
@@ -2002,7 +1983,7 @@ class TestNotMadeForThisFile:
     @pytest.mark.parametrize(
         ("changes", "stale"),
         [
-            ({}, frozenset({T.INTRO})),  # Bones S07E01: no record, markers 2025-06-17, file 2026-09-23
+            ({}, frozenset({T.INTRO})),  # no record, markers older than the file
             ({"record": INTRO_RECORD}, frozenset()),  # Plex's own record of them: made for this file
             ({"record": OTHER_INTRO_RECORD}, frozenset({T.INTRO})),  # a record of other times isn't theirs
             ({"created_at": PART_UPDATED + 3600}, frozenset()),  # tagged after the file changed: fresh
@@ -2790,7 +2771,7 @@ class TestBusyThroughTheRealLockProbe:
         monkeypatch.setattr(plex_db, "_shm_dms_locked_elsewhere", lambda _db: True)
 
     def test_files_that_give_up_in_the_lock_probe_are_retried_as_busy(self, tmp_path, monkeypatch):
-        # Reviewer's repro: the first write waits in BEGIN IMMEDIATE holding this process's lock; the three that
+        # The first write waits in BEGIN IMMEDIATE holding this process's lock; the three that
         # arrive later give up in the lock probe (file_checks), whose report used to lose the busy type. The first
         # waits longer than the others, so they all give up in the probe, whatever the threads' timing.
         monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 1.0)
@@ -3324,8 +3305,8 @@ class TestAgreeingVersionsDoNotPingPong:
 
 
 class TestOneVersionShowsWhatWasDecided:
-    """The 2 s window only stops versions rewriting each other's times. Production (Game of Thrones intros served
-    ending at 113.0 s where 110.5-112.4 s was decided, RuPaul's Drag Race UK S08E04's credits): one-version items kept
+    """The 2 s window only stops versions rewriting each other's times. Production (intros served
+    ending later than decided, and credits): one-version items kept
     their earlier times too, although there was no other version to agree with. There is no churn to damp there: a
     file's decision moves only when its evidence or the rules change (a run reuses stored answers), and the pipeline
     doesn't publish a decision that didn't (``pipeline._publish_to``'s unchanged test)."""
@@ -3683,7 +3664,7 @@ class TestReadBackMany:
         ],
     )
     def test_the_read_back_keeps_each_items_version_files_mapped_to_local_paths(self, tmp_path, read, shown):
-        # Check servers runs them for a drifted item (publishers audit MED-2); an optimized copy is never decided.
+        # Check servers runs them for a drifted item; an optimized copy is never decided.
         folder = tmp_path / "Plex Media Server"
         optimized = "/plexmedia/tv/Plex Versions/Optimized for TV/S01E01.mp4"
         db = _make_db(folder, parts=(("/plexmedia/tv/S01E01 - 1080p.mkv", None), (optimized, None)))

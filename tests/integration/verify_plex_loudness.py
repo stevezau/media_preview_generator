@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
@@ -54,8 +55,11 @@ def main() -> int:
         parser.error("Pass --run to access the explicitly configured real lab")
     config = json.load(sys.stdin)
     url = str(config["url"]).rstrip("/")
-    if urlparse(url).hostname not in {"127.0.0.1", "localhost", "mlab-plex"}:
-        raise ValueError("This proof only accepts the local isolated Plex lab")
+    allowed_hosts = {"127.0.0.1", "localhost"}
+    if os.environ.get("PLEX_LAB_HOST"):
+        allowed_hosts.add(os.environ["PLEX_LAB_HOST"])
+    if urlparse(url).hostname not in allowed_hosts:
+        raise ValueError("This proof only accepts the local isolated Plex lab (set PLEX_LAB_HOST for a remote one)")
     ids = [str(int(value)) for value in config["item_ids"]]
     if not 1 <= len(ids) <= 20 or len(set(ids)) != len(ids):
         raise ValueError("Supply 1–20 distinct dedicated fixture IDs")

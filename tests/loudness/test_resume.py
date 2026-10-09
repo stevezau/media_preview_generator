@@ -17,7 +17,7 @@ from media_preview_generator.loudness.resume import CompletionLedger, source_fin
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.web.jobs import JobStatus
 
-from .test_job_lifecycle import Lifecycle, lifecycle  # noqa: F401
+from .conftest import Lifecycle
 
 
 def outcome(key="loudness_written"):
@@ -137,7 +137,7 @@ def test_failed_sqlite_commit_does_not_create_a_resume_success(tmp_path, selecte
         reopened.close()
 
 
-def test_restarted_job_restores_written_counts_without_relying_on_display_history(lifecycle: Lifecycle):  # noqa: F811
+def test_restarted_job_restores_written_counts_without_relying_on_display_history(lifecycle: Lifecycle):
     lifecycle.api_ready = True
     first = lifecycle.add_file("finished.mkv")
     second = lifecycle.add_file("remaining.mkv")
@@ -157,7 +157,7 @@ def test_restarted_job_restores_written_counts_without_relying_on_display_histor
     assert lifecycle.analyses == [(first, 1), (second, 1), (second, 1)]
 
 
-def test_partial_stream_failure_resumes_only_missing_stream(lifecycle: Lifecycle):  # noqa: F811
+def test_partial_stream_failure_resumes_only_missing_stream(lifecycle: Lifecycle):
     lifecycle.api_ready = True
     path = lifecycle.add_file("partial.mkv", tracks=2)
     lifecycle.corrupt.add((path, 2))
@@ -178,7 +178,7 @@ def test_partial_stream_failure_resumes_only_missing_stream(lifecycle: Lifecycle
     assert lifecycle.analyses == [(path, 1), (path, 2), (path, 1), (path, 2), (path, 2)]
 
 
-def test_all_restored_finishes_without_creating_an_empty_dispatcher_tracker(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_all_restored_finishes_without_creating_an_empty_dispatcher_tracker(lifecycle: Lifecycle, monkeypatch):
     lifecycle.api_ready = True
     path = lifecycle.add_file("settled.mkv")
     parent = lifecycle.start([path])
@@ -195,7 +195,7 @@ def test_all_restored_finishes_without_creating_an_empty_dispatcher_tracker(life
     submit.assert_not_called()
 
 
-def test_failed_ledger_write_fails_the_job_before_success_is_credited(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_failed_ledger_write_fails_the_job_before_success_is_credited(lifecycle: Lifecycle, monkeypatch):
     lifecycle.api_ready = True
     path = lifecycle.add_file("save-failed.mkv")
 
@@ -212,7 +212,7 @@ def test_failed_ledger_write_fails_the_job_before_success_is_credited(lifecycle:
     assert lifecycle.analyses == [(path, 1)]
 
 
-def test_cleared_native_metadata_reanalyzes_saved_file(lifecycle: Lifecycle):  # noqa: F811
+def test_cleared_native_metadata_reanalyzes_saved_file(lifecycle: Lifecycle):
     lifecycle.api_ready = True
     path = lifecycle.add_file("cleared.mkv")
     parent = lifecycle.start([path])
@@ -246,7 +246,7 @@ def test_handler_commits_before_returning_an_outcome(tmp_path, selected, monkeyp
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["immutable-baseline", "legacy-recount"])
-def test_retry_restores_committed_result_when_crash_preceded_files_callback(lifecycle: Lifecycle, legacy):  # noqa: F811
+def test_retry_restores_committed_result_when_crash_preceded_files_callback(lifecycle: Lifecycle, legacy):
     path = lifecycle.add_file("retry-crash.mkv")
     parent = lifecycle.start([path])
     (child,) = lifecycle.children(parent)
@@ -281,7 +281,7 @@ def test_retry_restores_committed_result_when_crash_preceded_files_callback(life
 
 
 @pytest.mark.parametrize("change", ["native_cleared", "replacement"])
-def test_parked_resume_revalidates_completed_files_outside_checkpoint(lifecycle: Lifecycle, change):  # noqa: F811
+def test_parked_resume_revalidates_completed_files_outside_checkpoint(lifecycle: Lifecycle, change):
     lifecycle.api_ready = True
     first = lifecycle.add_file("parked-finished.mkv")
     second = lifecycle.add_file("parked-remaining.mkv")
@@ -319,7 +319,7 @@ def test_parked_resume_revalidates_completed_files_outside_checkpoint(lifecycle:
 
 @pytest.mark.parametrize("finish", ["resume", "cancel"])
 def test_global_pause_between_native_resume_checks_waits_for_resume_or_cancel(
-    lifecycle: Lifecycle,  # noqa: F811
+    lifecycle: Lifecycle,
     monkeypatch,
     finish,
 ):

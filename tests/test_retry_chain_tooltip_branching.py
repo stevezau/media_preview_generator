@@ -16,6 +16,9 @@ These tests pin the contract:
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -86,17 +89,29 @@ def test_picker_function_defined_in_app_js(app_js: str):
     assert "function _pickRetryInfoTpl(" in app_js
 
 
-def test_picker_returns_plex_template_for_plex_server_type(app_js: str):
-    """The picker must select the Plex template when job.server_type is 'plex'."""
-    # Test by string-asserting both template ids and the 'plex' guard appear
-    # in the picker's body. The function is small enough that a regex scan is
-    # robust to whitespace.
-    plex_branch_idx = app_js.find("function _pickRetryInfoTpl(")
-    assert plex_branch_idx >= 0
-    body = app_js[plex_branch_idx : plex_branch_idx + 500]
-    assert "'plex'" in body or '"plex"' in body
-    assert "infoRetryChainPlexTpl" in body
-    assert "infoRetryChainJellyfinTpl" in body
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize(
+    ("job", "expected"),
+    [
+        ({"server_type": "plex"}, "infoRetryChainPlexTpl"),
+        ({"server_type": "Plex"}, "infoRetryChainPlexTpl"),
+        ({"server_type": "jellyfin"}, "infoRetryChainJellyfinTpl"),
+        ({"server_type": "emby"}, "infoRetryChainJellyfinTpl"),
+        ({}, "infoRetryChainJellyfinTpl"),
+        (None, "infoRetryChainJellyfinTpl"),
+    ],
+)
+def test_picker_chooses_the_template_for_the_job_server_type(app_js: str, job, expected: str):
+    """Run the real ``_pickRetryInfoTpl`` under node: Plex gets its own copy, every other server the Jellyfin one."""
+    start = app_js.index("function _pickRetryInfoTpl(")
+    function_source = app_js[start : app_js.index("\n}\n", start) + 3]
+    snippet = f"{function_source}\nconsole.log(_pickRetryInfoTpl({json.dumps(job)}));"
+
+    result = subprocess.run(
+        [shutil.which("node"), "-e", snippet], capture_output=True, text=True, timeout=10, check=True
+    )
+
+    assert result.stdout.strip() == expected
 
 
 def test_dashboard_retry_chip_uses_picker(app_js: str):

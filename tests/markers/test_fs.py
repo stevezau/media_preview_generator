@@ -1,4 +1,4 @@
-"""Filesystem type lookup for the Plex-database-must-be-local rule (spec §6.3), and files gone from disk."""
+"""Filesystem type lookup for the Plex-database-must-be-local rule, and files gone from disk."""
 
 import errno
 import os

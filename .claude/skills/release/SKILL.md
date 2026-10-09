@@ -17,7 +17,7 @@ or "do it all" does NOT authorize a release on its own.
 
 - Never force-push. Never delete tags or releases.
 - Never touch `/data` (read-only Plex media).
-- The `plugin-v*` tags belong to a separate component — ignore them entirely
+- The `plugin-v*`, `emby-plugin-v*` and `marker-agent-v*` tags belong to separate components — ignore them entirely
   when finding the last release or computing the next version.
 - Stop and report if any preflight check fails. Do not "fix" a dirty tree or
   divergence automatically.

@@ -1,7 +1,7 @@
 """Regression: orchestrator full-scan path must honour CPU fallback.
 
-Live failure (2026-05-14, job ``a90c9b87`` TV Shows full scan): four
-Re:ZERO episodes hit ``CodecNotSupportedError`` from the GPU mjpeg encoder
+Live failure: four
+episodes hit ``CodecNotSupportedError`` from the GPU mjpeg encoder
 (exit code 218, ``vost#0:0/mjpeg ... Task finished with error code: -22``).
 The user-facing logs reported:
 
@@ -11,9 +11,9 @@ The user-facing logs reported:
 
 …but no actual CPU retry happened. None of the 4 files have a
 ``"completed CPU fallback"`` log line. The orchestrator's per-item
-``except Exception`` arm at ``jobs/orchestrator.py:1079`` swallowed
-``CodecNotSupportedError`` and gave up — even though
-``jobs/worker.py:557-613`` (the webhook/JobDispatcher path) has the
+``except Exception`` arm swallowed
+``CodecNotSupportedError`` and gave up — even though the
+webhook/JobDispatcher path has the
 in-place CPU retry that mirrors what the announcement promised.
 
 This test drives the full-scan dispatcher with a mocked
@@ -121,16 +121,15 @@ class TestOrchestratorCpuFallback:
 
     def _setup_one_item_dispatch(self):
         """Common scaffolding: 1 server, 1 item, mocked enumeration."""
-        cfg = _server_config("srv-a", ServerType.JELLYFIN)
         registry_mock = MagicMock()
-        registry_mock.configs.return_value = [cfg]
+        registry_mock.configs.return_value = [_server_config("srv-a", ServerType.JELLYFIN)]
         proc = MagicMock()
         proc.list_canonical_paths.return_value = iter(
             [ProcessableItem(canonical_path="/data/anime.mkv", server_id="srv-a")]
         )
-        return cfg, registry_mock, proc
+        return registry_mock, proc
 
-    def test_gpu_succeeds_does_not_invoke_cpu_fallback(self, tmp_path):
+    def test_gpu_succeeds_does_not_invoke_cpu_fallback(self):
         """Sanity: a normal GPU success must not trigger any CPU re-run.
 
         Without this row, a refactor that always re-runs on CPU would
@@ -140,7 +139,7 @@ class TestOrchestratorCpuFallback:
         an item that needs work reports NEEDS_GENERATION and then takes
         exactly one generation call (the GPU attempt). No CPU fallback.
         """
-        cfg, registry_mock, proc = self._setup_one_item_dispatch()
+        registry_mock, proc = self._setup_one_item_dispatch()
 
         def pcp(**kwargs):
             if kwargs.get("check_only"):
@@ -169,14 +168,14 @@ class TestOrchestratorCpuFallback:
         )
         assert gen_calls[0].kwargs["gpu"] == "NVIDIA"
 
-    def test_gpu_codec_error_falls_back_to_cpu_with_gpu_none(self, tmp_path):
+    def test_gpu_codec_error_falls_back_to_cpu_with_gpu_none(self):
         """GPU raises CodecNotSupportedError → second call must run with gpu=None.
 
         This is the live regression: pre-fix the orchestrator caught
         the error in its bare ``except Exception`` and gave up, so the
         announced "retrying on CPU automatically" log line was a lie.
         """
-        cfg, registry_mock, proc = self._setup_one_item_dispatch()
+        registry_mock, proc = self._setup_one_item_dispatch()
 
         # Scan pass reports NEEDS_GENERATION; then GPU attempt fails and the
         # CPU fallback succeeds. Asserting the kwargs of BOTH generation
@@ -249,14 +248,14 @@ class TestOrchestratorCpuFallback:
             f"successful CPU fallback must surface as a generated item; counts={counts}"
         )
 
-    def test_cpu_fallback_failure_is_marked_failed_and_does_not_propagate(self, tmp_path):
+    def test_cpu_fallback_failure_is_marked_failed_and_does_not_propagate(self):
         """If CPU also fails, the item is marked failed but other items keep going.
 
         The live regression's bare ``except Exception`` already had this
         property for the GPU-attempt case; the new fallback arm must
         preserve it (re-raising would tank the rest of the dispatch).
         """
-        cfg, registry_mock, proc = self._setup_one_item_dispatch()
+        registry_mock, proc = self._setup_one_item_dispatch()
         proc.list_canonical_paths.return_value = iter(
             [
                 ProcessableItem(canonical_path="/data/a.mkv", server_id="srv-a"),

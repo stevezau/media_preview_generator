@@ -18,7 +18,6 @@ def mock_auth_config(tmp_path, monkeypatch):
     """Mock auth module to use temp directory."""
     auth_file = str(tmp_path / "auth.json")
     monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", auth_file)
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
 
     from media_preview_generator.web.settings_manager import reset_settings_manager
 
@@ -123,7 +122,7 @@ class TestPathTraversalPrevention:
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data["valid"] is False
-        assert any("Invalid" in e for e in data["errors"])
+        assert any("Invalid Plex Data Path" in e for e in data["errors"]), data["errors"]
 
     def test_validate_paths_traversal_resolved(self, client, auth_headers, tmp_path, monkeypatch):
         """Paths with .. components are resolved via realpath."""
@@ -151,7 +150,8 @@ class TestPathTraversalPrevention:
         assert response.status_code == 200
         data = json.loads(response.data)
         # Should resolve to the real path without errors about traversal
-        assert not any("Invalid" in e for e in data["errors"])
+        assert data["valid"] is True, data["errors"]
+        assert data["errors"] == []
 
     def test_validate_paths_outside_root_rejected(self, client, auth_headers, tmp_path, monkeypatch):
         """Paths outside the configured PLEX_DATA_ROOT are rejected."""
@@ -213,6 +213,7 @@ class TestPathTraversalPrevention:
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data["valid"] is False
+        assert any("invalid path" in e for e in data["errors"]), data["errors"]
 
 
 class TestInformationExposurePrevention:

@@ -1,4 +1,4 @@
-"""How many files each source decided in a job, per marker type: the job summary's "Decided by" counts (spec §7 item 5).
+"""How many files each source decided in a job, per marker type: the job summary's "Decided by" counts.
 
 A file counts once per decided marker type, under one source group (:func:`source_group`). Only a run that decided the
 file counts it: files needing review count only their decided types, and files that failed, weren't on disk, had no

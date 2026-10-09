@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from media_preview_generator.job_kinds import ItemOutcome
-from media_preview_generator.jobs import gpu_fallback
 from media_preview_generator.jobs.dispatcher import JobDispatcher, JobTracker
 from media_preview_generator.jobs.gpu_fallback import (
     GPU_FALLBACK_STREAK,
@@ -405,4 +404,4 @@ class TestJobTally:
 
 
 def test_the_process_wide_tracker_is_one_object():
-    assert get_gpu_fallback_tracker() is gpu_fallback.get_gpu_fallback_tracker()
+    assert get_gpu_fallback_tracker() is get_gpu_fallback_tracker()

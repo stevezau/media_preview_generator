@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 
 
@@ -16,7 +17,7 @@ class MarkerType(str, Enum):
 
 
 class Source(str, Enum):
-    """Where a candidate came from (spec §1 order)."""
+    """Where a candidate came from."""
 
     CHAPTERS = "chapters"
     THEINTRODB = "theintrodb"
@@ -29,12 +30,12 @@ class Source(str, Enum):
     # a copy, not a second opinion; the copy counts as that database's group.
     SERVER_MARKERS_IMPORTED = "server_markers_imported"
     USER = "user"
-    # A season's only episode matched against the previous season's cached fingerprints (spec §5.3): a hint that
+    # A season's only episode matched against the previous season's cached fingerprints: a hint that
     # needs a second source. Last in the enum so the order tie-break of the other sources doesn't move.
     SEASON_AUDIO_PREVIOUS = "season_audio_previous"
 
 
-# Markers already on a server: agreement evidence that may shorten a skip, never a sole source (spec §5.5 rule 7).
+# Markers already on a server: agreement evidence that may shorten a skip, never a sole source.
 SERVER_SOURCES: frozenset[Source] = frozenset({Source.SERVER_MARKERS, Source.SERVER_MARKERS_IMPORTED})
 # The evidence detail of a server's own marker made for an earlier file at this path (``Candidate.stale``): how the flag
 # is stored, and what the Inspector shows beside it.
@@ -88,7 +89,7 @@ class Marker:
 
 @dataclass(frozen=True)
 class FileIdentity:
-    """File identity (spec §6.1): path + size + mtime."""
+    """File identity: path + size + mtime."""
 
     canonical_path: str
     size: int
@@ -110,3 +111,8 @@ class MediaIds:
     def is_episode(self) -> bool:
         """Whether these ids describe a TV episode."""
         return self.kind == "episode"
+
+
+def utcnow() -> datetime:
+    """The current time (UTC); the default clock of jobs and triggers, replaced in tests."""
+    return datetime.now(UTC)

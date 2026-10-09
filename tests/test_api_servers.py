@@ -7,41 +7,6 @@ import pytest
 from media_preview_generator.web.settings_manager import get_settings_manager
 
 
-@pytest.fixture
-def mock_auth_config(tmp_path, monkeypatch):
-    auth_file = str(tmp_path / "auth.json")
-    monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", auth_file)
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
-    from media_preview_generator.web.settings_manager import reset_settings_manager
-
-    reset_settings_manager()
-    from media_preview_generator.web.routes import clear_gpu_cache
-
-    clear_gpu_cache()
-    return str(tmp_path)
-
-
-@pytest.fixture
-def flask_app(tmp_path, mock_auth_config):
-    from media_preview_generator.web.app import create_app
-
-    app = create_app(config_dir=str(tmp_path))
-    app.config["TESTING"] = True
-    return app
-
-
-@pytest.fixture
-def client(flask_app):
-    return flask_app.test_client()
-
-
-@pytest.fixture
-def auth_headers():
-    from media_preview_generator.web.auth import get_auth_token
-
-    return {"X-Auth-Token": get_auth_token()}
-
-
 def _seed_media_servers(servers: list[dict]) -> None:
     """Write the given list to settings.json's ``media_servers`` key."""
     sm = get_settings_manager()
@@ -584,10 +549,7 @@ class TestCreateServer:
                 "url": "http://jelly",
             },
         )
-        # Audit fix — original asserted only the status code. A 409 with empty
-        # body would have passed even if the route accidentally swallowed the
-        # collision detail. Also assert (a) the body identifies the conflict
-        # AND (b) the existing server wasn't mutated by the failed write.
+        # The body must identify the conflict and the failed write must not mutate the existing server.
         assert response.status_code == 409
         body = response.get_json() or {}
         assert "error" in body or "message" in body, (
@@ -2066,7 +2028,7 @@ class TestDisabledServerGates:
 
     The user disables a server to pause it. Every probe-style endpoint
     (test-connection, previews-readiness, health-check + apply, refresh-
-    libraries, install/uninstall-plugin, trickplay-readiness/fix-all,
+    libraries, install/uninstall-plugin, trickplay-fix-all,
     vendor-extraction + status, scheduled-trickplay) must short-circuit
     *before* instantiating a live client — otherwise a stale tab, a
     bookmarked URL, or a third-party automation can wake a paused
@@ -2195,12 +2157,6 @@ class TestDisabledServerGates:
     def test_uninstall_plugin_short_circuits_when_disabled(self, client, auth_headers, probe_spy):
         self._seed_disabled_jellyfin()
         response = client.post("/api/servers/jf-paused/uninstall-plugin", headers=auth_headers)
-        self._assert_disabled_envelope(response)
-        assert probe_spy.calls == []
-
-    def test_trickplay_readiness_short_circuits_when_disabled(self, client, auth_headers, probe_spy):
-        self._seed_disabled_jellyfin()
-        response = client.get("/api/servers/jf-paused/trickplay-readiness", headers=auth_headers)
         self._assert_disabled_envelope(response)
         assert probe_spy.calls == []
 
@@ -2379,7 +2335,7 @@ class TestDisabledServerGates:
 
 
 class TestPreviewsReadinessMarkerRows:
-    """The Intro & Credits rows reach the Setup Health card through the real route (plan phase 4 Task 9).
+    """The Intro & Credits rows reach the Setup Health card through the real route.
 
     These go through ``EmbyServer.previews_readiness`` itself rather than a stubbed envelope: the point is
     that the rows the vendor builds survive the route, including the dismissal tagging that keys on their ids.
@@ -2484,7 +2440,7 @@ class TestPreviewsReadinessMarkerRows:
         assert "dismissed" not in checks["markers_plugin_installed"]
 
     def test_feature_off_sends_one_row_and_no_plugin_section(self, client, auth_headers, monkeypatch):
-        """P-R6 through the route: nothing about markers is claimed, and no probe is made for it."""
+        """Through the route: nothing about markers is claimed, and no probe is made for it."""
         self._seed_emby({"enabled": False, "library_ids": None, "emby": {"on_emby_redetect": "restore"}})
         from media_preview_generator.servers.emby import EmbyServer
 

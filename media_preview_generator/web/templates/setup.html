@@ -909,8 +909,11 @@ document.addEventListener('DOMContentLoaded', function() {
         this.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Checking...';
 
         try {
-            const qs = new URLSearchParams({ url, token, verify_ssl: verifySsl ? '1' : '0' });
-            const resp = await fetch('/api/plex/libraries?' + qs.toString());
+            const resp = await fetch('/api/plex/libraries', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, token, verify_ssl: verifySsl })
+            });
             const data = await resp.json().catch(() => ({}));
 
             if (!resp.ok) {
@@ -990,7 +993,7 @@ document.addEventListener('DOMContentLoaded', function() {
             select.classList.remove('d-none');
 
         } catch (error) {
-            loading.innerHTML = `<p class="text-danger">Failed to load servers: ${error.message}</p>`;
+            loading.innerHTML = `<p class="text-danger">Failed to load servers: ${escapeHtml(error.message)}</p>`;
         }
     }
 
@@ -1095,7 +1098,7 @@ document.addEventListener('DOMContentLoaded', function() {
             loading.classList.add('d-none');
             grid.innerHTML = `
                 <div class="alert alert-danger" role="alert">
-                    <strong>Failed to load libraries:</strong> ${error.message}
+                    <strong>Failed to load libraries:</strong> ${escapeHtml(error.message)}
                     <hr class="my-2">
                     <small>
                         Try editing the Server URL above. In Docker deployments the

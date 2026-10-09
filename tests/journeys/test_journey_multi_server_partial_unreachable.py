@@ -135,7 +135,6 @@ def test_one_publisher_unreachable_others_succeed_aggregate_is_published(mock_co
     # doesn't take the SKIPPED_NOT_IN_LIBRARY branch). No hint for Emby —
     # Emby sidecar doesn't need an item_id (pure path adapter).
     item_id_by_server = {"plex-1": "rk-1", "jelly-1": "jelly-id-1"}
-    bundle_meta = {"plex-1": (("hash" * 10, str(media_file)),)}
 
     # Patch Emby's adapter publish to raise — simulates "Emby server is
     # down / disk full / permission error" mid-publish.
@@ -156,7 +155,6 @@ def test_one_publisher_unreachable_others_succeed_aggregate_is_published(mock_co
             registry=registry,
             config=mock_config,
             item_id_by_server=item_id_by_server,
-            bundle_metadata_by_server=bundle_meta,
         )
 
     # Aggregate status: PUBLISHED (at least one publisher succeeded)

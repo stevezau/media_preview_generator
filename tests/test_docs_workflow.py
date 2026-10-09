@@ -1,4 +1,4 @@
-"""The Pages workflows keep the Jellyfin plugin manifest safe (docs/design/discoverability.md).
+"""The Pages workflows keep the Jellyfin plugin manifest safe.
 
 A Pages deploy replaces the whole site, and every Jellyfin install of the plugin polls
 /jellyfin-plugin/manifest.json on it. These pin the order that makes a deploy safe: build the

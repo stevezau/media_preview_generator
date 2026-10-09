@@ -1132,11 +1132,6 @@ def get_media_items_by_paths(plex, config: Config, file_paths: list[str]) -> Web
         skipped_by_library_targets, skipped_library_names = _search_excluded_sections_by_file_path(unresolved_targets)
         if skipped_by_library_targets:
             unresolved_targets = unresolved_targets - skipped_by_library_targets
-            skipped_input_paths = [
-                input_path
-                for input_path in input_paths
-                if input_to_targets.get(input_path, set()).intersection(skipped_by_library_targets)
-            ]
             selected_scope = (
                 ", ".join(sorted(selected_library_titles))
                 if selected_library_titles
@@ -1262,10 +1257,13 @@ def get_media_items_by_paths(plex, config: Config, file_paths: list[str]) -> Web
             excluded_count += 1
         elif targets.intersection(matched_targets):
             resolved_input_paths_from_loop.add(input_path)
+            resolved_count += 1
         elif targets.intersection(skipped_by_library_targets):
             skipped_input_paths_from_loop.add(input_path)
+            skipped_count += 1
         else:
             unresolved_input_paths_from_loop.append(input_path)
+            unresolved_count += 1
     unresolved_input_paths = unresolved_input_paths_from_loop
 
     if len(input_paths) > max_detail_logs:

@@ -14,7 +14,7 @@
 // POST /api/markers/item/redetect. A job on the /jobs socket that works on the open file shows as a live banner, and
 // the file is read again when it ends.
 //
-// Every piece of text goes in through textContent. Depends on app.js globals: showToast, getCsrfToken,
+// Every piece of text goes in through textContent. Depends on app.js globals: showToast,
 // _initBootstrapTooltips, _disposeBootstrapTooltips; window.bootstrap; window.io.
 // =========================================================================
 (function () {
@@ -278,7 +278,7 @@
     async function sendJson(method, url, body) {
         const resp = await fetch(url, {
             method: method,
-            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': typeof getCsrfToken === 'function' ? getCsrfToken() : '' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body || {}),
         });
         if (resp.status === 401) {

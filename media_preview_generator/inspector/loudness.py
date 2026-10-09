@@ -107,7 +107,10 @@ def _stream(audio: Any, part: Any, item_id: str) -> dict:
 def _server_loudness(
     cfg: ServerConfig, server: Any, path: str, matches: list[OwnershipMatch], item_id: str | None
 ) -> dict:
-    before = get_source_fingerprint(path)
+    try:
+        before = get_source_fingerprint(path)
+    except OSError:
+        return _row(cfg, "unavailable", "This file can't be read from disk.")
     if not item_id:
         item_id = server.resolve_remote_path_to_item_id(path, library_ids=[m.library_id for m in matches])
     # Only a Plex rating key can form the metadata URL, including when resolution returned its API path.
@@ -147,7 +150,11 @@ def _server_loudness(
             streams.append(_stream(audio, part, item_id))
     if not streams:
         return _row(cfg, "unavailable", "Plex has not exposed audio streams for this file.")
-    if get_source_fingerprint(path) != before:
+    try:
+        after = get_source_fingerprint(path)
+    except OSError:
+        after = None
+    if after != before:
         return _row(cfg, "unavailable", "This file changed while its loudness metadata was being read.")
     states = {stream["state"] for stream in streams}
     state = next(iter(states)) if len(states) == 1 else "partial"
@@ -181,10 +188,10 @@ def file_loudness(
         preview = by_server.get(cfg.id, {})
         if cfg.type is not ServerType.PLEX:
             pending.append((cfg, None, _row(cfg, "unsupported", "Loudness measurements are available for Plex only.")))
-        elif previews._resting(cfg.id):
+        elif previews.is_resting(cfg.id):
             pending.append((cfg, None, _row(cfg, "unavailable", "Could not reach Plex to read loudness measurements.")))
         else:
-            future = previews._LOOKUPS.submit(
+            future = previews.submit_lookup(
                 _server_loudness, cfg, server, canonical_path, matches, preview.get("item_id")
             )
             pending.append((cfg, future, None))
@@ -198,7 +205,7 @@ def file_loudness(
             rows.append(future.result(timeout=max(0.0, deadline - time.monotonic())))
         except FutureTimeoutError:
             future.cancel()
-            previews._rest(cfg.id)
+            previews.mark_resting(cfg.id)
             rows.append(_row(cfg, "unavailable", "Plex took too long to return loudness measurements."))
         except Exception as exc:
             logger.debug("Inspector loudness lookup on {} failed: {}", cfg.name, type(exc).__name__)

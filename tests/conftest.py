@@ -222,53 +222,94 @@ def fixtures_dir():
     return Path(__file__).parent / "fixtures"
 
 
-@pytest.fixture
-def media_fixture():
-    """Return a resolver that maps a content-type key to a real on-disk
-    test clip under ``tests/fixtures/media/``.
+def write_bif(
+    path, *, frames: int | None = None, multiplier_ms: int = 10_000, timestamps: list[int] | None = None
+) -> str:
+    """Write a minimal BIF with one tiny JPEG per index entry.
 
-    Usage:
-        def test_hdr10_probe(media_fixture):
-            path = media_fixture("hdr10")
-            info = MediaInfo.parse(str(path))
-            ...
+    Args:
+        path: Destination file; parent directories are created.
+        frames: Frame count (default: ``len(timestamps)``).
+        multiplier_ms: Header interval multiplier in milliseconds.
+        timestamps: Index timestamps (default: ``0, 1, 2, ...``).
 
-    Available keys (see ``tests/fixtures/media/generate.sh``):
-      - ``"sdr"``     — H.264 BT.709 SDR
-      - ``"hdr10"``   — HEVC Main10 with HDR10 metadata (BT.2020 + PQ)
-      - ``"dv8"``     — DV Profile 8.1 (HDR10 base layer)
-      - ``"dv_p5_hdr_format"`` — NOT a file: the ``hdr_format`` string
-        that pymediainfo returns for a DV Profile 5 clip, suitable for
-        mocking in unit tests that don't need real bytes.  Profile 8.1
-        without ST 2086 reports the same string; only the transfer
-        (``None`` for Profile 5, ``"PQ"`` for 8.1) tells them apart.
-
-    Fail-loud if the requested key is missing — tests should call
-    ``pytest.importorskip`` or mark themselves skipped when the fixture
-    file isn't present, rather than silently pass.
+    Returns:
+        The path as a string.
     """
-    base = Path(__file__).parent / "fixtures" / "media"
+    import struct
 
-    paths = {
-        "sdr": base / "sdr_tiny.mkv",
-        "hdr10": base / "hdr10_tiny.mkv",
-        "dv8": base / "dv_profile8_tiny.mkv",
-    }
-    sentinels = {
-        "dv_p5_hdr_format": "Dolby Vision",
-    }
+    from media_preview_generator.bif_reader import BIF_MAGIC
 
-    def resolve(key: str):
-        if key in sentinels:
-            return sentinels[key]
-        path = paths.get(key)
-        if path is None:
-            raise KeyError(f"Unknown media_fixture key: {key!r}. Known: {sorted(list(paths) + list(sentinels))}")
-        if not path.exists():
-            pytest.skip(f"Media fixture {path} missing — run tests/fixtures/media/generate.sh to rebuild it.")
-        return path
+    if timestamps is None:
+        timestamps = list(range(frames or 0))
+    jpegs = [b"\xff\xd8\xff" + bytes([i % 256]) * 10 for i in range(len(timestamps))]
+    header = BIF_MAGIC + struct.pack("<III", 0, len(jpegs), multiplier_ms) + b"\x00" * 44
+    offset = len(header) + 8 * (len(jpegs) + 1)
+    index = b""
+    for ts, jpeg in zip(timestamps, jpegs, strict=True):
+        index += struct.pack("<II", ts, offset)
+        offset += len(jpeg)
+    index += struct.pack("<II", 0xFFFFFFFF, offset)
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(header + index + b"".join(jpegs))
+    return str(path)
 
-    return resolve
+
+@pytest.fixture
+def mock_auth_config(tmp_path, monkeypatch):
+    """Point the auth module and settings singleton at ``tmp_path``."""
+    monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", str(tmp_path / "auth.json"))
+    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
+    from media_preview_generator.web.routes import clear_gpu_cache
+    from media_preview_generator.web.settings_manager import reset_settings_manager
+
+    reset_settings_manager()
+    clear_gpu_cache()
+    return str(tmp_path)
+
+
+@pytest.fixture
+def flask_app(tmp_path, mock_auth_config):
+    """Flask app (setup not complete) rooted at ``tmp_path``."""
+    from media_preview_generator.web.app import create_app
+
+    app = create_app(config_dir=str(tmp_path))
+    app.config["TESTING"] = True
+    return app
+
+
+@pytest.fixture
+def client(flask_app):
+    """Flask test client for ``flask_app``."""
+    return flask_app.test_client()
+
+
+@pytest.fixture
+def auth_headers():
+    """Valid ``X-Auth-Token`` header for the app built on ``mock_auth_config``."""
+    from media_preview_generator.web.auth import get_auth_token
+
+    return {"X-Auth-Token": get_auth_token()}
+
+
+@pytest.fixture
+def loguru_caplog(caplog):
+    """Forward loguru records (DEBUG and up) into pytest's ``caplog``."""
+    import logging
+
+    from loguru import logger
+
+    class _PropagateHandler(logging.Handler):
+        def emit(self, record):  # pragma: no cover - handler glue
+            logging.getLogger(record.name).handle(record)
+
+    handler_id = logger.add(_PropagateHandler(), level="DEBUG", format="{message}")
+    caplog.set_level(logging.DEBUG)
+    try:
+        yield caplog
+    finally:
+        logger.remove(handler_id)
 
 
 @pytest.fixture
@@ -318,26 +359,6 @@ def mock_plex_server():
 
 
 @pytest.fixture
-def mock_plex_section_movie():
-    """Create a mock Plex movie library section."""
-    section = MagicMock()
-    section.title = "Movies"
-    section.METADATA_TYPE = "movie"
-    section.type = "movie"
-    return section
-
-
-@pytest.fixture
-def mock_plex_section_episode():
-    """Create a mock Plex TV show library section."""
-    section = MagicMock()
-    section.title = "TV Shows"
-    section.METADATA_TYPE = "episode"
-    section.type = "show"
-    return section
-
-
-@pytest.fixture
 def mock_plex_movie():
     """Create a mock Plex movie item."""
     movie = MagicMock()
@@ -362,31 +383,9 @@ def mock_plex_episode():
 
 
 @pytest.fixture
-def sample_jpeg(fixtures_dir):
-    """Return path to sample JPEG fixture."""
-    return str(fixtures_dir / "sample.jpg")
-
-
-@pytest.fixture
 def reference_bif(fixtures_dir):
     """Return path to reference BIF fixture."""
     return str(fixtures_dir / "reference.bif")
-
-
-@pytest.fixture
-def plex_xml_library_sections(fixtures_dir):
-    """Load library sections XML fixture."""
-    xml_path = fixtures_dir / "plex_responses" / "library_sections.xml"
-    with open(xml_path, encoding="utf-8") as f:
-        return f.read()
-
-
-@pytest.fixture
-def plex_xml_episode_tree(fixtures_dir):
-    """Load episode tree XML fixture."""
-    xml_path = fixtures_dir / "plex_responses" / "episode_tree.xml"
-    with open(xml_path, encoding="utf-8") as f:
-        return f.read()
 
 
 @pytest.fixture
@@ -473,42 +472,6 @@ def create_mock_mediainfo(has_hdr=False, hdr_format_override=None, duration=60.0
     mock_info.general_tracks = []
 
     return mock_info
-
-
-@pytest.fixture
-def mock_ffmpeg_success():
-    """Create a successful FFmpeg process mock."""
-    return create_mock_ffmpeg_process(returncode=0)
-
-
-@pytest.fixture
-def mock_ffmpeg_failure():
-    """Create a failed FFmpeg process mock."""
-    return create_mock_ffmpeg_process(returncode=1)
-
-
-@pytest.fixture
-def mock_mediainfo_standard():
-    """Create a mock MediaInfo for standard video."""
-    return create_mock_mediainfo(has_hdr=False)
-
-
-@pytest.fixture
-def mock_mediainfo_hdr():
-    """Create a mock MediaInfo for HDR video."""
-    return create_mock_mediainfo(has_hdr=True)
-
-
-@pytest.fixture
-def mock_mediainfo_dv_profile5():
-    """Create a mock MediaInfo for Dolby Vision Profile 5 (no backward compat)."""
-    return create_mock_mediainfo(hdr_format_override="Dolby Vision", transfer_characteristics=None)
-
-
-@pytest.fixture
-def mock_mediainfo_dv_with_hdr10():
-    """Create a mock MediaInfo for Dolby Vision Profile 8 with HDR10 compat."""
-    return create_mock_mediainfo(hdr_format_override="Dolby Vision / SMPTE ST 2086", transfer_characteristics="PQ")
 
 
 @pytest.fixture(autouse=True)
@@ -1001,8 +964,7 @@ def _scrub_response_body(response):
     # The recording workflow (``tests/integration/up.sh``) ensures
     # path 1 is the normal case; path 2 is the safety net.
     #
-    # ``/media/synth-chapters/`` is the Intro & Credits lab's synth show
-    # (``docs/design/intro-credits/evidence/lab/synth_chapters.sh``) —
+    # ``/media/synth-chapters/`` is the Intro & Credits lab's synthetic show —
     # generated fixtures, same trust level as the other prefixes.
     _SYNTHETIC_PREFIXES = ("/em-media/", "/jf-media/", "/media/Movies/Test ", "/media/synth-chapters/")
 

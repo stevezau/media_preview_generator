@@ -8,7 +8,7 @@ subclass needs to specify only:
 
 * :attr:`type` — the :class:`ServerType` enum value.
 * :attr:`vendor_name` — the vendor brand for log strings.
-* :meth:`trigger_refresh` — Emby has a path-based endpoint Jellyfin doesn't.
+* ``_trigger_path_refresh`` / ``_trigger_item_refresh`` — how each vendor nudges a scan.
 * :meth:`parse_webhook` — payload shapes differ.
 """
 
@@ -20,13 +20,14 @@ import threading
 import time
 import unicodedata
 import urllib.parse
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterator
 from typing import Any
 
 import requests
 import urllib3
 from loguru import logger
 
+from ..markers.external_ids import is_season_folder
 from ..scan_filters import metadata_id, metadata_integer, parse_added_at
 from ._mediabrowser_auth import _AUTH_DEVICE_ID, mediabrowser_authorization_header
 from .base import (
@@ -117,6 +118,15 @@ def is_video_library_folder(raw: dict) -> bool:
     return collection_type not in _NON_VIDEO_COLLECTION_TYPES
 
 
+def library_folder_id(raw: dict) -> str:
+    """The id of one ``/Library/VirtualFolders`` entry (``ItemId``, else ``Id``, else the name)."""
+    return str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
+
+
+class _VirtualFoldersShapeError(ValueError):
+    """``/Library/VirtualFolders`` answered with something other than a list."""
+
+
 def _chapter_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
     """An item's ``Chapters`` as ``{"marker_type", "start_ms", "name"}`` rows (rows without an integer start skipped)."""
     out: list[dict[str, Any]] = []
@@ -141,7 +151,7 @@ class EmbyApiClient(MediaServer):
 
     Concrete subclasses set ``vendor_name`` (used in log strings) and
     override the bits that genuinely differ between the two vendors —
-    ``trigger_refresh`` and ``parse_webhook``.
+    ``_trigger_path_refresh`` / ``_trigger_item_refresh`` and ``parse_webhook``.
     """
 
     #: Display brand used in log lines (e.g. "Emby", "Jellyfin").
@@ -165,12 +175,8 @@ class EmbyApiClient(MediaServer):
         # read, no acquire) thanks to double-checked locking.
         self._session_lock = threading.Lock()
         # Reverse-lookup cache: ``{(remote_path, library scope): (expires_at, item_id)}``.
-        # Caches POSITIVE results only — see ``_resolve_one_path`` for the
-        # negative-cache regression (chain ``62e32c35``, 2026-05-11) that
-        # forced every early retry to short-circuit on stale ``None`` for
-        # the full TTL. Value type stays ``str | None`` for backwards-compat
-        # with any in-memory entry written by older code paths; the reader
-        # in ``_resolve_one_path`` defensively ignores ``None`` values.
+        # Caches POSITIVE results only: a cached ``None`` would make every early
+        # retry short-circuit on a stale miss for the full TTL.
         self._reverse_lookup_cache: dict[tuple[str, frozenset[str] | None], tuple[float, str | None]] = {}
         self._reverse_lookup_lock = threading.Lock()
 
@@ -469,6 +475,120 @@ class EmbyApiClient(MediaServer):
         except (ValueError, requests.RequestException) as exc:
             return ConnectionResult(ok=False, message=f"Connection test failed: {exc}")
 
+    def _trigger_path_deleted(self, server_view_path: str) -> None:
+        """Tell the server a previously-imported file is gone.
+
+        Same ``/Library/Media/Updated`` endpoint as ``_trigger_path_refresh``
+        but with ``UpdateType:"Deleted"``, so the stale library row is dropped
+        instead of lingering until the next filesystem-monitor or scheduled
+        scan. Used after Radarr/Sonarr upgrade webhooks list the replaced
+        release in ``deletedFiles[]``. Best-effort; the base wrapper logs
+        failures at debug level.
+        """
+        response = self._request(
+            "POST",
+            "/Library/Media/Updated",
+            json_body={"Updates": [{"Path": server_view_path, "UpdateType": "Deleted"}]},
+        )
+        response.raise_for_status()
+        logger.info("[{}] Notified deleted path: {}", self.name, server_view_path)
+
+    def _probe_system_version(self) -> tuple[str, str]:
+        """Read the server version from ``/System/Info``.
+
+        Returns:
+            ``(version, error)``: ``error`` is empty on success, otherwise the
+            reason the probe failed (and ``version`` is empty).
+        """
+        try:
+            response = self._request("GET", "/System/Info")
+            response.raise_for_status()
+            data = response.json() or {}
+            return str(data.get("Version") or ""), ""
+        except Exception as exc:
+            logger.debug("Version probe failed for {!r}: {}", self.name, exc)
+            return "", f"Could not read /System/Info: {exc}"
+
+    def _video_library_folders(self) -> list[tuple[str, dict]]:
+        """Fetch ``/Library/VirtualFolders`` and return ``(library_id, raw)`` for each video library.
+
+        Music/photo/book libraries are skipped: they carry no preview options
+        (issue #237).
+
+        Raises:
+            _VirtualFoldersShapeError: The response wasn't a list.
+            Exception: Any request or JSON failure, unchanged.
+        """
+        response = self._request("GET", "/Library/VirtualFolders")
+        response.raise_for_status()
+        folders = response.json()
+        if not isinstance(folders, list):
+            raise _VirtualFoldersShapeError("unexpected VirtualFolders response shape")
+        return [
+            (library_folder_id(raw), raw) for raw in folders if isinstance(raw, dict) and is_video_library_folder(raw)
+        ]
+
+    def _update_video_library_options(
+        self,
+        edit: Callable[[str, dict], list[str]],
+        *,
+        library_ids: Collection[str] | None = None,
+        key_per_flag: bool = True,
+    ) -> dict[str, str]:
+        """Rewrite ``LibraryOptions`` on video libraries via ``edit`` and POST the changed ones.
+
+        The endpoint is a wholesale replace, so the full existing options dict
+        is posted back with only the edited keys changed; omitted fields would
+        revert to their defaults.
+
+        Args:
+            edit: ``edit(library_id, options)`` mutates ``options`` in place and
+                returns the flag names it changed (empty to leave the library alone).
+            library_ids: Restrict to these libraries; ``None`` means all.
+            key_per_flag: Result keys are ``"<library_id>:<flag>"`` when True,
+                else just ``"<library_id>"``.
+
+        Returns:
+            Per-key ``"ok"`` / ``"error: ..."``; a failure to list libraries
+            collapses to a single ``"_global"`` entry.
+        """
+        try:
+            folders = self._video_library_folders()
+        except _VirtualFoldersShapeError as exc:
+            return {"_global": str(exc)}
+        except Exception as exc:
+            return {"_global": f"failed to fetch libraries: {exc}"}
+
+        results: dict[str, str] = {}
+        for lib_id, raw in folders:
+            if library_ids is not None and lib_id not in library_ids:
+                continue
+            options = dict(raw.get("LibraryOptions") or {})
+            changed = edit(lib_id, options)
+            if not changed:
+                continue
+            keys = [f"{lib_id}:{flag}" for flag in changed] if key_per_flag else [lib_id]
+            try:
+                update = self._request(
+                    "POST",
+                    "/Library/VirtualFolders/LibraryOptions",
+                    json_body={"Id": lib_id, "LibraryOptions": options},
+                )
+                update.raise_for_status()
+                outcome = "ok"
+            except Exception as exc:
+                logger.warning(
+                    "Could not update {} library {} settings on server {!r}: {}",
+                    self.vendor_name,
+                    lib_id,
+                    self.name,
+                    exc,
+                )
+                outcome = f"error: {exc}"
+            for key in keys:
+                results[key] = outcome
+        return results
+
     def list_libraries(self) -> list[Library]:
         """List "Virtual Folders" with their folder paths.
 
@@ -509,7 +629,7 @@ class EmbyApiClient(MediaServer):
         for raw in data:
             if not isinstance(raw, dict):
                 continue
-            lib_id = str(raw.get("ItemId") or raw.get("Id") or raw.get("Name") or "")
+            lib_id = library_folder_id(raw)
             name = str(raw.get("Name") or "")
             locations = tuple(str(loc) for loc in (raw.get("Locations") or []))
             kind = str(raw.get("CollectionType") or "") or None
@@ -1029,12 +1149,10 @@ class EmbyApiClient(MediaServer):
     def search_items(self, query: str, limit: int = 50) -> list[MediaItem]:
         """Two-pass search via the shared :class:`SearchQuery` abstraction.
 
-        Pre-fix this called ``/Items?searchTerm=...`` directly with the
-        raw query string. ``searchTerm`` is a substring matcher with no
-        relevance ranking, so ``"the boys s01e01"`` returned every item
-        containing the token "boys" (Wonder Boys, Nickel Boys, Jersey
-        Boys, Bad Boys, Boys State, Good Boys) — the user got 6 wrong
-        results before the right one. Live regression 2026-05-10.
+        ``searchTerm`` alone is a substring matcher with no relevance
+        ranking, so ``"the boys s01e01"`` would return every item containing
+        the token "boys" (Wonder Boys, Bad Boys, Good Boys, ...) ahead of the
+        right one.
 
         Two-pass strategy:
 
@@ -1193,9 +1311,9 @@ class EmbyApiClient(MediaServer):
         #
         # Series rows are NOT dropped — they're expanded into their
         # episodes via _expand_series so show-name queries always
-        # surface loadable media files. Pre-fix this dropped Series
-        # rows entirely, which left Jellyfin show searches with zero
-        # results because Pass 1 had also missed.
+        # surface loadable media files. Dropping Series
+        # rows would leave Jellyfin show searches with zero results
+        # whenever Pass 1 missed.
         # ---------------------------------------------------------------
         fallback_params = _maybe_add_user_id(
             {
@@ -1246,10 +1364,8 @@ class EmbyApiClient(MediaServer):
                     break
                 continue
             # When the user typed S##E##, only let through episodes that
-            # match the requested season+episode. Pre-fix Pass 2 returned
-            # every matching episode regardless of S##E##, so a
-            # "S01E08" query for a show like "The Neighbourhood" surfaced
-            # S01E01–S01E08 instead of just S01E08.
+            # match the requested season+episode. Otherwise a
+            # "S01E08" query would surface S01E01–S01E08 instead of just S01E08.
             if sq.has_episode:
                 if raw_type != "Episode":
                     continue
@@ -1276,7 +1392,7 @@ class EmbyApiClient(MediaServer):
         if not results:
             # Surface zero-result searches at INFO so users investigating
             # "why doesn't search work" can grep the logs without enabling
-            # debug. Pre-fix this happened silently.
+            # debug.
             logger.info(
                 "[{}] Search returned no results for {!r} (parsed title={!r}, S{}E{})",
                 self.name,
@@ -1503,9 +1619,6 @@ class EmbyApiClient(MediaServer):
         now = time.monotonic()
         with self._reverse_lookup_lock:
             cached = self._reverse_lookup_cache.get(cache_key)
-            # ``cached[1] is not None`` guards against stale negatives
-            # left in the cache by older code paths (defence-in-depth
-            # for rolling deploys); current code never writes them.
             if cached is not None and cached[0] > now and cached[1] is not None:
                 return cached[1]
         result = self._uncached_resolve_remote_path_to_item_id(server_view_path)
@@ -1566,19 +1679,6 @@ class EmbyApiClient(MediaServer):
                 self.vendor_name,
                 remote_path,
             )
-            return None
-
-        def _match(items: list) -> str | None:
-            for raw in items:
-                if not isinstance(raw, dict):
-                    continue
-                path = str(raw.get("Path") or "")
-                if not path:
-                    continue
-                if os.path.basename(path) == basename and path.replace("\\", "/").endswith(target_tail):
-                    item_id = str(raw.get("Id") or "")
-                    if item_id:
-                        return item_id
             return None
 
         # Pass 0 — Name-prefix scoped lookup. The full filename stem the
@@ -1647,28 +1747,33 @@ class EmbyApiClient(MediaServer):
         try:
             response = self._request("GET", "/Items", params=pass1_params)
             response.raise_for_status()
-            hit = _match(response.json().get("Items") or [])
+            hit = self._match_basename(response.json().get("Items") or [], basename, target_tail)
             if hit:
                 return hit
         except Exception as exc:
             logger.debug("{} reverse-lookup search failed for {}: {}", self.vendor_name, remote_path, exc)
 
-        # Pass 2 — enumeration fallback for titles whose tokens (4K, HDR,
+        # Pass 2 — paged enumeration fallback for titles whose tokens (4K, HDR,
         # DV, etc.) the search index quietly drops. Scoped to the owning
-        # library when we have its id, so a "not found" decision lands
-        # in ~1 sec instead of a full-server walk.
+        # library when we have its id.
         pass2_params = {
             "Recursive": "true",
             "IncludeItemTypes": "Movie,Episode",
             "Fields": "Path",
-            "Limit": 1000,
+            "Limit": self._PASS2_PAGE_SIZE,
         }
         if parent_id:
             pass2_params["ParentId"] = parent_id
+        start_index = 0
         try:
-            response = self._request("GET", "/Items", params=pass2_params)
-            response.raise_for_status()
-            return _match(response.json().get("Items") or [])
+            while True:
+                response = self._request("GET", "/Items", params={**pass2_params, "StartIndex": start_index})
+                response.raise_for_status()
+                items = response.json().get("Items") or []
+                hit = self._match_basename(items, basename, target_tail)
+                if hit or len(items) < self._PASS2_PAGE_SIZE:
+                    return hit
+                start_index += len(items)
         except Exception as exc:
             logger.debug("{} reverse-lookup enumerate failed for {}: {}", self.vendor_name, remote_path, exc)
             return None
@@ -1685,6 +1790,7 @@ class EmbyApiClient(MediaServer):
     # miss-audit. Above the cap the fast path aborts and we fall
     # through to Pass 1+2.
     _PASS0_PARENT_CANDIDATE_CAP = 500
+    _PASS2_PAGE_SIZE = 1000
     # Per-series episode enumerate Limit. Long-running shows have
     # huge episode counts (Pokémon 1266, Doctor Who 870+, Simpsons
     # 800+) and a low cap silently truncates the result so the local
@@ -1729,7 +1835,7 @@ class EmbyApiClient(MediaServer):
         episode.
 
         Why first word only — empirically validated against a 100-item
-        random sample of EmbyTest:
+        random sample of a real Emby library:
         * Path-derived names often differ from Emby's stored Name on
           internal characters: ``"TRON Legacy"`` (path) vs ``"TRON: Legacy"``
           (Emby), ``"Baki-Dou - The Invincible Samurai"`` vs
@@ -1756,8 +1862,8 @@ class EmbyApiClient(MediaServer):
         candidate = None
         is_episode = False
         for i, comp in enumerate(parts):
-            # Match "Season 01", "Season 1", "season1" etc.
-            if re.match(r"^season\b", comp, re.IGNORECASE) and i > 0:
+            # "Season 01", "Series 1", "Staffel 1", "S01", "Specials" etc.
+            if i > 0 and is_season_folder(comp):
                 candidate = parts[i - 1]
                 is_episode = True
                 break
@@ -1870,8 +1976,8 @@ class EmbyApiClient(MediaServer):
         # Definitive-miss reasoning for the "candidates returned but no
         # basename match" case (live perf #44 follow-up): the dominant
         # multi-server scenario is "show/movie isn't on this server but
-        # other items share the first word" — e.g. Boy Band Confidential
-        # webhook fires, EmbyTest has 23 other ``Boy*`` shows. Without
+        # other items share the first word" — e.g. a webhook fires
+        # for "Boy Band Confidential" and this server has 23 other ``Boy*`` shows. Without
         # this branch, Pass 0 walked every sibling's episodes (correct,
         # ~1s on TV libraries), found no match, then fell through to
         # Pass 1's 30s scoring loop just to confirm what we already knew.

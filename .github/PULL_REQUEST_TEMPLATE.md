@@ -16,7 +16,7 @@
 - [ ] `ruff format --check .` passes
 - [ ] `pytest` passes
 - [ ] Manually exercised the feature / bugfix in the web UI
-- [ ] Docker build succeeds locally (`docker build -t plex-previews:dev .`)
+- [ ] Docker build succeeds locally (`docker build -t media-preview-generator:dev .`)
 
 ## Related issues
 

@@ -10,7 +10,7 @@ import pytest
 from media_preview_generator.loudness import job
 from media_preview_generator.web.jobs import JobStatus
 
-from .test_job_lifecycle import Lifecycle, lifecycle  # noqa: F401
+from .conftest import Lifecycle
 
 
 def start_sender(env, path):

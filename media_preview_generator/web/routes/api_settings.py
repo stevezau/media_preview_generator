@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from flask import jsonify, request
 from loguru import logger
 
-from ...config import MAX_CPU_THREADS, validate_processing_thread_totals
+from ...config import MAX_CPU_THREADS, VALID_TONEMAP_ALGORITHMS, validate_processing_thread_totals
 from ...markers.settings import mask_global
 from ...processing.retry_queue import DEFAULT_RETRY_COUNT
 from ...utils import is_docker_environment
@@ -393,7 +393,7 @@ def get_settings():
             # so newly-imported media overtakes a running full scan
             # without the user having to demote the scan by hand.
             "incoming_job_priority": parse_priority(settings.get("incoming_job_priority", PRIORITY_HIGH)),
-            # D17 — backup retention (count + max-age days). 0 max_age_days
+            # backup retention (count + max-age days). 0 max_age_days
             # disables age-based pruning so existing installs keep behaving
             # exactly as before until the user opts in.
             "config_backup_keep": settings.get("config_backup_keep", 10),
@@ -448,6 +448,20 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "config_backup_max_age_days",
     "markers",
 )
+
+
+def _json_object() -> dict:
+    """Return the request's JSON body, or ``{}`` when it is empty or not an object (e.g. a list)."""
+    data = request.get_json()
+    return data if isinstance(data, dict) else {}
+
+
+_SAVE_SETTINGS_INT_RANGES = {
+    "thumbnail_interval": (1, 60),
+    "thumbnail_quality": (1, 10),
+    "ffmpeg_threads": (0, 32),
+}
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 _SAVE_SETTINGS_INT_FIELDS = (
     "cpu_threads",
@@ -545,11 +559,14 @@ def _validate_and_coerce_settings_updates(
         fr = updates["frame_reuse"]
         if not isinstance(fr, dict):
             return None, (jsonify({"error": "frame_reuse must be an object"}), 400)
-        updates["frame_reuse"] = {
-            "enabled": bool(fr.get("enabled", True)),
-            "ttl_minutes": max(1, int(fr.get("ttl_minutes", 60) or 60)),
-            "max_cache_disk_mb": max(64, int(fr.get("max_cache_disk_mb", 2048) or 2048)),
-        }
+        try:
+            updates["frame_reuse"] = {
+                "enabled": bool(fr.get("enabled", True)),
+                "ttl_minutes": max(1, int(fr.get("ttl_minutes", 60) or 60)),
+                "max_cache_disk_mb": max(64, int(fr.get("max_cache_disk_mb", 2048) or 2048)),
+            }
+        except (TypeError, ValueError):
+            return None, (jsonify({"error": "frame_reuse ttl_minutes and max_cache_disk_mb must be integers"}), 400)
 
     # Validate the Intro & Credits global block. ``validate_global`` needs the currently-stored
     # block to resolve a masked TheIntroDB api_key (``****``) back to the real key on save.
@@ -584,6 +601,23 @@ def _validate_and_coerce_settings_updates(
             jsonify({"error": f"cpu_threads must be between 0 and {MAX_CPU_THREADS} (got {updates['cpu_threads']})"}),
             400,
         )
+
+    # Same bounds as config/validation.py: a value outside them is saved but then stops every later job from starting.
+    for field, (low, high) in _SAVE_SETTINGS_INT_RANGES.items():
+        if field in updates and not low <= updates[field] <= high:
+            return None, (jsonify({"error": f"{field} must be between {low} and {high} (got {updates[field]})"}), 400)
+
+    if "tonemap_algorithm" in updates and updates["tonemap_algorithm"] not in VALID_TONEMAP_ALGORITHMS:
+        return None, (
+            jsonify({"error": f"tonemap_algorithm must be one of {', '.join(VALID_TONEMAP_ALGORITHMS)}"}),
+            400,
+        )
+
+    if "log_level" in updates:
+        level = updates["log_level"]
+        if not isinstance(level, str) or level.upper() not in _VALID_LOG_LEVELS:
+            return None, (jsonify({"error": f"log_level must be one of {', '.join(_VALID_LOG_LEVELS)}"}), 400)
+        updates["log_level"] = level.upper()
 
     # Issue #285 — priority for webhook / Recently Added jobs. Accepts
     # either the label the UI sends ("high") or the raw int, and is
@@ -852,8 +886,6 @@ def _translate_legacy_worker_updates(settings, updates: dict) -> dict:
                 return
             if resource == "gpu" and not device:
                 raise ValueError("Choose a GPU device in a worker group before setting its count")
-            import uuid
-
             member = {
                 "id": "m1",
                 "resource": resource,
@@ -922,7 +954,7 @@ def save_settings():
     from ..settings_manager import get_settings_manager
 
     settings = get_settings_manager()
-    data = request.get_json() or {}
+    data = _json_object()
 
     updates, error_response = _validate_and_coerce_settings_updates(data, settings.get("markers"))
     if error_response is not None:
@@ -930,8 +962,8 @@ def save_settings():
         return body, status
 
     # Route Plex-flavoured legacy fields into media_servers[0] instead of
-    # writing them as top-level keys. Phase 0 already taught readers to
-    # prefer the per-server view; this is the write half of the same flip.
+    # writing them as top-level keys. Readers already prefer the
+    # per-server view; this is the write half of the same flip.
     # Capture which fields the *caller* tried to update before we strip
     # them, so the post-save hooks (cache invalidation, webhook re-register)
     # still fire even though the keys ended up nested under media_servers.
@@ -960,15 +992,14 @@ def update_log_level():
     from ...logging_config import setup_logging
     from ..settings_manager import get_settings_manager
 
-    data = request.get_json() or {}
+    data = _json_object()
     raw_level = data.get("log_level")
     if raw_level is not None and not isinstance(raw_level, str):
         return jsonify({"error": "log_level must be a string"}), 400
     level = (raw_level or "INFO").upper()
 
-    valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-    if level not in valid_levels:
-        return jsonify({"error": f"Invalid log level. Must be one of {valid_levels}"}), 400
+    if level not in _VALID_LOG_LEVELS:
+        return jsonify({"error": f"Invalid log level. Must be one of {list(_VALID_LOG_LEVELS)}"}), 400
 
     sm = get_settings_manager()
     sm.set("log_level", level)
@@ -996,7 +1027,7 @@ def validate_local_path():
         ``{"exists": bool, "readable": bool, "error": str|null}``
 
     """
-    data = request.get_json() or {}
+    data = _json_object()
     raw_path = (data.get("path") or "").strip()
     if not raw_path:
         return jsonify({"exists": False, "readable": False, "error": None})
@@ -1112,7 +1143,7 @@ def validate_plex_config_folder():
         ``{"exists": bool, "valid_plex_structure": bool, "shard_count": int,
            "writable": bool, "detail": str, "error": str|null}``
     """
-    data = request.get_json() or {}
+    data = _json_object()
     raw_path = (data.get("path") or "").strip()
     if not raw_path:
         return jsonify(
@@ -1290,7 +1321,7 @@ def validate_jellyfin_config_folder():
             }
         )
 
-    data = request.get_json() or {}
+    data = _json_object()
     raw_path = (data.get("path") or "").strip()
     if not raw_path:
         return _resp()
@@ -1369,7 +1400,7 @@ def save_setup_state():
     from ..settings_manager import get_settings_manager
 
     settings = get_settings_manager()
-    data = request.get_json() or {}
+    data = _json_object()
 
     step = data.get("step", 1)
     step_data = data.get("data", {})
@@ -1422,7 +1453,7 @@ def set_setup_token():
     """Set a custom authentication token during setup."""
     from ..auth import set_auth_token
 
-    data = request.get_json() or {}
+    data = _json_object()
     new_token = data.get("token", "")
     confirm_token = data.get("confirm_token", "")
 
@@ -1564,7 +1595,7 @@ def validate_paths():
     """Validate path configuration (path_mappings or legacy plex/local pair)."""
     from ...config import normalize_path_mappings
 
-    data = request.get_json() or {}
+    data = _json_object()
     plex_data_path = data.get("plex_config_folder", "/plex")
     path_mappings = normalize_path_mappings(data)
     plex_media_path = data.get("plex_videos_path_mapping", "")
@@ -1622,7 +1653,7 @@ def validate_paths():
 
 
 # ============================================================================
-# J6 — Backup recovery (settings.json / schedules.json / webhook_history.json)
+# Backup recovery (settings.json / schedules.json / webhook_history.json)
 # ============================================================================
 #
 # Each writer that uses ``atomic_json_save_with_backup`` (J1+J2) leaves a
@@ -1729,7 +1760,7 @@ def restore_backup():
     """
     import shutil
 
-    data = request.get_json() or {}
+    data = _json_object()
     name = (data.get("file") or "").strip()
     backup_filename = (data.get("backup") or "").strip()
 
@@ -1767,17 +1798,27 @@ def restore_backup():
         except OSError as exc:
             logger.debug("Pre-restore snapshot of {} failed: {}", live, exc)
 
+    # The manager keeps its settings in memory, so it must re-read the restored file under its lock; otherwise
+    # the next save of anything would write the old in-memory content back over the restore.
+    settings = get_settings_manager()
+    tmp_path = f"{live}.restore.tmp"
     try:
-        shutil.copy2(bak_path, live)
+        with settings.locked():
+            shutil.copy2(bak_path, tmp_path)
+            os.replace(tmp_path, live)
+            if name == "settings.json":
+                settings.reload()
+            elif name == "setup_state.json":
+                settings.reload_setup_state()
     except OSError as exc:
         return jsonify({"success": False, "error": str(exc)}), 500
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    if name == "settings.json":
+        from ...config import clear_config_cache
+
+        clear_config_cache()
 
     logger.info("Restored {} from {}", live, bak_path)
-    return jsonify(
-        {
-            "success": True,
-            "file": name,
-            "backup": os.path.basename(bak_path),
-            "note": "Reload the app (or click Refresh) for in-memory caches to pick up the restored content.",
-        }
-    )
+    return jsonify({"success": True, "file": name, "backup": os.path.basename(bak_path)})

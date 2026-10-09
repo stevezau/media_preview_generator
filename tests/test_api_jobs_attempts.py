@@ -1,4 +1,4 @@
-"""Tests for the retry-chain Attempts API surface (post-2026-05-13 refactor).
+"""Tests for the retry-chain Attempts API surface.
 
 * ``GET /api/jobs`` default-hides retry-child rows (``is_retry: True``
   with no ``is_retry_chain`` flag) so the dashboard shows ONE row per
@@ -709,39 +709,14 @@ class TestOriginatingDispatchFilter:
         # No retry-<hash>-prefixed ids should appear (legacy rows are dropped at load)
         assert not any(i.startswith("retry-") for i in ids)
 
-    def test_attempt_rows_hidden_default_visible_with_opt_in(self, client):
-        from media_preview_generator.web.jobs import get_job_manager
-
-        jm = get_job_manager()
-        _, attempt_ids = _seed_chain_with_attempts(
-            jm,
-            canonical_path="/data/Marshals.mkv",
-            basename="Marshals S01E11",
-            num_attempts=3,
-        )
-
-        # Default: attempts hidden
-        resp = client.get("/api/jobs?page=0", headers=_headers())
-        ids_default = {j["id"] for j in resp.get_json()["jobs"]}
-        assert ids_default.isdisjoint(set(attempt_ids)), (
-            f"is_retry retry-child rows must be hidden from default list; found {ids_default & set(attempt_ids)}"
-        )
-
-        # Opt-in: attempts visible
-        resp = client.get("/api/jobs?page=0&include_retry_attempts=1", headers=_headers())
-        ids_opt = {j["id"] for j in resp.get_json()["jobs"]}
-        for aid in attempt_ids:
-            assert aid in ids_opt, f"Attempt {aid} missing with include_retry_attempts=1"
-
 
 class TestAttemptsRetryReason:
     """Each retry child carries the structured reason it was spawned for
     (``config["retry_reason"]``) so the modal can show "Retried N× because
     JellyTest was still indexing" even after the chain succeeds and the
     live ``publishers`` snapshot has been refreshed away from any pending
-    statuses (job ``4ad23f43``, 2026-05-15 — chain completed successfully
-    but the modal banner was blank because ``_pending_servers()`` derived
-    its data from the post-success ``publishers`` snapshot).
+    statuses (``_pending_servers()`` would otherwise derive its data from
+    the post-success ``publishers`` snapshot and the banner would be blank).
 
     Contract surfaced through ``/api/jobs/<chain_id>/attempts``:
       * Originating-dispatch entry NEVER carries ``retry_reason`` (it
@@ -764,7 +739,7 @@ class TestAttemptsRetryReason:
         )
         # Stamp three different retry_reason shapes onto the children to
         # cover the matrix the spawn helper produces:
-        #   1. publisher-pending only (the 4ad23f43 case)
+        #   1. publisher-pending only
         #   2. unresolved + stale_paths (Plex-resolution failure)
         #   3. legacy/missing — child has no retry_reason field
         first_child = jm.get_job(attempt_ids[0])
@@ -834,9 +809,7 @@ class TestAttemptsRetryReason:
 
     def test_reconstructs_retry_reason_from_chain_jsonl_for_legacy_first_attempt(self, client):
         """Existing chains that ran before ``retry_reason`` was persisted
-        on config (e.g. job ``4ad23f43``, 2026-05-15) MUST still surface
-        a reason in the modal — otherwise the user's reported case stays
-        broken even after the fix ships. The chain head's per-file JSONL
+        on config MUST still surface a reason in the modal. The chain head's per-file JSONL
         preserves the historical pending status (rows are written-once;
         the in-memory ``publishers`` snapshot's ``best_per_path`` merge
         only affects display, not the JSONL).
@@ -872,7 +845,7 @@ class TestAttemptsRetryReason:
             jm._persist_job(child)  # noqa: SLF001
 
         # Seed the chain head's JSONL with the pre-retry state — exactly
-        # the shape the orchestrator wrote for job 4ad23f43 (Plex
+        # the shape the orchestrator wrote for such a chain (Plex
         # skipped_not_in_library on S01E07, JellyTest
         # published_pending_registration on S01E01).
         # ``record_file_result`` reads FULL publisher keys

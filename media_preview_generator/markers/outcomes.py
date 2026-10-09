@@ -48,8 +48,8 @@ def file_outcome(statuses: set[str], *, waiting_to_retry: bool = False) -> FileO
     1. Any server failed → failed: a broken write or check, even when another server took the markers.
     2. A server waiting with a retry queued (it hasn't indexed the file yet, Plex Pass is unconfirmed, or another job
        held the file) → waiting: the job runs the file again.
-    3. Any server written → published: the job changed what a server shows.
-    4. Any other server waiting → waiting, even when another server is up to date.
+    3. Any other server waiting → waiting, even when a server was written or is up to date.
+    4. Any server written → published: the job changed what a server shows.
     5. Any server up to date → up to date.
     6. Any server with nothing to publish, or no rows → no markers.
     7. Every server skipped (no publisher, plugin missing, turned off) → skipped.
@@ -86,17 +86,16 @@ NOT_IN_LIBRARY = "not_in_library"
 PLEX_PASS_UNKNOWN = "plex_pass_unknown"
 # Another job kept running the file past a worker's wait for it (``pipeline.WORKER_FILE_WAIT_S``): nothing was done.
 FILE_BUSY = "file_busy"
-# A row written before 2026-10-02 may still carry ``versions_unchecked`` (a Plex item waited for its other versions);
-# it isn't listed here, so such a row reads as any other waiting row and gets no retry of its own.
+# A row may still carry ``versions_unchecked`` (a Plex item waited for its other versions, no longer produced); it
+# isn't listed here, so such a row reads as any other waiting row and gets no retry of its own.
 RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, FILE_BUSY})
 # ``reason_code`` of a failed row the job retries: the write gave up waiting for Plex's database (another program, or
 # another task of this app, held it past the wait). The row stays failed, and so does the file once the retries run out.
 PLEX_DB_BUSY = "plex_db_busy"
 
 
-# Start of the waiting rows written before 2026-10-02, when a Plex item still waited for every version to agree on a
-# type. No longer produced; ``MarkerStore.files_waiting_for_other_versions`` finds those rows by it so each file is
-# published once more under the rule that replaced it (``versions.WAITING_VERSIONS``).
+# Start of the waiting rows written when a Plex item still waited for every version to agree on a type. No longer
+# produced; ``MarkerStore.files_waiting_for_other_versions`` finds those rows by it.
 VERSIONS_WAITING = "Waiting for this item's other versions to agree on"
 
 # Skipped-file message for trailers and other extras (``external_ids.is_extra``).
@@ -175,8 +174,7 @@ def with_sentence(message: str, sentence: str) -> str:
 def replaced_own_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
     """Row wording for a locked marker that replaced the server's own although the server keeps its own.
 
-    Approved copy, ``evidence/design/phase4/ui-copy.md`` §4 (owner decision, spec §14 2026-09-20). The Inspector
-    writes the same sentence itself (``web/static/js/inspector.js`` ``savedMessage``) because the save route hands it
+    The Inspector writes the same sentence itself (``web/static/js/inspector.js`` ``savedMessage``) because the save route hands it
     the replaced types, not this message — change both together.
 
     Args:
@@ -213,8 +211,6 @@ def replaced_stale_note(replaced_types: Iterable[MarkerType], vendor: str) -> st
 def lock_overrides_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
     """Inspector wording **before** a save, for a locked type this server would otherwise keep its own markers of.
 
-    Approved copy, ``evidence/design/phase4/ui-copy.md`` §4 (owner decision, spec §14 2026-09-20).
-
     Args:
         replaced_types: The types whose own markers the server is about to lose.
         vendor: The server's brand as users know it (``Plex``, ``Emby``).
@@ -227,8 +223,8 @@ def lock_overrides_note(replaced_types: Iterable[MarkerType], vendor: str) -> st
     return f"This server is set to keep {vendor}'s own markers. Your locked marker replaces them anyway."
 
 
-# Row key listing the types whose server's own markers a locked marker replaced although the server keeps its own
-# (spec §5.5 rule 1); absent when nothing of the server's own was taken off it.
+# Row key listing the types whose server's own markers a locked marker replaced although the server keeps its own;
+# absent when nothing of the server's own was taken off it.
 REPLACED_OWN = "replaced_own"
 
 

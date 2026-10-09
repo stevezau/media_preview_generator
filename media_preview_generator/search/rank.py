@@ -15,11 +15,10 @@ Score scale (0.0 – 1.0):
 * 0.2 — any single query token appears in the candidate.
 * 0.0 — no overlap.
 
-Bonuses (additive, capped at 1.0):
+Penalty:
 
-* +0.05 when the query carries a S##E## hint AND the candidate is a
-  Series / Episode (so a Series hit beats a Movie hit when we know
-  we're looking for an episode).
+* Scores are halved for Movie candidates when the query carries a
+  S##E## hint, so a Series hit beats a same-named Movie.
 """
 
 from __future__ import annotations
@@ -50,9 +49,8 @@ def rank_score(query: SearchQuery, candidate_name: str, candidate_type: str = ""
         score = 1.0
     elif name_lower.startswith(qtitle):
         # Tier 2 — prefix match. Realistic top hit for "the boys" →
-        # "The Boys" (1.0) vs "The Boys' Life" (0.8 since it starts
-        # with the query but has trailing chars).
-        score = 0.8 if name_lower != qtitle else 1.0
+        # "The Boys" (1.0) vs "The Boys' Life" (0.8, trailing chars).
+        score = 0.8
     else:
         # Tier 3/4 — token overlap.
         tokens_present = sum(1 for t in query.tokens if t in name_lower)

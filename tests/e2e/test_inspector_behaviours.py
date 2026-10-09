@@ -88,6 +88,12 @@ def _emit(page: Page, name: str, payload: dict) -> None:
     )
 
 
+def _let_debounce_pass(page: Page, ms: int = 1000) -> None:
+    """Fast-forward the page's timers past a debounce, then round-trip a request so any read it started is recorded."""
+    page.clock.run_for(ms)
+    page.evaluate("fetch('/login').then((r) => r.status)")
+
+
 def _no_preview(file: dict) -> dict:
     file["preview"] = None
     for row in file["previews"]:
@@ -617,10 +623,11 @@ class TestJobsSocket:
         api = self._running_job_api()
         self._open_with_socket(authed_page, app_url, api)
         authed_page.locator("#inspAdjust").click()
+        authed_page.clock.install()
         _emit(authed_page, "job_completed", {"id": "job-9", "kind": "intro_credits", "status": "completed"})
         expect(authed_page.locator("#inspJobBanner")).to_be_hidden()
         # The re-read would come 500 ms after the event; the edit in progress must survive it.
-        authed_page.wait_for_timeout(1200)
+        _let_debounce_pass(authed_page)
         assert api.item_requests == [fx.EPISODE]
         expect(authed_page.locator("#inspAdjustPanel")).to_be_visible()
 
@@ -635,8 +642,9 @@ class TestJobsSocket:
             {"id": "job-x", "kind": "previews", "status": "running", "library_name": "Other", "config": other},
         )
         expect(authed_page.locator("#inspJobBanner")).to_be_hidden()
+        authed_page.clock.install()
         _emit(authed_page, "job_completed", {"id": "job-x", "kind": "previews", "config": other})
-        authed_page.wait_for_timeout(1200)
+        _let_debounce_pass(authed_page)
         assert api.item_requests == [fx.EPISODE]
         expect(authed_page.locator("#inspJobBanner")).to_be_hidden()
 

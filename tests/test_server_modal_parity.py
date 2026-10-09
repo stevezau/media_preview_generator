@@ -28,6 +28,9 @@ SCRIPTS = (
     "folder_picker.js",
 )
 INVENTORY_ROWS = 146
+# Rows 55-56 (the Jellyfin plugin opt-in checkbox and its warning) and row 17 (the Jellyfin plugin badge handler)
+# were removed from the modal; numbers are not reused.
+RETIRED_ROWS = {17, 55, 56}
 MAX_HINT_CHARS = 95
 
 
@@ -72,7 +75,7 @@ def _bare_names(selector: str) -> list[str]:
 
 class TestInventoryList:
     def test_list_covers_every_inventory_row_when_compared_to_the_inventory_count(self) -> None:
-        assert {e[0] for e in ENTRIES} == set(range(1, INVENTORY_ROWS + 1))
+        assert {e[0] for e in ENTRIES} == set(range(1, INVENTORY_ROWS + 1)) - RETIRED_ROWS
 
     def test_list_rows_use_known_vendors_and_modes_when_parsed(self) -> None:
         for row, vendors, _tab, mode, selector in ENTRIES:

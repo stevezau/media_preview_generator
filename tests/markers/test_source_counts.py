@@ -21,7 +21,7 @@ from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import ServerType
 from tests.markers.fakes import ready_publisher
-from tests.markers.test_pipeline import (
+from tests.markers.pipeline_helpers import (
     CHAPTERS_BOTH,
     INTRO_ONLY,
     TIDB_INTRO,
@@ -245,13 +245,6 @@ class TestWhichFilesCount:
 
         assert out.outcome_key == FileOutcome.UP_TO_DATE.value
         assert ctx.decided_by.snapshot() == {"intro": {"chapters": 1}, "credits": {"chapters": 1}}
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
 
 
 @pytest.fixture

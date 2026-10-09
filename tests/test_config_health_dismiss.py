@@ -192,30 +192,23 @@ class TestDismissEndpoint:
         resp = client.post("/api/system/config-health/dismiss", json=body, headers=_headers())
         assert resp.status_code == 400, f"expected 400 for {body!r}, got {resp.status_code}"
 
-    def test_dismissals_can_never_hide_the_blocking_writable_error(self, client):
+    def test_dismissals_can_never_hide_the_blocking_writable_error(self, client, app, tmp_path):
         """The invariant: even with every advisory dismissed, an unwritable
         /config still reports writable=False with its detail + hint.
 
         True today by construction (advisories are only built when writable),
         but a refactor that moved the blocker into ``warnings`` would otherwise
-        pass the whole suite.
+        pass the whole suite. The folder sits under a regular file, so it is
+        unwritable for root too.
         """
         for kind in ("network_fs", "unraid_share", "low_space"):
             client.post("/api/system/config-health/dismiss", json={"kind": kind}, headers=_headers())
 
-        unwritable = {
-            "path": "/config",
-            "writable": False,
-            "status": "not_writable",
-            "detail": "Config folder /config isn't writable by this container.",
-            "hint": "On the host run `chown -R 1000:1000 <your config folder>`.",
-            "warnings": [],
-        }
-        with patch(
-            "media_preview_generator.web.config_health.probe_config_health",
-            return_value=unwritable,
-        ):
-            payload = client.get("/api/system/config-health", headers=_headers()).get_json()
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        app.config["CONFIG_DIR"] = str(blocker / "config")
+
+        payload = client.get("/api/system/config-health", headers=_headers()).get_json()
 
         assert payload["config"]["writable"] is False
         assert payload["config"]["detail"]

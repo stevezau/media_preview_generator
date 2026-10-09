@@ -38,13 +38,6 @@ INTRO = Marker(T.INTRO, 10_000, 40_000, ("chapters",))
 NOW = datetime(2026, 9, 15, 12, tzinfo=UTC)
 
 
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
-
-
 def _published(store, server_id, item_id, path, *, markers=(INTRO,), kept=None, files=None):
     rec = store.upsert_file(FileIdentity(path, 1, 1), duration_ms=120_000, season_key=None, is_movie=False)
     store.set_publish_state(rec.id, server_id, item_id=item_id, markers=list(markers), status="written")
@@ -105,7 +98,7 @@ class TestFindDrift:
         ],
     )
     def test_the_current_files_of_a_drifted_item_run_with_the_files_recorded_there(self, store, media, shown, listed):
-        # Publishers audit MED-2: a Sonarr upgrade replaced the version this app ran; the new file had never run.
+        # A Sonarr upgrade replaced the version this app ran; the new file had never run.
         cfg = server_config("plex-1", ServerType.PLEX, root=media.root)
         recorded, replacement = media("Show - S01E01 - 720p.mkv"), media("Show - S01E01 - 1080p.mkv")
         _published(store, "plex-1", "7", recorded, files=(recorded,))
@@ -442,7 +435,7 @@ class TestFindDrift:
     def test_a_read_with_no_http_answer_doesnt_also_ask_whether_the_item_is_missing(
         self, monkeypatch, vendor, failure, requests_per_item, shown
     ):
-        # Publishers audit LOW-5: a hung server cost two request timeouts per item before the 20-failure stop.
+        # A hung server cost two request timeouts per item before the 20-failure stop.
         import requests
 
         from media_preview_generator.markers.publishers.jellyfin import JellyfinMarkerPublisher
@@ -490,7 +483,7 @@ class TestFindDrift:
         assert MarkerPublisher.item_missing(ready_publisher(), "x") is None  # a publisher that can't tell
 
     def test_emby_versions_are_read_back_each_as_its_own_item(self, store, media):
-        # Emby keeps each version as its own item with its own chapters (Task 10): a version whose chapters lost our
+        # Emby keeps each version as its own item with its own chapters: a version whose chapters lost our
         # markers drifts alone, with only its own file.
         cfg = server_config("emby-1", ServerType.EMBY, root=media.root)
         intro_b = Marker(T.INTRO, 20_000, 50_000, ("chapters",))
@@ -964,7 +957,7 @@ class TestCheckServersListing:
 
 
 class TestFailedItems:
-    """Items whose last publish failed are run again on the RECHECK_AFTER backoff (publishers audit LOW-4)."""
+    """Items whose last publish failed are run again on the RECHECK_AFTER backoff."""
 
     @staticmethod
     def _failed(store, server_id, item_id, path):
@@ -972,8 +965,8 @@ class TestFailedItems:
         store.set_item_publish_state(server_id, item_id, None, "failed")
 
     def test_a_transient_failure_is_retried_a_day_later_and_then_read_back(self, tmp_path, media):
-        from tests.markers.test_pipeline import CHAPTERS_BOTH, _ctx, _probe, _run
-        from tests.markers.test_pipeline import _registry as pipeline_registry
+        from tests.markers.pipeline_helpers import CHAPTERS_BOTH, _ctx, _probe, _run
+        from tests.markers.pipeline_helpers import _registry as pipeline_registry
 
         clock = {"t": NOW}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
@@ -1317,7 +1310,8 @@ class TestQueueing:
             patch("media_preview_generator.markers.triggers.markers_enabled_anywhere", return_value=True),
             patch("media_preview_generator.markers.triggers.create_intro_credits_job", return_value=MagicMock(id="r1")),
         ):
-            assert reconcile.run_markers_reconcile() == ("r1", True)
+            queued = reconcile.run_markers_reconcile()
+            assert (queued.job_id, queued.created) == ("r1", True)
 
     @pytest.mark.parametrize("state", ["pending", "running"])
     def test_a_run_with_only_its_retry_chain_left_doesnt_hold_back_a_new_one(self, jm, state):
@@ -1333,7 +1327,8 @@ class TestQueueing:
             patch("media_preview_generator.markers.triggers.create_intro_credits_job", return_value=MagicMock(id="r1")),
         ):
             assert reconcile.unfinished_reconcile_job() is None
-            assert reconcile.run_markers_reconcile() == ("r1", True)
+            queued = reconcile.run_markers_reconcile()
+            assert (queued.job_id, queued.created) == ("r1", True)
 
     def test_two_calls_at_once_queue_one_job(self, jm):
         created = []
@@ -1357,12 +1352,16 @@ class TestQueueing:
             assert entered.wait(5)
             results.append(reconcile.run_markers_reconcile())
             first.join(5)
-        assert len(created) == 1 and sorted(results, key=lambda r: not r.created) == [("r0", True), ("r0", False)]
+        assert len(created) == 1 and sorted(results, key=lambda r: not r.created) == [
+            reconcile.ReconcileQueued("r0", True),
+            reconcile.ReconcileQueued("r0", False),
+        ]
 
     def test_run_does_nothing_when_markers_are_off_everywhere(self, jm):
         with (
             patch("media_preview_generator.markers.triggers.markers_enabled_anywhere", return_value=False),
             patch("media_preview_generator.markers.triggers.create_intro_credits_job") as create,
         ):
-            assert reconcile.run_markers_reconcile() == (None, False)
+            queued = reconcile.run_markers_reconcile()
+            assert (queued.job_id, queued.created) == (None, False)
         create.assert_not_called()

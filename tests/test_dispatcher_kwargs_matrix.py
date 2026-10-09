@@ -1,17 +1,15 @@
-"""TEST_AUDIT P0.1 — full kwargs matrix the orchestrator sends to process_canonical_path.
+"""Full kwargs matrix the orchestrator sends to process_canonical_path.
 
-This file is the single concentrated answer to the audit's "boundary-call
-assertion blindness" finding (the D34 paradigm). Many existing tests check
-``mock.assert_called_once()`` without asserting what kwargs the SUT actually
-controlled — the dispatcher → ``process_canonical_path`` regression in job
-d9918149 hid for months because the test only checked ``kwargs["canonical_path"]``
-and ignored ``kwargs["server_id_filter"]``.
+Boundary-call assertion blindness: a test that only checks
+``mock.assert_called_once()`` misses wrong kwargs. A dispatcher →
+``process_canonical_path`` regression once hid because the test checked
+``kwargs["canonical_path"]`` and ignored ``kwargs["server_id_filter"]``.
 
 Every test in this file pins the COMPLETE kwarg shape for ONE matrix cell:
 
     server_type ∈ {Plex, Emby, Jellyfin}   ×   caller pin ∈ {None, explicit-id}
 
-Per orchestrator.py:670-675 the pin-precedence rules are:
+In the orchestrator the pin-precedence rules are:
 
     1. Caller-supplied server_id_filter ALWAYS wins
     2. No caller pin + non-Plex originator → scope to that originator
@@ -228,8 +226,8 @@ class TestPlexNoPinFansOut:
 
     def test_regenerate_default_propagates_as_false(self):
         kwargs, _, registry, config = _drive_dispatcher(server_type=ServerType.PLEX, caller_pin=None)
-        # regenerate kwarg pinned to False (audit P0.10 contract — also pinned
-        # in test_full_scan_multi_server.py, but verified here at every cell).
+        # regenerate kwarg pinned to False (also pinned in test_full_scan_multi_server.py,
+        # but verified here at every cell).
         assert kwargs.get("regenerate") is False, (
             f"regenerate must default to False (bool, not None); got {kwargs.get('regenerate')!r}"
         )
@@ -350,14 +348,6 @@ class TestItemFieldsPropagate:
             f"empty item_id_by_server should coerce to None (avoids downstream "
             f"empty-dict checks); got {kwargs.get('item_id_by_server')!r}"
         )
-
-    def test_bundle_metadata_by_server_propagates(self):
-        kwargs, _, registry, config = _drive_dispatcher(
-            server_type=ServerType.PLEX,
-            caller_pin=None,
-            item_kwargs={"bundle_metadata_by_server": {"plex-only": ("hash", 0.123)}},
-        )
-        assert kwargs.get("bundle_metadata_by_server") == {"plex-only": ("hash", 0.123)}
 
 
 # ---------------------------------------------------------------------------

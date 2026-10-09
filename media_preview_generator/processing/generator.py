@@ -49,6 +49,7 @@ from .filter_chain import (
     DV5_PATH_LIBPLACEBO,
     DV5_PATH_VAAPI_VULKAN,
     build_dv5_vf,
+    build_hdr10_zscale_chain,
 )
 from .hdr_detection import (
     is_dolby_vision,
@@ -783,9 +784,9 @@ def _save_ffmpeg_failure_log(video_file: str, returncode: int | None, stderr_lin
         return  # best-effort
 
     # Build a safe filename from the media basename + timestamp
-    base = re.sub(r"[^\w\-.]", "_", os.path.basename(video_file))
+    base = re.sub(r"[^\w\-.]", "_", os.path.basename(video_file))[-120:]
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"{timestamp}_{base}.log")
+    log_path = os.path.join(log_dir, f"{timestamp}_{os.getpid()}_{time.monotonic_ns() % 10**6:06d}_{base}.log")
 
     try:
         exit_diagnosis = (
@@ -1072,7 +1073,7 @@ def _clean_output_images(output_folder: str) -> None:
     tiers — so a run only ever counts the frames it produced itself, never
     leftovers sitting in the (deterministic) frame-cache slot.
     """
-    for img in glob.glob(os.path.join(output_folder, "*.jpg")):
+    for img in glob.glob(os.path.join(glob.escape(output_folder), "*.jpg")):
         try:
             os.remove(img)
         except OSError:
@@ -1471,7 +1472,7 @@ def _has_duplicate_thumbnails(output_folder: str, threshold: float = KEYFRAME_DU
     Hashing ~7000 JPGs of a 4-hour movie takes ~150 ms on warm cache,
     so this runs unconditionally on every successful fast-path output.
     """
-    paths = sorted(glob.glob(os.path.join(output_folder, "img-*.jpg")))
+    paths = sorted(glob.glob(os.path.join(glob.escape(output_folder), "img-*.jpg")))
     if len(paths) < 2:
         return False
     dup_pairs = 0
@@ -1571,11 +1572,7 @@ def generate_images(
     # HDR10 / DV P7+8 zscale chain (sans fps and base_scale).  See
     # _assemble_vf below for how it's composed with the GPU-scale
     # segment when hardware decode is active.
-    hdr10_zscale_chain = (
-        "zscale=t=linear:npl=100,format=gbrpf32le,"
-        f"zscale=p=bt709,tonemap={config.tonemap_algorithm}:desat=0,"
-        "zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
-    )
+    hdr10_zscale_chain = build_hdr10_zscale_chain(config.tonemap_algorithm)
 
     # Check if we have HDR Format. Note: Sometimes it can be returned as "None" (string) hence the check for None type or "None" (String)
     if media_info.video_tracks:
@@ -1859,7 +1856,7 @@ def generate_images(
             How many frames to publish.
         """
         nonlocal partial_discarded
-        count = len(glob.glob(os.path.join(output_folder, "img*.jpg")))
+        count = len(glob.glob(os.path.join(glob.escape(output_folder), "img*.jpg")))
         interrupted = _was_interrupted(rc, run_stderr)
         if interrupted:
             partial_discarded = True  # stopped wherever it was: no filter-chain tier helps, frames or not
@@ -1920,7 +1917,9 @@ def generate_images(
 
     # Not after the decoder said it can't decode the file (on this GPU, or at all): full-frame decode asks the same one.
     cant_decode = GPU_CANT_DECODE_LINE in stderr_lines or video_has_no_decoder(stderr_lines)
-    if rc != 0 and use_skip_initial and not cant_decode:
+    # Nor after the stall watchdog: the mount is stuck and a rerun would wait out another full timeout.
+    stalled = STALL_WATCHDOG_LINE in stderr_lines
+    if rc != 0 and use_skip_initial and not cant_decode and not stalled:
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
         did_retry = True
@@ -2151,7 +2150,7 @@ def generate_images(
 
     # Rename images only after all retries and error checks are complete
     if image_count > 0:
-        for image in glob.glob(f"{output_folder}/img*.jpg"):
+        for image in glob.glob(os.path.join(glob.escape(output_folder), "img*.jpg")):
             match = re.search(r"(\d+)", os.path.basename(image))
             if match is None:
                 # Foreign / out-of-band file in the output dir — skip rather
@@ -2161,7 +2160,7 @@ def generate_images(
             frame_no = int(match.group(1)) - 1
             frame_second = frame_no * config.plex_bif_frame_interval
             os.rename(image, os.path.join(output_folder, f"{frame_second:010d}.jpg"))
-        image_count = len(glob.glob(os.path.join(output_folder, "*.jpg")))
+        image_count = len(glob.glob(os.path.join(glob.escape(output_folder), "*.jpg")))
         # A short set kept from a non-zero exit was already warned about; the drift backstop would call it a bug.
         if rc == 0:
             _warn_if_frame_count_disagrees_with_duration(video_file, output_folder, image_count, media_info, config)

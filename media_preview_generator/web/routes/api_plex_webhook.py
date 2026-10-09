@@ -17,32 +17,15 @@ and :mod:`media_preview_generator.web.webhook_router` — this module only
 manages the registration metadata that tells Plex where to send them.
 """
 
+from urllib.parse import urlparse
+
 from flask import jsonify, request
 from loguru import logger
 
-from ..auth import setup_or_auth_required
+from ..auth import is_authenticated, setup_or_auth_required
 from . import api
 from .api_settings import _loopback_in_docker_warning
-
-
-def _default_plex_webhook_url(server_id: str | None = None) -> str:
-    """Build the default webhook URL Plex should POST to.
-
-    Uses the request's effective host/scheme so the same browser
-    session that's looking at the Settings page can register a URL
-    Plex Media Server is likely to be able to reach (typical
-    same-host or same-LAN setups).  Users on reverse proxies / split
-    networks override this manually.
-
-    When ``server_id`` is supplied the per-server pinned route is
-    returned so multi-Plex installs route unambiguously by path. The
-    auth token is appended at registration time (Plex's webhook UI has
-    no header field) — the UI never displays the token.
-    """
-    base = request.host_url.rstrip("/")
-    if server_id:
-        return f"{base}/api/webhooks/server/{server_id}"
-    return f"{base}/api/webhooks/incoming"
+from .api_vendor_webhook import find_server_entry, webhook_url
 
 
 def _rebuild_path_preserving_host(url: str | None, server_id: str | None) -> str:
@@ -56,17 +39,17 @@ def _rebuild_path_preserving_host(url: str | None, server_id: str | None) -> str
     configured, swap the path for the per-server form.
 
     When ``url`` is empty or unparseable, falls back to
-    :func:`_default_plex_webhook_url`. When ``server_id`` is empty,
+    :func:`webhook_url`. When ``server_id`` is empty,
     falls back to the legacy ``/incoming`` path because we have nothing
     to pin to.
     """
-    from urllib.parse import urlparse, urlunparse
+    from urllib.parse import urlunparse
 
     if not url:
-        return _default_plex_webhook_url(server_id)
+        return webhook_url(server_id)
     parsed = urlparse(url.strip())
     if not parsed.scheme or not parsed.netloc:
-        return _default_plex_webhook_url(server_id)
+        return webhook_url(server_id)
     new_path = f"/api/webhooks/server/{server_id}" if server_id else "/api/webhooks/incoming"
     return urlunparse((parsed.scheme, parsed.netloc, new_path, "", "", ""))
 
@@ -81,18 +64,9 @@ def _resolve_plex_server_for_webhook(server_id: str | None) -> tuple[dict | None
     """
     from ..settings_manager import get_settings_manager
 
-    settings = get_settings_manager()
-    media_servers = settings.get("media_servers") or []
     if server_id:
-        match = next(
-            (s for s in media_servers if isinstance(s, dict) and s.get("id") == server_id),
-            None,
-        )
-        if not match:
-            return None, f"Server {server_id!r} not configured", 404
-        if (match.get("type") or "").lower() != "plex":
-            return None, "Plex Direct webhook is Plex-only", 400
-        return match, None, None
+        return find_server_entry(server_id, "plex")
+    media_servers = get_settings_manager().get("media_servers") or []
     plex_entry = next(
         (s for s in media_servers if isinstance(s, dict) and (s.get("type") or "").lower() == "plex"),
         None,
@@ -123,8 +97,8 @@ def _server_webhook_url(server_entry: dict | None) -> str:
         url = ((server_entry.get("output") or {}).get("webhook_public_url") or "").strip()
         if url:
             return url
-        return _default_plex_webhook_url(server_entry.get("id"))
-    return _default_plex_webhook_url()
+        return webhook_url(server_entry.get("id"))
+    return webhook_url()
 
 
 def _persist_server_webhook_url(server_entry: dict | None, public_url: str) -> None:
@@ -237,7 +211,7 @@ def plex_webhook_status():
             "server_name": server_entry.get("name") if server_entry else None,
             "registered_in_plex": registered,
             "public_url": public_url,
-            "default_url": _default_plex_webhook_url(server_entry.get("id") if server_entry else None),
+            "default_url": webhook_url(server_entry.get("id") if server_entry else None),
             "has_plex_pass": has_pass,
             "error": error,
             "error_reason": error_reason,
@@ -257,6 +231,7 @@ def plex_webhook_register():
     to authenticate against the receiving endpoint.
     """
     from .. import plex_webhook_registration as pwh
+    from ..settings_manager import get_settings_manager
 
     data = request.get_json() or {}
     server_id = (data.get("server_id") or request.args.get("server_id") or "").strip() or None
@@ -307,6 +282,24 @@ def plex_webhook_register():
         stored_url = ((server_entry.get("output") or {}).get("webhook_public_url") or "").strip()
     source_url = raw_url or stored_url
     public_url = _rebuild_path_preserving_host(source_url, registered_server_id)
+
+    # Before setup completes this endpoint is open to anyone, and the URL we hand plex.tv carries the webhook secret in its
+    # query string: an anonymous caller must not be able to point it at a host of their choosing.
+    if (
+        not get_settings_manager().is_setup_complete()
+        and not is_authenticated()
+        and urlparse(public_url).netloc != request.host
+    ):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Sign in to register a webhook URL on a different host than this page.",
+                    "reason": "untrusted_host",
+                }
+            ),
+            403,
+        )
 
     try:
         # No ``server_id=`` kwarg: the per-server path already encodes

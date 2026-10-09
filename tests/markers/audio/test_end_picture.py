@@ -1,4 +1,4 @@
-"""Season audio's end-picture check (spec §5.3): frame comparison, the verdict, which partners, and the decode it reuses
+"""Season audio's end-picture check: frame comparison, the verdict, which partners, and the decode it reuses
 from credit text (GPU then CPU, cancel, stalls), with the audio stream's start offset applied."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from media_preview_generator.markers.audio import end_picture as ep
 from media_preview_generator.markers.audio.matcher import Hit
 from media_preview_generator.markers.credits import frames
 from media_preview_generator.markers.probe import ProbeError, ProbeStalledError, ProbeTimeoutError, StreamStarts
-from tests.markers.credits.test_frames import VENDORS, _cant_decode_lines, _fake_ffmpeg
+from tests.markers.credits.test_frames import VENDORS, cant_decode_lines, fake_ffmpeg
 
 
 def _textured(seed: int) -> np.ndarray:
@@ -57,7 +57,7 @@ class TestFramesAlike:
     @pytest.mark.parametrize("other_std", [4.8, 12.0])
     def test_a_flat_frame_beside_one_that_isnt_is_compared_by_correlation(self, other_std):
         # Game of Thrones S08E06 against E04 (another release): "Directed by" on black at σ 4.4-4.8 against 3.2, a
-        # correlation of 1.00, called different while one side sat under the flat line (sflix, 2026-09-28).
+        # correlation of 1.00, called different while one side sat under the flat line.
         card = _textured(5)
         card = (card - card.mean()) / card.std()
         faint, stronger = 16.0 + 3.2 * card, 16.0 + other_std * card
@@ -432,7 +432,7 @@ class TestDecodeFrames:
     )  # fmt: skip
     def test_every_vendor_ends_in_the_one_neighbor_scaler(self, gpu, device, download_format, hw_args, video_filter):
         # The whole decoded frame, downloaded in the stream's own format, through the one software scaler the credit
-        # text decode uses (spec §5.3): the same frames on every vendor, so a partner decoded by another worker's GPU
+        # text decode uses: the same frames on every vendor, so a partner decoded by another worker's GPU
         # can't change the answer. scale_cuda, scale_vaapi and swscale's bicubic each blurred differently.
         calls, run_decode = self._run_decode(_planes(1), [34.0])
         with patch.object(frames, "run_decode", side_effect=run_decode):
@@ -472,15 +472,15 @@ class TestDecodeFrames:
     def test_a_gpu_that_cant_decode_the_codec_is_stopped_at_its_verdict_and_the_cpu_decodes_on_the_spot(
         self, monkeypatch, tmp_path, gpu, device, hwaccel
     ):
-        # Production (TITAN RTX, AV1, 2026-10-02): the GPU decode failed on every packet to the end of the file, hit
+        # Seen in production (AV1): the GPU decode failed on every packet to the end of the file, hit
         # the 120 s limit, and the CPU never tried. Stopped at the verdict it is a GPU failure, decoded again here.
         monkeypatch.setattr(ep, "_WARNED_DEVICES", set())
         pid_file = tmp_path / "gpu-ffmpeg.pid"
         runs = self._fake_commands(
             monkeypatch,
-            _fake_ffmpeg([10], ["34.0"], stderr_head=_cant_decode_lines(hwaccel), head_wait_s=30,
+            fake_ffmpeg([10], ["34.0"], stderr_head=cant_decode_lines(hwaccel), head_wait_s=30,
                          pid_file=str(pid_file)),
-            _fake_ffmpeg([10, 250], ["33.5", "34.0"]),
+            fake_ffmpeg([10, 250], ["33.5", "34.0"]),
         )  # fmt: skip
         flagged: list[str] = []
         started = time.monotonic()
@@ -492,13 +492,13 @@ class TestDecodeFrames:
         assert len(flagged) == 1 and "the GPU can't decode this file's AV1 video" in flagged[0]
         assert not os.path.exists(f"/proc/{pid_file.read_text()}")
 
-    @pytest.mark.parametrize("said", [_cant_decode_lines("cuda"), ""], ids=["verdict", "nothing"])
+    @pytest.mark.parametrize("said", [cant_decode_lines("cuda"), ""], ids=["verdict", "nothing"])
     def test_a_cpu_workers_decode_is_never_stopped(self, monkeypatch, said):
         # A CPU run has no decoder verdict to act on; the text in its stderr changes nothing.
         runs = self._fake_commands(
             monkeypatch,
             ["false"],
-            _fake_ffmpeg([10, 250], ["33.5", "34.0"], stderr_head=said, head_wait_s=0.4),
+            fake_ffmpeg([10, 250], ["33.5", "34.0"], stderr_head=said, head_wait_s=0.4),
         )
         got = ep.decode_frames("/m/a.mkv", 33.5, 1.0, ffmpeg="ffmpeg", gpu=None, gpu_device_path=None,
                                container_start_s=0.0, download_format="nv12")  # fmt: skip
@@ -531,7 +531,7 @@ class TestDecodeFrames:
     TIMEOUT = frames.DecodeTimeoutError("decoding a.mkv timed out after 120 s")
 
     def test_a_gpu_decode_that_times_out_isnt_run_again_on_the_cpu_and_is_the_gpu_attempts_failure(self):
-        # A timeout is never decoded again on the spot (T-R7: a stalled mount would hold the worker twice as long), so
+        # A timeout is never decoded again on the spot (a stalled mount would hold the worker twice as long), so
         # the CPU hasn't tried: the caller holds nothing against the file.
         calls, run_decode = self._failing(self.TIMEOUT, AssertionError("the CPU isn't tried"))
         with (

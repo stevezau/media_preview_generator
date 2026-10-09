@@ -28,7 +28,7 @@ _SEGMENT_KEYS = (
     ("preview", MarkerType.PREVIEW),
 )
 # "agnostic"/"out-of-range" answers describe a different cut of the video; SkipDB R&M "outros" were 7 s tails when
-# matched loosely (spec §4), so only duration-confirmed answers count.
+# matched loosely, so only duration-confirmed answers count.
 _ACCEPTED_MATCHES = frozenset({"exact", "shifted"})
 
 

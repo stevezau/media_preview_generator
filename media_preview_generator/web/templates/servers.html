@@ -33,9 +33,7 @@
 
 </div>
 
-<!-- Add Server Modal — shared partial, also included from /setup so the
-     wizard's vendor picker can open the same connection flow inline
-     instead of redirecting users away to /servers. -->
+<!-- Add Server Modal -->
 {% include "_add_server_modal.html" %}
 
 <!-- Edit Server Modal — per-server config editor for an already-saved server.
@@ -515,26 +513,6 @@
 
                             <!-- Rendered list of checks, grouped Must fix / Recommended / All good. -->
                             <div id="editReadinessBody" class="sm-health-body"></div>
-
-                            <!-- Jellyfin-only: plugin install toggle (default ticked). Install happens inline via the
-                                 per-check toggle now, so this stays hidden; it is kept for the plan builder. -->
-                            <div id="editReadinessPluginControls" class="d-none sm-card">
-                                <div class="sm-card-b">
-                                    <div class="sm-line">
-                                        <label class="sm-lab" for="editReadinessPluginOptIn">
-                                            Install Media Preview Bridge plugin (recommended — instant previews, no races)
-                                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="With the plugin, previews appear in Jellyfin as soon as they're made." data-explain-title="Media Preview Bridge plugin" data-explain-template="infoJellyfinPluginTpl"><i class="bi bi-info-circle"></i></button>
-                                        </label>
-                                        <div class="form-check form-switch markers-switch mb-0"><input type="checkbox" role="switch" class="form-check-input" id="editReadinessPluginOptIn" checked></div>
-                                    </div>
-                                    <div id="editReadinessPluginOptOutWarning" class="sm-warnline d-none">
-                                        <i class="bi bi-exclamation-triangle-fill"></i>
-                                        <span>Without the plugin, Jellyfin may briefly generate its own previews
-                                        in parallel when new files arrive. This wastes CPU but won't corrupt
-                                        output. Recommended: leave this ticked.</span>
-                                    </div>
-                                </div>
-                            </div>
 
                             <!-- Fix-all controls (sticky at the bottom of the pane): critical-only and full buttons.
                                  Both open a confirm modal that lists the exact changes before anything mutates the
@@ -1064,11 +1042,6 @@
 <template id="infoJellyfinOffMediaTpl">
     <p>Keeps your media drive clean, as Plex does.</p>
     <p>Requires the Media Preview Bridge plugin <strong>and</strong> Jellyfin's config folder mounted read-write into this container.</p>
-</template>
-<template id="infoJellyfinPluginTpl">
-    <p>With the plugin: previews appear in Jellyfin the moment this app finishes generating them.</p>
-    <p>Without it: Jellyfin picks up our previews on its next scan (usually within seconds), or at worst on the 3 AM scheduled task.</p>
-    <p>Installing requires a Jellyfin restart.</p>
 </template>
 <template id="infoVendorWebhookUrlTpl">
     <p>The router dispatches previews only to this server, even if a sibling server owns the same path.</p>

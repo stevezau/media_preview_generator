@@ -1,4 +1,4 @@
-"""Carry-over (spec §5.5 rule 15): when a file is replaced by one of the same length, what we had decided for a type
+"""Carry-over: when a file is replaced by one of the same length, what we had decided for a type
 stays for the new file while nothing answers for it there.
 
 Plex keeps an item's markers across a file replacement; deciding the new file from its own evidence alone did worse.
@@ -18,12 +18,11 @@ The rule is narrow on purpose:
   turned on (a user's marker, or one carried before, whose sources aren't known, always counts).
 - Not a marker only the detectors that read the file's content decided (season audio, credit text) when each of them
   read the new file at a **newer** version than the one that decided the replaced file's marker, with something to
-  compare it with and not out of date, and found nothing: the detector's own update passed the old answer over. Small
-  Prophets S01E05 and E06 kept season audio version 9's 0-12 s logo stretch this way after version 10, which passes
-  it over, found nothing on the same files (sflix, 2026-09-28). The same version finding nothing on the new file is
+  compare it with and not out of date, and found nothing: the detector's own update passed the old answer over. Two
+  episodes kept season audio version 9's 0-12 s logo stretch this way after version 10, which passes
+  it over, found nothing on the same files. The same version finding nothing on the new file is
   the case this rule is for (another encode's audio or picture), so that marker still carries, and so does one whose
-  deciding version isn't known. A snapshot kept aside by a build before versions were kept with it (or by a rollback
-  to one) counts as decided at most at ``VERSIONS_BEFORE_THEY_WERE_KEPT``. A chapter, an online
+  deciding version isn't known. A chapter, an online
   answer or a user's marker still carries: a replacement without the chapter, or one an online source doesn't list,
   says nothing about the intro.
 - The replaced file: an earlier identity at the same path (kept aside by ``MarkerStore.upsert_file``; not when the new
@@ -41,7 +40,6 @@ first answer of its own replaces it.
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
-from types import MappingProxyType
 from typing import NamedTuple
 
 from .decide import (
@@ -74,18 +72,6 @@ _CONFIRMING_ONLY = frozenset(source.value for source in SERVER_SOURCES)
 
 # What ``previous`` answers per type: the replaced file's decision, or None when it can't be told now.
 Previous = Mapping[MarkerType, PreviousDecision | None]
-# The newest versions a build without ``replaced_versions`` had (82dc2bc and every build before it, a rollback to one
-# included): season audio v10 with end-picture check 3. A snapshot such a build kept aside was decided at most at these,
-# so a newer version reading the new file is known to be newer; an equal one isn't.
-VERSIONS_BEFORE_THEY_WERE_KEPT = MappingProxyType(
-    {
-        "season_audio": 2010,
-        "season_audio_previous": 2010,
-        # 8, not 82dc2bc's 7: #327 (credit text 8) may reach dev first and store 8 without the table; too high only
-        # keeps a carried marker.
-        "credits_text": 8,
-    }
-)
 
 
 class ReadNow(NamedTuple):
@@ -235,7 +221,7 @@ def _passed_over_by_a_newer_version(held: PreviousDecision, read_by: Mapping[str
     detector that read the new file now, at a newer version than the one that decided the marker, and found nothing
     (a marker with no known source, a user's or a carried one, never is; nor one whose deciding version isn't known)."""
     deciding = [s for s in held.decided_by if s not in _CONFIRMING_ONLY]
-    versions = VERSIONS_BEFORE_THEY_WERE_KEPT if held.versions is None else held.versions
+    versions = held.versions or {}
     return bool(deciding) and all(
         s in read_by and s in versions and read_by[s].newer_than(versions[s]) for s in deciding
     )

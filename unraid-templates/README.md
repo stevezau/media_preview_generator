@@ -18,6 +18,7 @@ Search for **media-preview-generator** in the Community Applications plugin.
 ## Files
 
 - `media-preview-generator.xml` - Unraid Docker template
+- `ca_profile.xml` - Community Applications author profile
 
 ## Documentation
 

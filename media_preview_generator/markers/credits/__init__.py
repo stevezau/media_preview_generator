@@ -1,1 +1,1 @@
-"""Credits from on-screen text (spec §5.4)."""
+"""Credits from on-screen text."""

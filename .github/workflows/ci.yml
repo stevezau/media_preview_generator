@@ -20,8 +20,6 @@ on:
       - 'docs/**'
       - '*.md'
       - 'LICENSE'
-      - '.github/instructions/**'
-      - '.github/prompts/**'
       - 'unraid-templates/**'
       - 'docker-compose.example.yml'
   pull_request:
@@ -30,17 +28,12 @@ on:
       - 'docs/**'
       - '*.md'
       - 'LICENSE'
-      - '.github/instructions/**'
-      - '.github/prompts/**'
       - 'unraid-templates/**'
       - 'docker-compose.example.yml'
   workflow_dispatch:
 
 env:
-  # Canonical Docker Hub image name. The old mirror
-  # (stevezzau/plex_generate_vid_previews) was retired — a one-shot tombstone
-  # (retire-deprecated-image.yml) now sits on its tags telling users to switch.
-  # Change DOCKER_IMAGE for forks; see CONTRIBUTING.md.
+  # Canonical Docker Hub image name. Change DOCKER_IMAGE for forks; see CONTRIBUTING.md.
   DOCKER_IMAGE: stevezzau/media_preview_generator
 
 concurrency:
@@ -82,14 +75,14 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
-      - name: actionlint (Pages workflows)
+      - name: actionlint (all workflows)
         uses: docker://rhysd/actionlint:1.7.7
         with:
-          args: -color .github/workflows/docs.yml .github/workflows/jellyfin-plugin.yml
+          args: -color
 
   unit:
     # Shards the unit suite 3 ways so the required `test` check (below) only has to wait on
-    # the slowest shard, not the whole 12,641-test suite serially. A repo ruleset requires a
+    # the slowest shard, not the whole unit suite serially. A repo ruleset requires a
     # status check literally named `test`, so this discovery job is named `unit` and the
     # combine job keeps the `test` id/name. pytest-shard balances by test count, not wall
     # time — locally that gave 4085/4307/4249 tests in 53.63s/45.91s/48.08s, close enough
@@ -257,11 +250,8 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install FFmpeg + mediainfo + Playwright Chromium runtime libs (cached)
-        # Playwright's `--with-deps chromium` used to apt-install ~20
-        # Chromium runtime libs (libnss3, libgtk, etc.) on EVERY run —
-        # uncached, ~15-20s burned per push. Roll those packages into
-        # the existing apt cache step so warm runs skip apt entirely,
-        # then drop `--with-deps` from the playwright install below.
+        # Chromium's runtime libs (libnss3, libgtk, etc.) are installed here through the apt
+        # cache so warm runs skip apt entirely; the playwright install below omits `--with-deps`.
         # Bump `version:` if any of these need to refresh.
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
@@ -294,14 +284,12 @@ jobs:
             libxrandr2
             xvfb
           version: 4
-          # Same reason as the test job's apt cache step: a cache hit
-          # without post-install scripts leaves ffmpeg's libblas.so.3 /
+          # A cache hit without post-install scripts leaves ffmpeg's libblas.so.3 /
           # liblapack.so.3 invisible to the dynamic linker.
           execute_install_scripts: true
 
       - name: Refresh dynamic linker cache for restored libs
-        # See the test job's identical step — apt cache action skips the
-        # libc-bin trigger that rebuilds /etc/ld.so.cache, so on a cache
+        # The apt cache action skips the libc-bin trigger that rebuilds /etc/ld.so.cache, so on a cache
         # HIT ffmpeg can't find libblas.so.3 / liblapack.so.3 even though
         # the files are on disk.
         run: sudo ldconfig
@@ -443,7 +431,9 @@ jobs:
           # (./jellyfin-config) is writable: setup_servers.py injects the API
           # key + installs the plugin, and the off-media test writes trickplay
           # into Jellyfin's data folder.
-          export PUID="$(id -u)" PGID="$(id -g)"
+          PUID="$(id -u)"
+          PGID="$(id -g)"
+          export PUID PGID
           docker compose -f docker-compose.test.yml up -d
           # Wait for healthchecks (compose has them on each service).
           for i in {1..60}; do
@@ -479,7 +469,7 @@ jobs:
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
           MEDIA_PREVIEW_TEXTDET_MODEL: ${{ runner.temp }}/models/ch_PP-OCRv4_det_infer.onnx
           MEDIA_PREVIEW_TEXTREC_MODEL: ${{ runner.temp }}/models/latin_PP-OCRv5_rec_mobile.onnx
-        run: pytest -m integration --no-cov --tb=short -rs tests/integration/ tests/markers/credits/
+        run: pytest -m integration --no-cov --tb=short -rs tests/integration/ tests/markers/credits/ tests/journeys/test_journey_startup_gate.py
         timeout-minutes: 15
 
       - name: Vendor stack logs on failure
@@ -727,10 +717,7 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # 2 jobs: amd64 + arm64 of the canonical image. The deprecated
-          # mirror (stevezzau/plex_generate_vid_previews) was retired — a
-          # one-shot tombstone image (see retire-deprecated-image.yml) now
-          # sits on its tags telling users to switch to the canonical name.
+          # 2 jobs: amd64 + arm64 of the canonical image.
           - platform: linux/amd64
             runner: ubuntu-latest
             image_flavour: canonical
@@ -864,6 +851,7 @@ jobs:
       - name: Create canonical manifest list and push
         working-directory: /tmp/digests/canonical
         run: |
+          # shellcheck disable=SC2046  # the digest list must split into one argument per digest
           docker buildx imagetools create \
             ${{ needs.context.outputs.docker_tags_canonical }} \
             $(printf '${{ env.DOCKER_IMAGE }}@sha256:%s ' *)

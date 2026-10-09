@@ -355,17 +355,20 @@ class JellyfinTrickplayAdapter(OutputAdapter):
         """Pack ``bundle.frame_dir`` JPG frames into Jellyfin tile sheets.
 
         The write is atomic: tiles go into a sibling ``.<basename>.trickplay.staging/``
-        directory, then the three-step rename below swaps it into place.
-        Jellyfin's adoption path never observes a partial tile set.
+        directory, then a rename swaps them into place. Jellyfin's adoption
+        path never observes a partial tile set.
 
-        Rename sequence (keeps the OLD complete tiles live until the NEW
-        ones are ready, so a mid-swap crash leaves a valid directory)::
+        Only this adapter's ``<width> - WxH`` sheet directory is replaced; other
+        resolutions Jellyfin or the user generated under ``<basename>.trickplay/``
+        are left alone. Rename sequence when the trickplay dir already exists
+        (keeps the OLD complete tiles live until the NEW ones are ready)::
 
-            1. os.rename(final, .trickplay.old)   # atomic; old survives
-            2. os.rename(staging, final)          # atomic; new in place
-            3. shutil.rmtree(.trickplay.old)      # cleanup (not atomic, don't care)
+            1. os.rename(sheets_dir, .trickplay.old)        # atomic; old survives
+            2. os.rename(staging/<sheets>, sheets_dir)      # atomic; new in place
+            3. shutil.rmtree(.trickplay.old)                # cleanup
 
-        Between steps 1 and 2 ``final`` is missing for microseconds. A
+        When it does not exist yet, the whole staging dir is renamed to it.
+        Between steps 1 and 2 the sheet dir is missing for microseconds. A
         Jellyfin adoption check hitting that window skips (no dir) and
         our follow-up ``trigger_refresh`` seconds later lands on the
         complete new dir.
@@ -405,26 +408,34 @@ class JellyfinTrickplayAdapter(OutputAdapter):
             self._log_write_denied(staging_sheets_dir, exc)
             raise
 
-        thumb_w, thumb_h = _measure_first_frame(Path(bundle.frame_dir) / frames[0])
-        sheets_written = _pack_sheets_into_dir(
-            frames=frames,
-            frame_dir=Path(bundle.frame_dir),
-            sheets_dir=staging_sheets_dir,
-            thumb_w=thumb_w,
-            thumb_h=thumb_h,
-            jpeg_quality=self._jpeg_quality,
-        )
+        try:
+            thumb_w, thumb_h = _measure_first_frame(Path(bundle.frame_dir) / frames[0])
+            sheets_written = _pack_sheets_into_dir(
+                frames=frames,
+                frame_dir=Path(bundle.frame_dir),
+                sheets_dir=staging_sheets_dir,
+                thumb_w=thumb_w,
+                thumb_h=thumb_h,
+                jpeg_quality=self._jpeg_quality,
+            )
 
-        # fsync each sheet + the sheets dir + the staging root so a crash
-        # after the rename leaves durable files on disk.
-        _fsync_tree(staging_dir)
+            # fsync each sheet + the sheets dir + the staging root so a crash
+            # after the rename leaves durable files on disk.
+            _fsync_tree(staging_dir)
+        except BaseException:
+            # The orphan sweep skips dot-dirs, so partial staging would stay beside the media forever.
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
 
         # Atomic-ish directory swap. ``os.rename`` is atomic per-step on
         # POSIX; the gap between steps 1 and 2 is microseconds.
         try:
             if final_dir.exists():
-                os.rename(final_dir, old_dir)
-            os.rename(staging_dir, final_dir)
+                if sheets_dir.exists():
+                    os.rename(sheets_dir, old_dir)
+                os.rename(staging_sheets_dir, sheets_dir)
+            else:
+                os.rename(staging_dir, final_dir)
         except OSError as exc:
             logger.warning(
                 "Atomic rename of Jellyfin trickplay dir failed at {} ({}: {}). "
@@ -440,16 +451,15 @@ class JellyfinTrickplayAdapter(OutputAdapter):
             # between the two renames), old_dir holds the *prior*
             # complete tile set. Restore it so we never lose a valid
             # publish to a mid-swap failure. Otherwise old_dir is absent
-            # (never created) and the rename below is a no-op wrapped in
-            # try/except.
-            if old_dir.exists() and not final_dir.exists():
+            # (never created) and this is skipped.
+            if old_dir.exists() and not sheets_dir.exists():
                 try:
-                    os.rename(old_dir, final_dir)
+                    os.rename(old_dir, sheets_dir)
                 except OSError as restore_exc:
                     logger.warning(
                         "Could not restore prior trickplay from {} → {}: {}",
                         old_dir,
-                        final_dir,
+                        sheets_dir,
                         restore_exc,
                     )
             _inplace_fallback_write(
@@ -471,6 +481,7 @@ class JellyfinTrickplayAdapter(OutputAdapter):
 
         # Step 3: cleanup (not atomic; doesn't matter).
         shutil.rmtree(old_dir, ignore_errors=True)
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
         logger.debug(
             "Jellyfin trickplay published (atomic): {} sheet(s) at {}",

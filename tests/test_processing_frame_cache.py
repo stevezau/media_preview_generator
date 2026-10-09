@@ -413,7 +413,7 @@ class TestLruEviction:
         ta = threading.Thread(target=thread_a)
         tb = threading.Thread(target=thread_b)
         ta.start()
-        a_acquired.wait(timeout=2), "thread A must acquire its lock"
+        assert a_acquired.wait(timeout=2), "thread A must acquire its lock"
         # Start B AFTER A has the lock.
         tb.start()
         # Give B a generous chance to acquire — it MUST NOT, because A

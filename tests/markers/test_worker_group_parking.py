@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import nullcontext
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -23,10 +22,10 @@ from media_preview_generator.web import jobs
 from media_preview_generator.web.job_gate import JobGate
 from media_preview_generator.web.jobs import JobManager, JobStatus
 from tests.markers.fakes import FakeRegistry, server_config
-from tests.markers.test_pipeline import _ctx
+from tests.markers.pipeline_helpers import _ctx
 
 
-def test_forced_marker_job_parks_then_keeps_counts_and_followup_obligations(tmp_path, monkeypatch):
+def test_forced_marker_job_parks_then_keeps_counts_and_verify_obligations(tmp_path, monkeypatch):
     groups = [
         {
             "id": "cpu",
@@ -60,7 +59,6 @@ def test_forced_marker_job_parks_then_keeps_counts_and_followup_obligations(tmp_
         get=lambda key, default=None: "INFO" if key == "log_level" else default,
     )
     paths = [str(tmp_path / "first.mkv"), str(tmp_path / "second.mkv")]
-    extra = str(tmp_path / "sibling.mkv")
     contexts, processed = [], []
 
     def context(**kwargs):
@@ -75,9 +73,6 @@ def test_forced_marker_job_parks_then_keeps_counts_and_followup_obligations(tmp_
             ctx.decided_by.add({MarkerType.INTRO: "chapters"})
             rows = [{"server_id": "jf", "server_type": "jellyfin", "status": "markers_written"}]
             if len(processed) == 1:
-                ctx.request_followups([paths[0], extra])
-                ctx._budget_rechecks.add(extra)
-                ctx._budget_refused_at = datetime(2026, 10, 5, tzinfo=UTC)
                 rows[0][VERIFY_LATER] = True
                 groups[0]["enabled"] = False
                 dispatcher.worker_pool.reconcile_groups(groups, [])

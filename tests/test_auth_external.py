@@ -13,46 +13,6 @@ from media_preview_generator.web.auth import (
 from media_preview_generator.web.settings_manager import get_settings_manager
 
 
-@pytest.fixture
-def mock_auth_config(tmp_path, monkeypatch):
-    """Mock auth module to use temp directory."""
-    auth_file = str(tmp_path / "auth.json")
-    monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", auth_file)
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
-    from media_preview_generator.web.settings_manager import reset_settings_manager
-
-    reset_settings_manager()
-    from media_preview_generator.web.routes import clear_gpu_cache
-
-    clear_gpu_cache()
-    return str(tmp_path)
-
-
-@pytest.fixture
-def flask_app(tmp_path, mock_auth_config):
-    """Create Flask test app with temp directory."""
-    from media_preview_generator.web.app import create_app
-
-    app = create_app(config_dir=str(tmp_path))
-    app.config["TESTING"] = True
-    return app
-
-
-@pytest.fixture
-def client(flask_app):
-    """Create Flask test client."""
-    return flask_app.test_client()
-
-
-@pytest.fixture
-def auth_headers():
-    """Generate valid auth headers with token."""
-    from media_preview_generator.web.auth import get_auth_token
-
-    token = get_auth_token()
-    return {"X-Auth-Token": token}
-
-
 class TestGetAuthMethod:
     """Tests for get_auth_method() env var parsing."""
 
@@ -212,11 +172,8 @@ class TestWebhookAuthNotBypassed:
     def test_custom_webhook_not_auto_authenticated(self, client):
         """POST /api/webhooks/custom is not bypassed by external auth.
 
-        Audit fix — the original ``response.status_code != 200`` is a
-        dangerous negation: a 500 crash passes, a 302 to login passes,
-        only the actual contract (401/403/302) is meaningful. Now the
-        test enumerates the acceptable rejection codes explicitly so a
-        regression that returned 500 silently can't slip through.
+        The acceptable rejection codes are enumerated explicitly: a bare
+        ``!= 200`` would let a 500 crash pass.
 
         The custom endpoint checks its own webhook secret and needs no
         CSRF token, so it answers 401; 302 and 403 would reject too.

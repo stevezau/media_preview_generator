@@ -1,5 +1,4 @@
-"""Whether a GPU decodes credits frames exactly as the CPU does: a diagnostic, run once per device per process
-(spec §5.4).
+"""Whether a GPU decodes credits frames exactly as the CPU does: a diagnostic, run once per device per process.
 
 A credits answer depends on what the device hands over before the scaler: every path downloads the whole decoded frame
 and shrinks it with the same software scaler (``frames._scale_filter``). On a GPU that is the decoder's frame, on VAAPI

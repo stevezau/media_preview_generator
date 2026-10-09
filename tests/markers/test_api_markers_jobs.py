@@ -7,30 +7,6 @@ import pytest
 from tests.markers.conftest import api_headers as _api_headers
 
 
-class _FakeJob:
-    def __init__(self, kw):
-        self.kw = kw
-
-    def to_dict(self):
-        return {"id": "x", "kind": "intro_credits", "priority": self.kw["priority"]}
-
-
-@pytest.fixture
-def created(monkeypatch):
-    from media_preview_generator.markers import triggers
-
-    calls = []
-    monkeypatch.setattr(triggers, "create_intro_credits_job", lambda **kw: calls.append(kw) or _FakeJob(kw))
-    return calls
-
-
-@pytest.fixture
-def media(tmp_path):
-    root = tmp_path.resolve() / "media"
-    (root / "tv").mkdir(parents=True)
-    return root
-
-
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
@@ -89,7 +65,7 @@ def test_create_marker_job_for_libraries(client, created, body, expected):
     resp = client.post("/api/markers/jobs", json=body, headers=_api_headers())
     assert resp.status_code == 201, resp.get_json()
     assert created == [expected]
-    assert resp.get_json() == {"id": "x", "kind": "intro_credits", "priority": expected["priority"]}
+    assert resp.get_json() == {"id": "job-123", "kind": "intro_credits", "priority": expected["priority"]}
 
 
 @pytest.mark.parametrize(("priority", "expected"), [(1, 1), (3, 3), ("high", 1), ("normal", 2), (None, 3)])
@@ -213,8 +189,10 @@ def test_intro_credits_routes_need_a_csrf_token_only_from_a_browser_session(app,
         headers = {"Content-Type": "application/json"}
     resp = client.post(url, json={"libraries": []}, headers=headers)
     body = resp.get_data(as_text=True)
-    refused = resp.status_code == 401 or "security token" in body  # a refused token header is answered with 401
-    assert refused is csrf_refused, (resp.status_code, body[:200])
+    if csrf_refused:
+        assert resp.status_code == 400 and "security token" in body, (resp.status_code, body[:200])
+    else:
+        assert resp.status_code != 401 and "security token" not in body, (resp.status_code, body[:200])
     if url == "/api/markers/jobs":
         assert (resp.status_code == 201 and len(created) == 1) is not csrf_refused
 
@@ -238,7 +216,7 @@ def test_unwritable_config_refuses_to_start_a_job(client, created, monkeypatch):
     assert created == []
 
 
-def test_creates_a_real_intro_credits_job(client, monkeypatch):
+def test_creates_a_real_intro_credits_job(client):
     from unittest.mock import patch
 
     from media_preview_generator.web.jobs import get_job_manager

@@ -2,8 +2,8 @@
 
 ``GET /v3/media?tmdb_id|tvdb_id|imdb_id&season&episode&duration_ms``: each segment type is an array (several entries
 are normal); ``start_ms: null`` means the start of the file and ``end_ms: null`` the end of the file. The API returns
-its closest stored version for ``duration_ms`` and never rejects a different cut (measured 2026-09-14: the same body
-for 1444574 ms and 2400000 ms), so its answers only count as agreement, never alone (spec §5.5 rule 6). A lookup
+its closest stored version for ``duration_ms`` and never rejects a different cut (measured: the same body
+for 1444574 ms and 2400000 ms), so its answers only count as agreement, never alone. A lookup
 without the file's duration is still never sent.
 """
 
@@ -179,7 +179,7 @@ def _params(ids: MediaIds, duration_ms: int | None) -> dict[str, object] | Looku
     params: dict[str, object] = {}
     if ids.tmdb:
         params["tmdb_id"] = ids.tmdb
-    elif ids.is_episode and ids.tvdb:  # tvdb ids are a separate id space for movies (spec §5.2)
+    elif ids.is_episode and ids.tvdb:  # tvdb ids are a separate id space for movies
         params["tvdb_id"] = ids.tvdb
     elif valid_imdb(ids.imdb):
         params["imdb_id"] = ids.imdb

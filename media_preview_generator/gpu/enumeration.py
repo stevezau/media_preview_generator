@@ -318,7 +318,7 @@ def _detect_gpu_type_from_lspci() -> str:
             elif "nvidia" in line_lower or "geforce" in line_lower:
                 logger.debug("lspci detected NVIDIA GPU")
                 return "NVIDIA"
-            elif "mali" in line_lower or "arm" in line_lower:
+            elif "mali" in line_lower or re.search(r"\barm\b", line_lower):
                 logger.debug("lspci detected ARM GPU")
                 return "ARM"
 
@@ -527,12 +527,12 @@ def get_gpu_name(gpu_type: str, gpu_device: str) -> str:
 def _log_system_info() -> None:
     """Log system information for debugging GPU detection issues."""
     # Late imports to avoid circular dependency at module-import time.
-    from .ffmpeg_capabilities import _check_ffmpeg_version, _get_ffmpeg_hwaccels
+    from .ffmpeg_capabilities import _check_ffmpeg_version, _get_ffmpeg_hwaccels, ffmpeg_binary
 
     logger.debug("=== System Information ===")
     logger.debug("Platform: {}", platform.platform())
     logger.debug("Python version: {}", platform.python_version())
-    logger.debug("FFmpeg path: {}", os.environ.get("FFMPEG_PATH", "ffmpeg"))
+    logger.debug("FFmpeg path: {}", ffmpeg_binary())
 
     # Check FFmpeg version
     _check_ffmpeg_version()

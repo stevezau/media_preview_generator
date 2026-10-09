@@ -166,9 +166,6 @@ class TestEmbyTriggerPathRefreshContract:
     body shape pin.
     """
 
-    def test_path_refresh_posts_library_media_updated(self, emby_under_test):
+    def test_path_refresh_posts_library_media_updated(self, emby_under_test, vcr):
         emby_under_test._trigger_path_refresh(_HIT_PATH)
-        # No return value to assert on — the cassette interaction IS
-        # the assertion. A future regression that changes the URL or
-        # body shape gets a cassette miss on replay (vcrpy enforces
-        # exact request matching for replay).
+        assert vcr.all_played

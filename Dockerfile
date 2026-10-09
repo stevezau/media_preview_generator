@@ -117,7 +117,7 @@ ARG DOCKER_IMAGE_NAME=local
 # - libva2, libva-drm2: VA-API libraries
 # - vainfo: Tool to test/verify VA-API functionality
 # - pciutils: Provides lspci for better GPU naming
-# - git: For version detection when running from mounted git repository
+# - git: For version detection (version_check.get_git_commit_sha) when /app is a git checkout
 # - mediainfo: For media file metadata
 #
 # ffmpeg: we ship jellyfin-ffmpeg (8.1.2) as /usr/lib/jellyfin-ffmpeg/ffmpeg.
@@ -185,8 +185,7 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/init-adduser/run
 # /dev/dri/by-path, and NVIDIA Container Toolkit populates that directory
 # only for NVIDIA cards.  On mixed Intel+NVIDIA containers the Intel GPU
 # is invisible to OpenCL without this (VAAPI still works).  Idempotent /
-# no-op on single-vendor and bare-metal setups.  See the DV5 plan file
-# for root-cause trace inside intel/compute-runtime source.
+# no-op on single-vendor and bare-metal setups.
 COPY docker-init-dri-by-path.sh /etc/s6-overlay/s6-rc.d/init-dri-by-path/run
 RUN chmod +x /etc/s6-overlay/s6-rc.d/init-dri-by-path/run && \
     echo oneshot > /etc/s6-overlay/s6-rc.d/init-dri-by-path/type && \

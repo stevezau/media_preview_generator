@@ -148,7 +148,7 @@ class TestTestConnection:
 
         # Production format: "Plex URL and token are required".
         assert result.ok is False
-        get.assert_not_called(), "missing-creds must short-circuit before any HTTP call"
+        get.assert_not_called()
         assert re.search(r"\brequired\b", result.message, re.IGNORECASE), (
             f"missing-creds error must contain 'required' as a word, got {result.message!r}"
         )
@@ -1358,6 +1358,34 @@ class TestPlexPreviewsReadiness:
             raise_for_status=MagicMock(),
         )
 
+    def test_library_name_is_html_escaped_in_confirm_bodies(self, plex_wrapper, tmp_path):
+        """The frontend renders confirm.body with innerHTML, so a hostile library name must not pass through raw."""
+        plex_wrapper._config.plex_config_folder = str(tmp_path)
+        evil = "<img src=x onerror=alert(1)>"
+
+        with (
+            patch.object(PlexServer, "test_connection") as tc,
+            patch("media_preview_generator.servers.plex.requests.get") as prefs_get,
+            patch.object(PlexServer, "get_vendor_extraction_status") as vs,
+        ):
+            tc.return_value = ConnectionResult(ok=True, message="Connected")
+            prefs_get.return_value = self._prefs_response(FSEventLibraryUpdatesEnabled=True)
+            vs.return_value = {
+                "extracting_count": 1,
+                "stopped_count": 0,
+                "skipped_count": 0,
+                "total": 1,
+                "libraries": [{"key": "1", "name": evil, "state": "extracting"}],
+            }
+            payload = plex_wrapper.previews_readiness()
+
+        vendor = next(s for s in payload["sections"] if s["id"] == "vendor_extraction")
+        check = vendor["checks"][0]
+        for action in ("disable", "enable"):
+            body = check["actions"][action]["confirm"]["body"]
+            assert "<img" not in body
+            assert "&lt;img src=x onerror=alert(1)&gt;" in body
+
     def test_unified_envelope_shape(self, plex_wrapper, tmp_path):
         """Payload must carry vendor/overall_ok/sections[]; sections
         include connection, version, library_settings (FSEvent prefs),
@@ -2082,14 +2110,9 @@ class TestPlexMarkerHelpers:
         assert [c.args[0] for c in conn.query.call_args_list] == ["/:/prefs", "/:/prefs"]
 
     def test_marker_detection_prefs_hidden_pref_is_none(self, plex_server_under_test):
-        # Plex hides these prefs on servers without Plex Pass; plexapi's Settings.get raises NotFound for them.
-        from plexapi.exceptions import NotFound
-        from plexapi.settings import Settings
-
+        # Plex hides these prefs on servers without Plex Pass, so a missing one reads as None.
         conn = plex_server_under_test._connect.return_value
         conn.query.return_value = self._prefs(GenerateIntroMarkerBehavior="asap")
-        with pytest.raises(NotFound):
-            Settings(conn, conn.query.return_value).get("GenerateCreditsMarkerBehavior")
         assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "asap", "credits": None}
 
     def test_marker_detection_prefs_unreachable(self, plex_server_under_test):
@@ -2353,7 +2376,7 @@ class _MarkerReadinessHarness:
 
 
 class TestPlexMarkersReadiness(_MarkerReadinessHarness):
-    """The Intro & Credits rows Plex's Setup Health card emits (plan phase 4 Task 9; spec §7 item 6).
+    """The Intro & Credits rows Plex's Setup Health card emits.
 
     Every row is read from the capability report the Intro & Credits tab already asks for, so these tests
     drive ``markers.inspect.server_status_payload`` — the one source of truth — and assert the rows it

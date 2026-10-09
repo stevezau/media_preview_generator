@@ -561,7 +561,7 @@ follow-up (renamed "Intro & Credits · N files") while it stays within 500 files
 episode doesn't wait for its own preview job: markers don't need previews.
 
 **Check servers** (`reconcile: true`, `source: "reconcile"`, named "Intro & Credits · Check servers") is created by
-`POST /api/markers/reconcile`, the Dashboard's **Start new job** dialog, or a schedule with `config.reconcile` (see
+`POST /api/markers/reconcile` or a schedule with `config.reconcile` (see
 [Schedules](#post-apischedules)); nothing schedules it by default. LOW priority unless the request or schedule sets one.
 Only one is queued or running at a time: asking again (a **Re-run** of a finished one included) returns that job. It
 reads back every item this app published (`item_publish_state` with status `written`) on each enabled server with
@@ -1469,7 +1469,8 @@ published to (`server_id`, `server_name`, `server_type`, `adapter_name`, `status
 
 **Request:** `{"library_id": "1", "library_name": "Movies"}`
 
-Other accepted fields: `library_ids` (list, for several libraries), `library_names` (list), `server_id`, and `priority`
+Other accepted fields: `library_ids` (list, for several libraries), `library_names` (list), `libraries` (list of
+`{"server_id", "library_id"}` pairs, which keeps the same library id on two servers distinct), `server_id`, and `priority`
 (`high`, `normal`, `low` or `1`–`3`; default normal). Without `server_id`, the app infers the server when every chosen
 library belongs to one server, and the job publishes only there.
 
@@ -2052,7 +2053,7 @@ unless noted.
 | POST | `/api/jobs/{id}/fire-webhook-now` | Skip the initial wait on a pending webhook job, including source-specific batches and universal/per-server jobs. Returns 202 when dispatched, or 404 when no pending webhook timer exists for the job. Automatic restart recovery restores pending timers from saved job deadlines. |
 | GET | `/api/jobs/{id}/logs` | Paginated log stream: `?offset=&limit=` (limit capped at 5000), or `?last=N` for the tail |
 | GET | `/api/jobs/{id}/files` | Per-file outcomes — paginated `?page=&per_page=` (per_page capped at 500), plus optional `?outcome=` and `?search=` filters. Use `?view=requested` to list the complete selected paths, with search and pagination, instead of recorded outcomes; requested paths do not imply completed processing. The underlying outcome JSONL is soft-capped at 5000 rows; past that, a `truncated` marker row appears and aggregate counts remain in `progress.outcome`. |
-| POST | `/api/jobs/cancel-bulk` | Cancel several waiting (pending) or paused jobs. Body `{"job_ids": ["..."]}` (1 to 500 ids, otherwise `400`). Jobs that are actively running or finished are skipped, not cancelled (a running job counts as paused when it has its own pause or Pause all is on); a retry-chain head is cancelled together with its waiting retry, but skipped when that retry is already running. Returns `{"cancelled": [ids], "skipped": [{"id": "...", "reason": "not_found" \| "not_pending (<status>)" \| "retry_running"}]}`. |
+| POST | `/api/jobs/cancel-bulk` | Cancel several waiting, paused or running jobs. Body `{"job_ids": ["..."]}` (1 to 500 ids, otherwise `400`). Finished and unknown jobs are skipped. Returns `{"cancelled": [ids], "skipped": [{"id": "...", "reason": "not_found" \| "not_active (<status>)"}]}`. |
 | POST | `/api/jobs/clear` | Delete finished jobs. Optional body `{"statuses": ["completed", "failed", "cancelled"]}` (default: all three), or `{"job_ids": ["..."]}` to delete only those jobs (not both). With `job_ids`, only finished jobs are removed; others come back in `skipped`. Returns `{"success": true, "cleared": N}`; the `job_ids` form also returns `removed` (ids deleted, including finished retry rows of a cleared chain head) and `skipped` (`[{"id": "...", "reason": "not_found" \| "not_finished (<status>)" \| "retry_in_progress"}]`). |
 | GET | `/api/jobs/stats` | Counts of visible jobs: `total`, `pending`, `running`, `completed`, `failed`, `cancelled` (retry attempts are not counted separately) |
 | GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item, `group_id`, `group_name`, `group_resource`, `retiring`). Busy workers include their actual `job_id` and `current_file`; `job_kind` and `paused` reflect that job's current state. Idle workers have no current job or file. Global processing pause is separate. |
@@ -2088,7 +2089,6 @@ unless noted.
 | POST | `/api/servers/{id}/vendor-extraction` | Turn the server's own scan-time preview generation off or on. Body `{"scan_extraction": true\|false}`. |
 | POST | `/api/servers/{id}/scheduled-trickplay` | Emby and Jellyfin. Turn the scheduled trickplay task off or on. Body `{"enabled": true\|false}`. |
 | GET | `/api/servers/{id}/vendor-extraction/status` | Current aggregate state (e.g. "stopped on 3/5 libraries") |
-| GET | `/api/servers/{id}/trickplay-readiness` | Jellyfin only. Kept for scripts; [`/previews-readiness`](#multi-media-server-endpoints) covers every vendor. |
 | POST | `/api/servers/{id}/trickplay-fix-all` | Jellyfin only. Apply all recommended trickplay settings. Body `{"install_plugin": true\|false}` (default `true`). Returns `{ok, steps, error}`. |
 
 ### Preview files (BIF viewer)
@@ -2123,8 +2123,8 @@ The `path` must end in `.bif` and sit in the Plex config folder or a server's li
 | GET | `/api/system/version` | App version + commit SHA + build date |
 | GET | `/api/system/browse` | Folder picker: lists sub-directories of `?path=` (default `/`). `?include_files=1` also returns video files (each entry has `is_dir`); `?show_hidden=1` includes dot-entries. System dirs (`/proc`, `/sys`, …) are denied. |
 | GET | `/api/system/notifications` | In-app notification list (health checks, deprecations, warnings) |
-| POST | `/api/system/notifications/{id}/dismiss` | Dismiss until the next restart |
-| POST | `/api/system/notifications/{id}/dismiss-permanent` | Dismiss for good (stored in settings). `400` for `media_mount_unhealthy` (a media folder that looks empty or unmounted) and `gpu_keeps_failing_<device>` (a GPU whose last 5 files ran on the CPU), which can only be dismissed until the next restart. A dismissed **Settings migrated** notice comes back after the next upgrade that changes the settings format |
+| POST | `/api/system/notifications/{id}/dismiss` | Dismiss until the next restart. Needs login or an API token; `400` for an id the app doesn't show |
+| POST | `/api/system/notifications/{id}/dismiss-permanent` | Dismiss for good (stored in settings). Needs login or an API token. `400` for an unknown id, and for `media_mount_unhealthy` (a media folder that looks empty or unmounted) and `gpu_keeps_failing_<device>` (a GPU whose last 5 files ran on the CPU), which can only be dismissed until the next restart. A dismissed **Settings migrated** notice comes back after the next upgrade that changes the settings format |
 | POST | `/api/system/notifications/reset-dismissed` | Clear all permanent dismissals |
 | GET | `/api/system/whats-new` | Release-notes viewer payload (version + changes since last-seen) |
 | POST | `/api/system/whats-new/dismiss` | Mark the current version's notes as seen |

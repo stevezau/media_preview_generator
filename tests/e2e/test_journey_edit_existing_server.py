@@ -63,7 +63,7 @@ class TestEditExistingServer:
         backend_real_page,
         backend_real_app: tuple[str, str],
     ) -> None:
-        """Open Edit and verify URL, name, libraries reflect saved state.
+        """Open Edit and verify name, URL and enabled state reflect saved state.
 
         This is the regression that protects "edit modal opened blank /
         with stale defaults / with another server's data" — three distinct
@@ -90,9 +90,9 @@ class TestEditExistingServer:
         backend_real_page,
         backend_real_app: tuple[str, str],
     ) -> None:
-        """Change name + toggle a library; save; reload; assert persistence.
+        """Change the name; save; re-read via the API; assert persistence.
 
-        Reload is the key step — without it we'd only be testing that the
+        The re-read is the key step — without it we'd only be testing that the
         modal closed, not that the PUT actually wrote to disk. The real
         bug class (D34-style) hides in the gap between "modal closed
         cheerfully" and "next page load shows the change".

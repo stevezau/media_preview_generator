@@ -1,10 +1,9 @@
 """Tests for telling a cut-short file apart from an unexplained thumbnail shortfall.
 
-Live case: 16 of 17 "This is unexpected — please report it" warnings in one
-log were files whose data simply stops early (an interrupted download: a
-42 min Blu-ray remux holding 1.2 GB, its video ending at 10.5 min). The
-thumbnails were right; the file was short. Only the remaining one — a
-complete file that still came up 20 thumbnails short — is worth a report.
+Most "This is unexpected — please report it" warnings were files whose data
+simply stops early (an interrupted download: a 42 min remux holding 1.2 GB, its
+video ending at 10.5 min). The thumbnails were right; the file was short. Only a
+complete file that still comes up short on thumbnails is worth a report.
 """
 
 import json

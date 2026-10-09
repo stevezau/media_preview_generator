@@ -21,8 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
-import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -31,9 +30,8 @@ from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION
 from tests.e2e.conftest import (
     _build_fake_ffmpeg_path,
     _capture_session_cookie,
-    app_boot_payload,
+    _start_app,
     get_free_port,
-    wait_for_port,
 )
 
 
@@ -77,36 +75,24 @@ def _write_legacy_settings(config_dir: Path, schema_version: int) -> None:
 
 
 def _start_app_for_migration(config_dir: Path, port: int) -> subprocess.Popen:
-    """Start a real Flask subprocess just like the conftest helper does,
-    but without going through the parametrize indirection (which would
-    seed our values away).
-    """
+    """Boot the real app against a pre-seeded legacy settings.json."""
     fake_bin = _build_fake_ffmpeg_path(str(config_dir))
-    env = {
-        **os.environ,
-        "WEB_PORT": str(port),
-        "CONFIG_DIR": str(config_dir),
-        "WEB_AUTH_TOKEN": "e2e-test-token",
-        "PATH": fake_bin + os.pathsep + os.environ.get("PATH", ""),
-        "CORS_ORIGINS": "*",
-    }
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            app_boot_payload(port),
-        ],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    return _start_app(
+        str(config_dir),
+        port,
+        extra_env={"PATH": fake_bin + os.pathsep + os.environ.get("PATH", ""), "CORS_ORIGINS": "*"},
     )
-    if not wait_for_port(port, timeout=20):
-        stdout, stderr = proc.communicate(timeout=5)
-        proc.kill()
-        raise RuntimeError(
-            f"App failed to boot against legacy schema. \nstdout: {stdout.decode()}\nstderr: {stderr.decode()}"
-        )
-    return proc
+
+
+def _get_servers(port: int) -> dict:
+    """GET /api/servers with a real signed-in session; proves the booted app serves requests."""
+    cookie = _capture_session_cookie(f"http://localhost:{port}")
+    req = urllib.request.Request(
+        f"http://localhost:{port}/api/servers",
+        headers={"Cookie": f"{cookie['name']}={cookie['value']}", "X-Auth-Token": "e2e-test-token"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 (test-only localhost)
+        return json.loads(resp.read().decode())
 
 
 @pytest.mark.e2e
@@ -149,9 +135,8 @@ class TestSchemaMigrationBoot:
             assert frame_reuse.get("ttl_minutes") == 60
             assert frame_reuse.get("max_cache_disk_mb") == 2048
 
-            # And the test endpoint must serve up the migrated state.
-            cookie = _capture_session_cookie(f"http://localhost:{port}")
-            assert cookie is not None
+            # And the migrated app must serve authenticated API requests.
+            assert "servers" in _get_servers(port)
 
         finally:
             proc.terminate()
@@ -198,21 +183,7 @@ class TestSchemaMigrationBoot:
             )
 
             # The boot also serves /api/servers via the real registry.
-            cookie = _capture_session_cookie(f"http://localhost:{port}")
-            import http.cookiejar
-            import urllib.request
-
-            jar = http.cookiejar.CookieJar()
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            req = urllib.request.Request(
-                f"http://localhost:{port}/api/servers",
-                headers={
-                    "Cookie": f"{cookie['name']}={cookie['value']}",
-                    "X-Auth-Token": "e2e-test-token",
-                },
-            )
-            with opener.open(req, timeout=10) as resp:  # noqa: S310 (test-only localhost)
-                body = json.loads(resp.read().decode())
+            body = _get_servers(port)
             assert any(s.get("type") == "plex" for s in body.get("servers", [])), (
                 f"GET /api/servers returned no Plex server after v6→current migration: "
                 f"{body}. The migration ran on disk but the API doesn't see it — likely "
@@ -249,9 +220,8 @@ class TestSchemaMigrationBoot:
         port = get_free_port()
         proc = _start_app_for_migration(config_dir, port)
         try:
-            # Give the app a moment to settle (any rogue re-migration would
-            # have written by now).
-            time.sleep(1.0)
+            # A served request proves boot (and any rogue re-migration) finished.
+            _get_servers(port)
             with open(config_dir / "settings.json") as f:
                 after = json.load(f)
             assert after.get("frame_reuse", {}).get("ttl_minutes") == 999, (

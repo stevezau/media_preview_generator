@@ -1,4 +1,4 @@
-"""A marker the user adjusted or locked beats "Keep Plex's" / "Keep Emby's" (spec §5.5 rule 1, §14 2026-09-20).
+"""A marker the user adjusted or locked beats "Keep Plex's" / "Keep Emby's".
 
 The matrix: locked type × a type the server's setting keeps × vendor (Plex / Jellyfin / Emby) × the server has its own
 markers of that type or doesn't × published now from the Inspector or by a later job. Every group carries its unlocked
@@ -22,7 +22,6 @@ from media_preview_generator.markers.models import Candidate, FileIdentity, Mark
 from media_preview_generator.markers.outcomes import REPLACED_OWN, ServerStatus
 from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import PublishError, Shown
-from media_preview_generator.markers.publishers.plex_db import LocalPlexDb
 from media_preview_generator.markers.settings import load_global, validate_global
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import ServerType
@@ -56,25 +55,7 @@ PLEX_OWN_INTRO_ROW = (990, 29_306)
 PLEX_OWN_INTRO_SERVED = (T.INTRO, 990, 29_306)
 
 
-@pytest.fixture
-def sql_log(monkeypatch):
-    """Every statement the Plex publisher runs, so a no-op write can be shown to take no write lock."""
-    log: list[str] = []
-    original = LocalPlexDb._connect
-
-    def connect(self, *, read_only, **kwargs):
-        conn = original(self, read_only=read_only, **kwargs)
-        conn.set_trace_callback(log.append)
-        return conn
-
-    monkeypatch.setattr(LocalPlexDb, "_connect", connect)
-    return log
-
-
-@pytest.fixture(autouse=True)
-def plex_holds_the_database(monkeypatch):
-    """Stand in for Plex having its database open, which every write proves before it opens the file."""
-    monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
+pytestmark = pytest.mark.usefixtures("plex_holds_the_database")
 
 
 def _plex_item(tmp_path, *, plex_own_intro=True, redetect="keep_plex"):
@@ -742,7 +723,7 @@ class TestPublishNowBoundsPlexsDatabaseWait:
             pipeline.publish_now(media, registry=reg, live_config=reg.get_config)
 
         assert built["db_timeout_s"] == pipeline.PUBLISH_NOW_DB_WAIT_S
-        # The Inspector's bound (ruling P-R1) stays 8 s when a job's wait grows: a web request must answer.
+        # The Inspector's bound stays 8 s when a job's wait grows: a web request must answer.
         assert pipeline.PUBLISH_NOW_DB_WAIT_S == 8.0 < plex_db.BUSY_TIMEOUT_S
 
     def test_a_job_leaves_the_database_wait_where_it_was(self, tmp_path):

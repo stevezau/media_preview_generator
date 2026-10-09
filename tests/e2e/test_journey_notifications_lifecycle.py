@@ -17,7 +17,7 @@ reliable across CI environments.
 
 from __future__ import annotations
 
-import time
+import re
 
 import pytest
 import requests
@@ -221,7 +221,7 @@ class TestNotificationsLifecycle:
 
         # And the badge must show a count >= 2.
         badge = backend_real_page.locator("#notificationBellBadge")
-        expect(badge).not_to_have_class("d-none", timeout=2000)
+        expect(badge).not_to_have_class(re.compile(r"\bd-none\b"), timeout=2000)
         count = int((badge.text_content() or "0").strip())
         assert count >= 2, (
             f"Notification bell badge shows count={count} but two notifications "
@@ -241,30 +241,25 @@ class TestNotificationsLifecycle:
         """
         app_url, _ = backend_real_app
 
-        requests.post(
+        def entry(notification_id: str):
+            return backend_real_page.locator(f'.notification-entry[data-notification-id="{notification_id}"]')
+
+        # Precondition: both cards render, so the later absence is meaningful.
+        backend_real_page.goto(f"{app_url}/")
+        expect(entry(DEPRECATED_IMAGE_ID)).to_have_count(1, timeout=8000)
+        expect(entry(SCHEMA_MIGRATION_ID)).to_have_count(1)
+
+        dismiss_resp = requests.post(
             f"{app_url}/api/system/notifications/{DEPRECATED_IMAGE_ID}/dismiss-permanent",
             headers=_AUTH_HEADERS,
             timeout=_API_TIMEOUT,
         )
+        assert dismiss_resp.ok, dismiss_resp.text
 
-        backend_real_page.goto(f"{app_url}/")
-        backend_real_page.wait_for_load_state("domcontentloaded")
-        # Give loadNotifications() a moment.
-        time.sleep(0.5)
-
-        listing = (
-            requests.get(
-                f"{app_url}/api/system/notifications",
-                headers=_AUTH_HEADERS,
-                timeout=_API_TIMEOUT,
-            )
-            .json()
-            .get("notifications", [])
-        )
-        ids = {n["id"] for n in listing}
-        assert DEPRECATED_IMAGE_ID not in ids, (
-            f"After reload, the permanently-dismissed notification reappeared. Got IDs: {ids}"
-        )
+        backend_real_page.reload()
+        # The other card proves the list has rendered, so the dismissed one is really gone.
+        expect(entry(SCHEMA_MIGRATION_ID)).to_have_count(1, timeout=8000)
+        expect(entry(DEPRECATED_IMAGE_ID)).to_have_count(0)
 
 
 @pytest.mark.e2e

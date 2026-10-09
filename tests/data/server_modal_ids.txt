@@ -21,7 +21,6 @@
 15	PEJ	general	visible	#editTestConnectionBtn
 14	PEJ	frame	visible	#editServerEnabled
 16	PEJ	general	attached	#editTestConnectionResult
-17	J	js	code	updateJellyfinPluginPanel
 18	P	general	visible	#editPlexConfigFolder
 19	P	general	visible	#editPlexConfigBrowseBtn
 20	J	general	visible	#editJellyfinSaveOffMedia
@@ -68,8 +67,6 @@
 52	PEJ	js	code	Apply recommended
 53	P	js	code	(override)
 54	PEJ	js	code	Dismiss
-55	J	health	attached	#editReadinessPluginOptIn
-56	J	health	attached	#editReadinessPluginOptOutWarning
 57	PEJ	health	attached	#editReadinessFixCriticalBtn
 58	PEJ	health	attached	#editReadinessFixAllBtn
 59	PEJ	health	attached	#editReadinessFixResult

@@ -130,8 +130,8 @@
             cum += '/' + seg;
             const isLast = i === segs.length - 1;
             return isLast
-                ? `<li class="breadcrumb-item active" aria-current="page">${escapeHtmlText(seg)}</li>`
-                : `<li class="breadcrumb-item"><a href="#" data-fp-path="${escapeHtmlAttr(cum)}">${escapeHtmlText(seg)}</a></li>`;
+                ? `<li class="breadcrumb-item active" aria-current="page">${escapeHtml(seg)}</li>`
+                : `<li class="breadcrumb-item"><a href="#" data-fp-path="${escapeHtml(cum)}">${escapeHtml(seg)}</a></li>`;
         });
         el.innerHTML = `<ol class="breadcrumb mb-0">${items.join('')}</ol>`;
         el.querySelectorAll('a[data-fp-path]').forEach((a) => {
@@ -162,8 +162,8 @@
             const isDir = e.is_dir !== false;
             // Legacy folder-only mode: dirs are plain navigable rows.
             if (!_includeFiles) {
-                return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" data-fp-dir="${escapeHtmlAttr(e.path)}">
-                    <span><i class="bi bi-folder2 me-2"></i>${escapeHtmlText(e.name)}</span>
+                return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" data-fp-dir="${escapeHtml(e.path)}">
+                    <span><i class="bi bi-folder2 me-2"></i>${escapeHtml(e.name)}</span>
                     <i class="bi bi-chevron-right text-muted"></i>
                 </button>`;
             }
@@ -171,11 +171,11 @@
             // (folders) or toggles its own checkbox (files).
             const checked = _selected.has(e.path) ? ' checked' : '';
             const icon = isDir ? 'bi-folder2' : 'bi-film';
-            const navAttr = isDir ? `data-fp-dir="${escapeHtmlAttr(e.path)}"` : `data-fp-file="${escapeHtmlAttr(e.path)}"`;
+            const navAttr = isDir ? `data-fp-dir="${escapeHtml(e.path)}"` : `data-fp-file="${escapeHtml(e.path)}"`;
             const chevron = isDir ? '<i class="bi bi-chevron-right text-muted flex-shrink-0"></i>' : '';
             return `<div class="list-group-item d-flex align-items-center gap-2">
-                <input type="checkbox" class="form-check-input mt-0 flex-shrink-0 fp-check" data-fp-path="${escapeHtmlAttr(e.path)}" data-fp-isdir="${isDir ? '1' : '0'}"${checked} aria-label="Select ${escapeHtmlAttr(e.name)}">
-                <span class="flex-grow-1 text-truncate fp-nav" role="button" style="cursor: pointer;" ${navAttr}><i class="bi ${icon} me-2"></i>${escapeHtmlText(e.name)}</span>
+                <input type="checkbox" class="form-check-input mt-0 flex-shrink-0 fp-check" data-fp-path="${escapeHtml(e.path)}" data-fp-isdir="${isDir ? '1' : '0'}"${checked} aria-label="Select ${escapeHtml(e.name)}">
+                <span class="flex-grow-1 text-truncate fp-nav" role="button" style="cursor: pointer;" ${navAttr}><i class="bi ${icon} me-2"></i>${escapeHtml(e.name)}</span>
                 ${chevron}
             </div>`;
         }).join('');
@@ -210,7 +210,10 @@
         }
     }
 
+    let _loadSeq = 0;
+
     async function _loadPath(path) {
+        const seq = ++_loadSeq;
         const errEl = document.getElementById('folderPickerError');
         const list = document.getElementById('folderPickerList');
         errEl.classList.add('d-none');
@@ -223,6 +226,7 @@
             if (_showHidden) qs.set('show_hidden', '1');
             if (_includeFiles) qs.set('include_files', '1');
             const data = await apiGet('/api/system/browse?' + qs.toString());
+            if (seq !== _loadSeq) return;
             _currentPath = data.path || path || '/';
             _renderBreadcrumb(_currentPath);
             _renderEntries(data.entries || []);
@@ -232,6 +236,7 @@
                 errEl.classList.remove('d-none');
             }
         } catch (e) {
+            if (seq !== _loadSeq) return;
             // API errored (404 not-found / 403 denied / etc). Show the
             // message but keep the typed path in the input so the user
             // can edit it instead of losing their work.

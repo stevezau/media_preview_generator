@@ -18,16 +18,16 @@ from media_preview_generator.markers import job_runner, triggers
 from media_preview_generator.markers.outcomes import FileOutcome, ServerStatus
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerType
-from tests.markers import test_job_runner, test_pipeline, test_triggers
+from tests.markers import pipeline_helpers, test_job_runner, test_triggers
 from tests.markers.fakes import ready_publisher
+from tests.markers.pipeline_helpers import CHAPTERS_BOTH, _ctx, _probe, _registry, _run
 from tests.markers.test_job_runner import NOT_IN_LIBRARY_ROW, _row
 from tests.markers.test_job_runner import _item as _job_item
-from tests.markers.test_pipeline import CHAPTERS_BOTH, _ctx, _probe, _registry, _run
 from tests.markers.test_triggers import _server
 
 # Fixtures shared with the job runner, pipeline and trigger tests.
 env = test_job_runner.env
-media, store = test_pipeline.media, test_pipeline.store
+media = pipeline_helpers.media
 settings = test_triggers.settings
 
 

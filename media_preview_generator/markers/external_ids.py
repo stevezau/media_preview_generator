@@ -11,7 +11,7 @@ from .models import MediaIds
 
 # tmdb/tvdb are bare digits; imdb requires the "tt" prefix. The optional "(?:tt)?" on the
 # shared value group lets `_ids_in` detect and reject a scheme/value mismatch (e.g. a stray
-# "{tmdb-tt0114709}") instead of silently accepting a malformed id (spec §5.2: invalid -> ignored).
+# "{tmdb-tt0114709}") instead of silently accepting a malformed id.
 # "[-=]" also accepts Emby-style "[tmdbid=862]".
 _ID_RE = re.compile(r"[\{\[](tmdb|tvdb|imdb)(?:id)?[-=]((?:tt)?\d+)[\}\]]", re.IGNORECASE)
 # Season/episode width widened to 4 digits for daily/absolute numbering conventions

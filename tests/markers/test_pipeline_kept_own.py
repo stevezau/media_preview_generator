@@ -1,4 +1,4 @@
-"""A type every server keeps its own marker of is never read from the file (spec §6.2 step 3, §14 2026-09-23).
+"""A type every server keeps its own marker of is never read from the file.
 
 "Keep Plex's" / "Keep Emby's" leave the server's own markers of a type in place, so an answer of ours for that type is
 never shown. When every server the file's markers go to keeps its own and shows one of the type now, no local
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
@@ -19,20 +18,19 @@ import pytest
 from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.decide import DecisionStatus, FileLimits
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import FileOutcome, ServerStatus, kept_own_reason
+from media_preview_generator.markers.outcomes import FileOutcome, ServerStatus
 from media_preview_generator.markers.pipeline import LocalDetectorSpec
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, wait_cancelled
 from media_preview_generator.markers.publishers.plex_db import STALE_READ_WAIT_S
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.sources.server_markers import PLEX_CHECKED_SINCE, READER_VERSION
 from media_preview_generator.servers.base import ServerType
-from tests.markers import test_pipeline
+from tests.markers import pipeline_helpers
 from tests.markers.fakes import ready_publisher, server_config
-from tests.markers.test_pipeline import DUR, _clients, _ctx, _media_root, _registry, _run
+from tests.markers.pipeline_helpers import DUR, _clients, _ctx, _media_root, _registry, _run
 
-# test_pipeline's fixtures, shared by name (an import of them reads as unused to the linter).
-media = test_pipeline.media
-store = test_pipeline.store
+# pipeline_helpers fixtures, shared by name (an import of them reads as unused to the linter).
+media = pipeline_helpers.media
 
 T = MarkerType
 PLEX_CREDITS = {"type": "credits", "start_ms": 1_290_000, "end_ms": DUR, "final": True}
@@ -239,7 +237,7 @@ class TestAServersMarkerThatCantBeRight:
     (``decide.unusable_server_marker``): then Plex counts as not having processed the file, so the file is read for the
     type, and the write carries the file's limits so the publisher doesn't keep Plex's rows either."""
 
-    # Plex's credits start and end after the file does (Bones S07E01 on production).
+    # Plex's credits start and end after the file does (a 25 fps episode).
     PAST_THE_END = {"type": "credits", "start_ms": DUR + 79_779, "end_ms": DUR + 117_344, "final": False}
 
     def test_plexs_credits_past_the_end_dont_stop_the_credits_read(self, store, movie):
@@ -286,7 +284,7 @@ class TestAServersMarkerThatCantBeRight:
 
 
 class TestPlexsMarkerMadeForAnEarlierFile:
-    """Plex's markers belong to the item, so a replaced file keeps the old file's markers (Bones, production). A type
+    """Plex's markers belong to the item, so a replaced file keeps the old file's markers. A type
     Plex's database says is stale (``types_not_made_for_file``) doesn't stop our detection, its marker confirms
     nothing, and "Keep Plex's" still keeps it when we find nothing."""
 
@@ -440,10 +438,10 @@ class TestPlexsMarkerMadeForAnEarlierFile:
 
         ctx = _ctx(store, reg, settings_raw=_settings(), clients=_clients(), detectors=_Detectors().specs)
         with (
-            patch.object(pipeline, "probe_media", return_value=test_pipeline._probe()),
+            patch.object(pipeline, "probe_media", return_value=pipeline_helpers._probe()),
             patch.object(pipeline, "publisher_for", side_effect=build),
         ):
-            pipeline.check_item(test_pipeline._item(movie), ctx=ctx)
+            pipeline.check_item(pipeline_helpers._item(movie), ctx=ctx)
 
         [stale_read] = [kw for p, kw in built if p.types_not_made_for_file.called]
         assert stale_read["db_timeout_s"] == STALE_READ_WAIT_S
@@ -469,8 +467,8 @@ class TestPlexsMarkerMadeForAnEarlierFile:
     @pytest.mark.parametrize("cancel", [False, True], ids=["busy", "busy-then-cancelled"])
     def test_a_capability_check_held_by_another_thread_is_waited_for_briefly(self, store, movie, monkeypatch, cancel):
         # Another file's publish holds the server's capability check (it may wait minutes for a busy database) until
-        # 3 s in: the read gives up within STALE_READ_WAIT_S, or within a wait slice of the job's cancel, and Plex
-        # "couldn't tell". Waiting it out would have got the check at 3 s.
+        # the read has given up: within STALE_READ_WAIT_S, or within a wait slice of the job's cancel, and Plex
+        # "couldn't tell". Waiting it out would hang until the test's timeout.
         monkeypatch.setattr(pipeline, "STALE_READ_WAIT_S", 30.0 if cancel else 0.3)
         reg = _plex(movie)
         plex = ready_publisher()
@@ -479,28 +477,24 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         held.acquire()
         cancelled = [False]
         flip = threading.Timer(0.3, lambda: cancelled.__setitem__(0, cancel))
-        releaser = threading.Timer(3.0, held.release)
         brief = []
         check = pipeline._cached_capability
 
         def timed(*args, **kwargs):
-            started = time.monotonic()
             report = check(*args, **kwargs)
             if kwargs.get("wait_s") is not None:
-                brief.append((report, time.monotonic() - started))
+                brief.append(report)
+                held.release()  # the other file's publish ends, so the rest of the run can take the check
             return report
 
         monkeypatch.setattr(pipeline, "_cached_capability", timed)
         flip.start()
-        releaser.start()
         try:
             _run(ctx, movie, {"plex-1": plex}, cancel_check=lambda: cancelled[0])
         finally:
             flip.join()
-            releaser.join()
 
-        [(report, took)] = brief
-        assert report is None and took < 2.5
+        assert brief == [None]
         plex.types_not_made_for_file.assert_not_called()
 
     @pytest.mark.parametrize(("unanswerable", "asked"), [(True, 1), (False, 2)], ids=["old-agent", "busy-database"])
@@ -535,7 +529,9 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
         assert store.get_publish_state(rec.id, "plex-1").markers
         older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
-        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        store.replace_evidence(
+            rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=PLEX_CHECKED_SINCE - 1
+        )
         plex.types_not_made_for_file.return_value = frozenset({T.INTRO})
         reads = reg.get("plex-1").get_markers.call_count
 
@@ -585,9 +581,8 @@ class TestPlexsMarkerMadeForAnEarlierFile:
     def test_after_a_later_reader_only_an_answer_checked_for_an_earlier_file_still_counts(
         self, store, media, monkeypatch, stored, shift_ms, counts
     ):
-        # Production, 2026-09-25: a reader-version bump would have dropped every Plex answer on a file showing ours,
-        # checked or not, as the bump to 5 dropped 10 Things I Hate About You's (Plex's credits at 1:32:37, the roll's
-        # real start; chapters alone put them on the final kiss at 1:32:09).
+        # A reader-version bump would have dropped every Plex answer on a file showing ours, checked or not (Plex's
+        # credits at the roll's real start; chapters alone put them on the final story shots).
         reg, detectors, plex, rec = self._published_with_plexs_intro(store, media)
         assert _decision(store, media, T.INTRO).reason == "sources agree: introdb, server_markers"
         read = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
@@ -672,7 +667,7 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         # The reader never reads such an item (a kept type can hold ours), so its older answer can't be read again and
         # flagged either: kept, a stale Plex marker went on counting as IntroDB's second source.
         reg, detectors, plex, rec = self._older_answer_beside_an_item_that_may_show_ours(
-            store, media, item_state, version=4
+            store, media, item_state, version=PLEX_CHECKED_SINCE - 1
         )
         reads = reg.get("plex-1").get_markers.call_count
 
@@ -742,7 +737,9 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
         store.set_item_publish_state("plex-1", "item-plex-1", [], "written", kept_types={T.INTRO})
         older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
-        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        store.replace_evidence(
+            rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=PLEX_CHECKED_SINCE - 1
+        )
 
         _job(store, reg, media, detectors, pubs, introdb=True)
 
@@ -766,7 +763,9 @@ class TestPlexsMarkerMadeForAnEarlierFile:
         store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
         store.set_item_publish_state("plex-1", "item-plex-1", [], "written")
         older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
-        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        store.replace_evidence(
+            rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=PLEX_CHECKED_SINCE - 1
+        )
         other_version = Marker(T.INTRO, 126_000, 157_500, ("introdb",))
 
         def read_while_another_version_publishes(*_args, **_kwargs):
@@ -800,7 +799,7 @@ INTRODB_CREDITS = Candidate(T.CREDITS, 1_290_000, DUR, Source.INTRODB)
 
 
 class TestADetectorSkippedForEvidenceALaterStepDrops:
-    """Production (Game of Thrones S03E04, S03E05, S05E02): credit text was skipped as "not needed (already decided)"
+    """Credit text was skipped as "not needed (already decided)"
     on an older reader's Plex credits, and the server-marker step, which runs last, then dropped that answer: the type
     ended on Plex's marker without the file ever being read. The skipped detector now runs in the same run."""
 
@@ -829,7 +828,9 @@ class TestADetectorSkippedForEvidenceALaterStepDrops:
         assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, server_markers"
         assert store.evidence_fetched_at(rec.id, Source.CREDITS_TEXT) is None
         older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
-        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        store.replace_evidence(
+            rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=PLEX_CHECKED_SINCE - 1
+        )
         return reg, detectors, plex, clients, rec
 
     def _run_again(self, store, media, reg, detectors, plex, clients, *, stage="process"):
@@ -873,7 +874,7 @@ class TestADetectorSkippedForEvidenceALaterStepDrops:
         assert _decision(store, media, T.CREDITS).reason == "sources agree: introdb, credits_text"
 
     def test_keep_plexs_with_plexs_stale_credits_reads_the_file_in_the_same_run(self, store, media):
-        # Game of Thrones exactly: our intro on the item, Plex's credits kept, and they were made for an earlier file.
+        # Our intro on the item, Plex's credits kept, and they were made for an earlier file.
         reg, detectors, plex, clients, rec = self._decided_with_an_older_readers_answer(
             store, media, setting="keep_plex", keeps=frozenset({T.CREDITS})
         )
@@ -939,7 +940,9 @@ class TestADetectorSkippedForEvidenceALaterStepDrops:
         rec = store.get_file(media)
         assert _decision(store, media, T.CREDITS).reason == "sources agree: skipdb, server_markers"
         older = [c for c in store.get_evidence(rec.id) if c.origin == "plex-1"]
-        store.replace_evidence(rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=4)
+        store.replace_evidence(
+            rec.id, Source.SERVER_MARKERS, older, origin="plex-1", detail="", version=PLEX_CHECKED_SINCE - 1
+        )
         clients = {**_clients(introdb=LookupResult("ok", (INTRODB_CREDITS,))), "skipdb": skipdb}
 
         ctx = _ctx(store, reg, settings_raw=settings, clients=clients, detectors=detectors.specs)
@@ -1138,7 +1141,7 @@ def _stored_text_answer(store, path, candidates=(TEXT_CREDITS_APART,), *, episod
 class TestStoredAnswerLeftUndecided:
     """An answer stored earlier (credit text found nothing) leaves the type undecided beside Plex's own credits, and no
     detector is due: the kept status applies all the same. A stored answer that disagrees with Plex's credits is the
-    file's own read and decides instead (owner 2026-10-02), so the kept status never applies to it."""
+    file's own read and decides instead so the kept status never applies to it."""
 
     def test_keep_plexs_with_its_own_marker_is_kept_not_left_undecided(self, store, movie):
         _stored_text_answer(store, movie, ())
@@ -1274,7 +1277,7 @@ class TestStoredAnswerLeftUndecided:
         # Intro and credits are decided by chapters and the recap has nothing: Plex can't show a recap, so the check
         # of which types it keeps its own of isn't made for it.
         reg = _plex(media)
-        probe = test_pipeline._probe(test_pipeline.CHAPTERS_BOTH)
+        probe = pipeline_helpers._probe(pipeline_helpers.CHAPTERS_BOTH)
         _job(store, reg, media, _Detectors(), {"plex-1": ready_publisher()}, recap=True, probe=probe)
         before = reg.get("plex-1").get_markers.call_count
 
@@ -1306,7 +1309,7 @@ class TestRealPlexDatabase:
         path = request.getfixturevalue("media" if kind == "episode" else "movie")
         # An episode's intro is decided by its chapter and written; the credits are left to Plex either way.
         chapters = (Chapter(0, 126_771, "Chapter 1"), Chapter(126_771, 157_068, "Intro"), Chapter(157_068, None, "B"))
-        probe = test_pipeline._probe(chapters if kind == "episode" else ())
+        probe = pipeline_helpers._probe(chapters if kind == "episode" else ())
 
         def run(name, *, kept_status):
             store = MarkerStore(str(tmp_path / f"{name}.db"))
@@ -1352,40 +1355,10 @@ class TestRealPlexDatabase:
             assert (kept_item, undecided_item) == (((), frozenset()), None)
 
 
-class TestSeasonChapterFollowUps:
-    """A sibling left to the servers' own intro isn't asked again because a re-decide can't say "kept" (MED 3)."""
-
-    @pytest.mark.parametrize(
-        ("chapter", "asked"), [(False, False), (True, True)], ids=["still-undecided", "now-decided-by-its-chapter"]
-    )
-    def test_a_kept_sibling_is_asked_again_only_when_its_intro_would_be_decided(self, store, media, chapter, asked):
-        from media_preview_generator.markers.decide import TypeDecision
-        from media_preview_generator.markers.sources.chapters import CHAPTER_RULES_VERSION
-
-        st = os.stat(media)
-        sibling = store.upsert_file(
-            FileIdentity(media, st.st_size, st.st_mtime_ns),
-            duration_ms=DUR,
-            season_key=os.path.dirname(media),
-            is_movie=False,
-        )
-        kept = TypeDecision(T.INTRO, DecisionStatus.DISABLED, None, None, kept_own_reason(["Plex"]))
-        store.save_decisions(sibling.id, {T.INTRO: kept}, settings_fingerprint="x")
-        intro_chapter = Candidate(T.INTRO, 126_771, 157_068, Source.CHAPTERS, origin="Intro")
-        store.replace_evidence(
-            sibling.id, Source.CHAPTERS, [intro_chapter] if chapter else [], version=CHAPTER_RULES_VERSION
-        )
-        ctx = _ctx(store, _plex(media), settings_raw=_settings(), detectors=_Detectors().specs)
-
-        pipeline._request_season_chapter_followups(ctx, {media: None})
-
-        assert ctx.take_followups() == ([media] if asked else [])
-
-
 class TestSeasonAudioBesidePlexsOwnIntro:
-    """Season audio and Plex's own intro are never two agreeing sources (ruling G3: Plex's detection matches audio too).
-    An agreeing one doesn't hold season audio back (2026-09-24, "use the file check if nothing else"), a disagreeing
-    one doesn't outvote it (2026-10-02), and "Keep Plex's" still leaves the intro to Plex without reading the file."""
+    """Season audio and Plex's own intro are never two agreeing sources (Plex's detection matches audio too).
+    An agreeing one doesn't hold season audio back, a disagreeing
+    one doesn't outvote it, and "Keep Plex's" still leaves the intro to Plex without reading the file."""
 
     AUDIO_ONLY = Marker(T.INTRO, AUDIO_INTRO.start_ms, AUDIO_INTRO.end_ms, ("season_audio",))
 
@@ -1399,7 +1372,7 @@ class TestSeasonAudioBesidePlexsOwnIntro:
         assert [m for m in plex.write.call_args.args[1] if m.type is T.INTRO] == [self.AUDIO_ONLY]
 
     def test_a_disagreeing_plex_intro_leaves_the_intro_undecided(self, store, media):
-        # An intro disagreement writes nothing (measured 2026-10-03), so Plex's own intro stays as it is.
+        # An intro disagreement writes nothing so Plex's own intro stays as it is.
         plex = ready_publisher()
         late_end = {**PLEX_INTRO, "end_ms": 170_000}
         _job(store, _plex(media, setting="restore", rows=(late_end,)), media, _Detectors(), {"plex-1": plex})

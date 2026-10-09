@@ -58,7 +58,7 @@ GPU SETUP — pick ONE path:
     <PostArgs/>
     <CPUset/>
     <DateInstalled/>
-    <Date>2025-01-01</Date>
+    <Date>2026-06-01</Date>
     <Changes>
 [2026-06-01] Surfaced the NVIDIA --runtime=nvidia requirement in field labels and the Overview to prevent "AMD CDI spec not found" errors when users set NVIDIA env vars without adding the runtime flag to Extra Parameters (issue #260)
 [2026-05-27] Renamed to media-preview-generator; image moved to stevezzau/media_preview_generator (old plex_generate_vid_previews image is deprecated)
@@ -72,7 +72,7 @@ GPU SETUP — pick ONE path:
     <Config Name="Web UI Port" Target="8080" Default="8080" Mode="tcp" Description="Port for the web interface" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
 
     <!-- Plex Configuration -->
-    <Config Name="Plex URL" Target="PLEX_URL" Default="http://192.168.1.100:32400" Mode="" Description="URL to your Plex Media Server (use IP address, not localhost)" Type="Variable" Display="always" Required="true" Mask="false"/>
+    <Config Name="Plex URL" Target="PLEX_URL" Default="" Mode="" Description="URL to your Plex Media Server, e.g. http://192.168.1.100:32400 (use IP address, not localhost). Leave empty if you only use Emby or Jellyfin; servers are added in the web UI." Type="Variable" Display="always" Required="false" Mask="false"/>
     <Config Name="Plex Token" Target="PLEX_TOKEN" Default="" Mode="" Description="Plex authentication token. Find it at: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/ (or use OAuth via Web UI)" Type="Variable" Display="always" Required="false" Mask="true"/>
 
     <!-- Path Mappings -->

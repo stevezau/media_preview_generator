@@ -13,7 +13,6 @@ another detector that has to run at the same source needs one: detectors at one 
 
 from __future__ import annotations
 
-import itertools
 import os
 import stat
 import threading
@@ -21,7 +20,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -36,7 +35,7 @@ from ..servers.ownership import OwnershipMatch
 from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
-from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limits
+from .audio.season import frame_rate_of, season_audio_spec, season_intro_chapter_limit
 from .carry_over import ReadNow, carry_over, is_carried_over, previous_decisions
 from .credits.detector import CPU_RECHECK_PHASE, CUT_SHORT, credits_text_spec
 from .credits.frames import gpu_failure_lines
@@ -61,13 +60,10 @@ from .external_ids import ids_from_path, ids_from_server_dict, is_extra, is_seas
 from .job_log import (
     ALREADY_DECIDED,
     EPISODE_ONLY_SOURCES,
-    SEASON_RECHECK_LABEL,
     RunNotes,
-    SeasonEpisode,
     ServerResult,
     chapter_names,
     clock,
-    decide_again_line,
     decided_line,
     display_name,
     done_line,
@@ -78,12 +74,9 @@ from .job_log import (
     last_seasons_audio_line,
     make_source_view,
     nothing_was_sent,
-    online_recheck_line,
     path_year,
     read_result_line,
     reading_line,
-    season_line,
-    season_of,
     server_result_line,
     server_source_line,
     show_name,
@@ -108,6 +101,7 @@ from .models import (
     MediaIds,
     Source,
 )
+from .models import utcnow as _utcnow
 from .outcomes import (
     EXTRAS_NOT_CHECKED,
     FILE_BUSY,
@@ -187,7 +181,6 @@ RECHECK_AFTER = tuple(timedelta(days=days) for days in (1, 2, 4, 8, 16))
 # A file replaced while it is analysed is detected again from scratch; one that keeps changing is being written.
 MAX_ATTEMPTS = 3
 _ONLINE_LABELS = {Source.THEINTRODB: "TheIntroDB", Source.INTRODB: "IntroDB", Source.SKIPDB: "SkipDB"}
-ONLINE_SOURCES = tuple(_ONLINE_LABELS)
 PARSER_VERSIONS = {
     Source.THEINTRODB: theintrodb.PARSER_VERSION,
     Source.INTRODB: introdb.PARSER_VERSION,
@@ -225,21 +218,6 @@ _CANCELLED = "cancelled by user"
 PLEX_PASS_UNKNOWN_TTL_S = 5.0
 # Answers read from the saved settings alone: cheap, and wrong the moment the user saves, so never reused.
 _SETTINGS_ANSWERS = frozenset({Capability.DISABLED, Capability.NEEDS_CONFIRMATION})
-_SEQUENCE = itertools.count(1)
-_SEQUENCE_LOCK = threading.Lock()
-
-
-def sequence_number() -> int:
-    """A number larger than every one handed out before in this process: which of two events came first (a file's run
-    starting, another job asking for that file to be run again).
-
-    Returns:
-        The next number.
-    """
-    with _SEQUENCE_LOCK:
-        return next(_SEQUENCE)
-
-
 # The Inspector editor's publish (``publish_now``) runs inside a web request on one of eight gunicorn threads, so it is
 # bounded (ruling P-R1). Each server's own HTTP calls are capped by ``ServerConfig.timeout``, which the route shortens
 # to this.
@@ -266,10 +244,6 @@ PUBLISH_BUSY_MESSAGE = "Intro & Credits is running for this file; the next run p
 SERVER_MARKERS_OFF = "Intro & Credits is off for this server"
 
 LocalDetector = Callable[..., "list[Candidate] | DetectorAnswer"]
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def _no_phase(_text: str) -> None:
@@ -328,9 +302,6 @@ class LocalDetectorSpec:
         needs_worker: ``needs_worker(file, ctx)``: whether it needs a GPU/CPU worker now (None: always). One that
             doesn't runs on the checking thread, unless another detector that has to run at the same source needs a
             worker: then they all run on the worker.
-        followups: ``followups(file, ctx)``: legacy bookkeeping of other files whose answer is out of date
-            (season audio: siblings matched before this episode arrived). Collected before worker handoff, but
-            does not create jobs; those files wait for their next explicit run (None: none).
         failed_here: ``failed_here(file, ctx)``: whether it failed to read the file as it is now (credit text: a decode
             error or a timeout recorded for this identity), so a rule waiting for its answer stops waiting (None:
             never).
@@ -352,7 +323,6 @@ class LocalDetectorSpec:
     version_step: int = 0
     due: Callable[[FileRecord, PipelineContext], bool] | None = None
     needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
-    followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
     failed_here: Callable[[FileRecord, PipelineContext], bool] | None = None
     checks_chapters: bool = False
     compared: Callable[[FileRecord, PipelineContext], bool] | None = None
@@ -418,18 +388,6 @@ class PipelineContext:
         db_timeout_s: The longest Plex's publisher waits for the database locks in one check or write; None leaves it
             at ``plex_db.BUSY_TIMEOUT_S``. ``publish_now`` shortens it, since that wait alone outlasts the deadline a
             web request may take (ruling P-R1).
-        season_recheck: A Season job: a file whose decisions didn't change logs no lines of its own; the job ends with
-            one line per season instead (``summary_lines``).
-        recheck_label: How those per-season lines name the job (a TheIntroDB recheck logs them too).
-        decide_again: The one-off job after a settings upgrade that decides the files the old rules couldn't decide
-            (and those waiting for their item's other versions, and those whose intro rests on season audio) again:
-            like a Season
-            job, a file whose decisions didn't change logs no lines
-            of its own, and the job ends with one line for them (``summary_lines``). It runs files as any job does.
-        online_recheck: A legacy weekly job that asks the online databases again about files they had no entry for
-            (``online_recheck_files``): only a file an online database now has an entry for, or whose decisions
-            changed, logs lines of its own, and the job ends with one line for them all (``summary_lines``). It runs
-            files as any job does.
         busy_writes_retried: The job queues a retry for a file whose write gave up on a busy database, or that another
             job kept running past a worker's wait for it, so its row says this job tries again in a few minutes rather
             than on the next run (``job_runner``), for up to ``retry_file_cap`` files (``promise_busy_retry``).
@@ -457,10 +415,6 @@ class PipelineContext:
     chromaprint: ChromaprintState = ChromaprintState.AVAILABLE
     credits_text: TextDetState = TextDetState.AVAILABLE
     db_timeout_s: float | None = None
-    season_recheck: bool = False
-    recheck_label: str = SEASON_RECHECK_LABEL
-    decide_again: bool = False
-    online_recheck: bool = False
     busy_writes_retried: bool = False
     retry_file_cap: int = 500
     freeze_check: Callable[[], bool] | None = None
@@ -482,11 +436,6 @@ class PipelineContext:
     _importers: dict[str, str | None] = field(default_factory=dict, repr=False)
     _importer_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _importer_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _followups: set[str] = field(default_factory=set, repr=False)
-    # Files of this job whose season audio answer left out a sibling that had changed on disk
-    # (``note_changed_sibling_left_out``).
-    _left_out_changed: set[str] = field(default_factory=set, repr=False)
-    _followups_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Files this job checked without a source because its daily budget ran out, by source (job_runner turns this into
     # a completion warning once the job finishes). Counted when a file's run finishes, so a file asked again in the
     # same job (its worker stage after the checking thread, a retry after it changed on disk) is still one file.
@@ -501,10 +450,6 @@ class PipelineContext:
     _pending_skips: dict[str, dict[Source, str]] = field(default_factory=dict, repr=False)
     # Sources whose running out this job already logged.
     _budget_warned: set[Source] = field(default_factory=set, repr=False)
-    # Files checked without TheIntroDB because its daily budget ran out that ended with a type undecided, and when the
-    # first of them was refused (``take_budget_rechecks``).
-    _budget_rechecks: set[str] = field(default_factory=set, repr=False)
-    _budget_refused_at: datetime | None = field(default=None, repr=False)
     _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Per file being run: the thread running it and what that run computes once (``run_memo``).
     _run_memos: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict, repr=False)
@@ -520,24 +465,14 @@ class PipelineContext:
     # stored when the job's first stage of it began. The checking stage stores the new file before it hands it to a
     # worker, so the worker's stage can't tell on its own that it publishes a replaced file (``VERIFY_LATER``).
     _replaced_at_start: dict[str, bool] = field(default_factory=dict, repr=False)
-    # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, per file a
-    # decide-again job ran, whether its decisions changed and whether it still has no marker, and per file the weekly
-    # online re-check ran, whether an online database now has an entry for it and whether its decisions changed.
+    # For the job's last lines: files written per server name.
     _sent: dict[str, int] = field(default_factory=dict, repr=False)
-    _seasons: dict[str, list[SeasonEpisode]] = field(default_factory=dict, repr=False)
-    _decided_again: list[tuple[bool, bool]] = field(default_factory=list, repr=False)
-    _rechecked_online: list[tuple[bool, bool]] = field(default_factory=list, repr=False)
     _summary_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # Per file: the ``sequence_number`` its latest run of this job started at (``ran_since``).
-    _run_started: dict[str, int] = field(default_factory=dict, repr=False)
     # How many files this job has already named with each job-log title (``_note_title``): a second file with the
     # same title (two copies of one film) gets a short tell-apart, the first stays plain. A dict's ``get``/``[]=``
     # aren't atomic like a set's ``add``, so this one does take a lock.
     _titles_seen: dict[str, int] = field(default_factory=dict, repr=False)
     _titles_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # Whether any run of this job stored an answer, decision or file identity that differs from before
-    # (``answers_changed``).
-    _answers_changed: bool = field(default=False, repr=False)
     # Files this job marked missing from disk (``take_missing``).
     _missing: int = field(default=0, repr=False)
     # Files whose busy row said this job tries again in a few minutes (``promise_busy_retry``).
@@ -557,87 +492,15 @@ class PipelineContext:
             owner = self._run_memos.get(canonical_path)
         return owner[1] if owner is not None and owner[0] == threading.get_ident() else {}
 
-    def ran_since(self, canonical_path: str, number: int) -> bool:
-        """Whether this job's latest run of a file started after ``number`` was handed out, so it read everything stored
-        before then (a worker stage reads everything again, so it counts as a run).
-
-        Args:
-            canonical_path: The file.
-            number: A ``sequence_number``.
-
-        Returns:
-            False when the file wasn't run since, or not at all.
-        """
-        with self._run_memos_guard:
-            return self._run_started.get(canonical_path, 0) > number
-
-    def note_answer_changed(self) -> None:
-        """Remember that a run of this job stored something new about its file (``answers_changed``)."""
-        self._answers_changed = True
-
-    def answers_changed(self) -> bool:
-        """Whether a run of this job changed what is stored about its file: its identity or chapters, a local
-        detector's answer, or its decisions. A job that changed none of them can't have left a sibling's answer out of
-        date.
-
-        Returns:
-            True once any run did.
-        """
-        return self._answers_changed
-
     @contextmanager
     def _running(self, canonical_path: str) -> Iterator[None]:
         with self._run_memos_guard:
             self._run_memos[canonical_path] = (threading.get_ident(), {})
-            self._run_started[canonical_path] = sequence_number()
         try:
             yield
         finally:
             with self._run_memos_guard:
                 self._run_memos.pop(canonical_path, None)
-
-    def request_followups(self, paths: Iterable[str]) -> None:
-        """Record legacy sibling requests without scheduling jobs; the files wait for their next explicit run.
-
-        Args:
-            paths: Local paths of the files.
-        """
-        with self._followups_guard:
-            self._followups.update(paths)
-
-    def take_followups(self) -> list[str]:
-        """The requested files, sorted, and forget them.
-
-        Returns:
-            Every path requested since the last call, sorted.
-        """
-        with self._followups_guard:
-            taken = sorted(self._followups)
-            self._followups.clear()
-        return taken
-
-    def take_budget_rechecks(self) -> tuple[list[str], datetime | None]:
-        """Drain legacy budget-refusal bookkeeping; no new job is created from it.
-
-        Returns:
-            The local paths, sorted, of files checked without TheIntroDB because its budget ran out that ended with a
-            type undecided; and when the first of them was refused (None when there are none).
-        """
-        with self._budget_lock:
-            taken = sorted(self._budget_rechecks)
-            refused_at = self._budget_refused_at if taken else None
-            self._budget_rechecks.clear()
-            self._budget_refused_at = None
-        return taken, refused_at
-
-    def note_changed_sibling_left_out(self, canonical_path: str) -> None:
-        """Remember that this file's season audio answer left out a sibling that had changed on disk.
-
-        Args:
-            canonical_path: Local path of the file whose answer it was.
-        """
-        with self._followups_guard:
-            self._left_out_changed.add(canonical_path)
 
     def promise_busy_retry(self, canonical_path: str) -> bool:
         """Whether a file a busy database refused may be told this job tries again in a few minutes.
@@ -702,41 +565,16 @@ class PipelineContext:
             taken, self._missing = self._missing, 0
         return taken
 
-    def take_changed_siblings_left_out(self) -> list[str]:
-        """The files noted by ``note_changed_sibling_left_out``, sorted, and forget them.
-
-        Returns:
-            Every path noted since the last call, sorted.
-        """
-        with self._followups_guard:
-            taken = sorted(self._left_out_changed)
-            self._left_out_changed.clear()
-        return taken
-
-    def _note_finished(
-        self,
-        rows: list[dict],
-        season: tuple[str, SeasonEpisode] | None,
-        decided_again: tuple[bool, bool] | None,
-        rechecked_online: tuple[bool, bool] | None = None,
-    ) -> None:
-        """Count one file's rows for the job's totals line, a Season job's episode for its season's line, and a
-        decide-again or weekly online re-check job's file for its line."""
+    def _note_finished(self, rows: list[dict]) -> None:
+        """Count one file's rows for the job's totals line."""
         with self._summary_lock:
             for row in rows:
                 name = str(row.get("server_name") or row.get("server_id") or "")
                 written = row.get("status") == ServerStatus.WRITTEN.value
                 self._sent[name] = self._sent.get(name, 0) + int(written)
-            if season is not None:
-                self._seasons.setdefault(season[0], []).append(season[1])
-            if decided_again is not None:
-                self._decided_again.append(decided_again)
-            if rechecked_online is not None:
-                self._rechecked_online.append(rechecked_online)
 
     def summary_lines(self, outcome: dict[str, int]) -> list[str]:
-        """The lines a job ends its log with: a Season job's one line per season (a decide-again or weekly online
-        re-check job's one line), then the totals.
+        """The lines a job ends its log with: the totals.
 
         Args:
             outcome: The job's file counts per outcome (files finished before a restart included).
@@ -746,21 +584,13 @@ class PipelineContext:
         """
         with self._summary_lock:
             sent = dict(self._sent)
-            seasons = {season: list(episodes) for season, episodes in self._seasons.items()}
-            decided_again = list(self._decided_again)
-            rechecked_online = list(self._rechecked_online)
         with self._budget_lock:
             skipped: dict[str, int] = {}
             for source, count in self._budget_exhausted.items():
                 skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
             for source, (_detail, count) in self._key_refused.items():
                 skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
-        lines = [season_line(season, episodes, self.recheck_label) for season, episodes in sorted(seasons.items())]
-        if self.decide_again:
-            lines.append(decide_again_line(decided_again))
-        if self.online_recheck:
-            lines.append(online_recheck_line(rechecked_online))
-        return [*lines, totals_line(outcome, sent, skipped)]
+        return [totals_line(outcome, sent, skipped)]
 
 
 @dataclass(frozen=True)
@@ -1134,10 +964,6 @@ def build_context(
     priority: int | Callable[[], int],
     force: bool = False,
     recheck_empty_server_markers: bool = False,
-    season_recheck: bool = False,
-    recheck_label: str = SEASON_RECHECK_LABEL,
-    decide_again: bool = False,
-    online_recheck: bool = False,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
 
@@ -1153,10 +979,6 @@ def build_context(
         priority: The job's priority, or a callable returning its current value.
         force: Re-detect.
         recheck_empty_server_markers: Check servers (``PipelineContext.recheck_empty_server_markers``).
-        season_recheck: A Season job or a TheIntroDB recheck (``PipelineContext.season_recheck``).
-        recheck_label: Which of the two (``PipelineContext.recheck_label``).
-        decide_again: The decide-again job after settings v16 and v17 (``PipelineContext.decide_again``).
-        online_recheck: A legacy weekly online re-check (``PipelineContext.online_recheck``).
 
     Returns:
         A context for one job.
@@ -1177,10 +999,6 @@ def build_context(
         recheck_empty_server_markers=recheck_empty_server_markers,
         chromaprint=chromaprint,
         credits_text=credits_text,
-        season_recheck=season_recheck,
-        recheck_label=recheck_label,
-        decide_again=decide_again,
-        online_recheck=online_recheck,
     )
 
 
@@ -1316,50 +1134,6 @@ def _needs_lookup(ctx: PipelineContext, rec: FileRecord, source: Source, refresh
     return all(r.type is None for r in rows) and ctx.now() - fetched > NO_DATA_RETRY
 
 
-def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, now: datetime) -> Iterator[str]:
-    """The files a legacy weekly online re-check lists: an enabled online source's stored "no entry" is due again (older
-    than ``NO_DATA_RETRY``, as ``_needs_lookup`` asks it again), and its answer could still change a decision.
-
-    That is a file with a type undecided (nothing found), or one season audio decided alone: an online answer
-    confirms that intro or undoes it (``_decided_beyond_chapters``). A file decided otherwise, by
-    chapters alone included, isn't listed; nor is one gone from disk, which would otherwise be listed every week.
-
-    Args:
-        store: The markers store.
-        settings: Global detection settings.
-        now: The current time (UTC).
-
-    Yields:
-        The local paths, sorted, each checked as it is reached (so a caller can stop early); none when every online
-        source is off.
-    """
-    sources = [source for source in ONLINE_SOURCES if settings.source_enabled(source.value)]
-    if not sources:
-        return
-    for path in store.files_with_old_empty_lookups(sources, now - NO_DATA_RETRY):
-        if _online_answer_could_decide(store, path) and os.path.isfile(path):
-            yield path
-
-
-def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:
-    """Whether a file has a type undecided (True when the store knows no decisions for it), one decided by season
-    audio alone, or one carried over from a file it replaced (a locked marker never counts)."""
-    rec = store.get_file(path)
-    if rec is None:
-        return False
-    decisions = store.get_decisions(rec.id)
-    if not decisions:
-        return True
-    if any(row.status is DecisionStatus.NO_EVIDENCE for row in decisions.values()):
-        return True
-    # Only a decided type keeps an unlocked marker (``MarkerStore.save_decisions``). A marker carried over from a
-    # replaced file stands only until the file has evidence of its own.
-    return any(
-        not marker.locked and (set(marker.decided_by) <= _SEASON_AUDIO_AND_SERVERS or is_carried_over(marker))
-        for marker in store.get_markers(rec.id).values()
-    )
-
-
 # Sources without a switch of their own, each ranked right after the source whose switch they ride on.
 _RIDERS = {
     Source.SERVER_MARKERS.value: Source.SERVER_MARKERS_IMPORTED.value,
@@ -1412,7 +1186,7 @@ def _decide(
     help decide it: a type the decision with them decides is decided again without them. When the chromaprint check
     didn't answer (``ctx.chromaprint`` UNKNOWN), stored season audio answers count as usual until it does, and the same
     for credit text while ``ctx.credits_text`` is UNKNOWN.
-    ``intro_chapter_limit`` is the season's limit on an intro chapter deciding alone (``season_intro_chapter_limits``).
+    ``intro_chapter_limit`` is the season's limit on an intro chapter deciding alone (``season_intro_chapter_limit``).
     """
     order = _decision_order(ctx.settings)
     evidence = ctx.store.get_evidence(rec.id)
@@ -1643,16 +1417,10 @@ def _decisions_changed(
     for mtype, d in decisions.items():
         row = stored.get(mtype)
         proposed = (d.proposed.start_ms, d.proposed.end_ms) if d.proposed else (None, None)
-        # A legacy "needs_review" row reads as no evidence, so an identical verdict would leave the raw status on disk.
-        if (
-            row is None
-            or row.legacy
-            or (row.status, row.reason, (row.proposed_start_ms, row.proposed_end_ms))
-            != (
-                d.status,
-                d.reason,
-                proposed,
-            )
+        if row is None or (row.status, row.reason, (row.proposed_start_ms, row.proposed_end_ms)) != (
+            d.status,
+            d.reason,
+            proposed,
         ):
             return True
         if row.settings_fingerprint != fingerprint:
@@ -1870,7 +1638,6 @@ def _run_detector(
         version=spec.answer_version(rec, ctx),
         run=(spec.source, answer.signature) if isinstance(answer, DetectorAnswer) else None,
     )
-    ctx.note_answer_changed()
     return None
 
 
@@ -3080,39 +2847,6 @@ def _summary(
     return text
 
 
-def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict[str, int | None]) -> None:
-    """Ask again for siblings decided with a season intro-chapter limit that has changed since (finding F1).
-
-    State, not events: every season step compares each sibling's stored limit with the one it would get now, so a
-    change is noticed whichever episode runs next, after a worker handoff, a restart, a deleted or replaced episode, or
-    a member another episode's step probed. A sibling is asked again only when the new limit changes its intro
-    decision, re-decided with the kind its own run used. One never decided is left alone (its own run sees the whole
-    group). One changed on disk since it was decided is asked again without deciding it here: its stored evidence is
-    the old file's, and one run reads the new file.
-    """
-    stale = []
-    for path, limit in sibling_limits.items():
-        sibling = ctx.store.get_file(path)
-        if sibling is None:
-            continue
-        stored = ctx.store.get_decisions(sibling.id).get(MarkerType.INTRO)
-        if stored is None:
-            continue
-        if identity_changed(sibling):
-            stale.append(path)
-            continue
-        if ctx.store.get_intro_chapter_limit(sibling.id) == (True, limit):
-            continue
-        types = _enabled_types(ctx.settings, _stored_ids(ctx.store, sibling))
-        decision = _decide(ctx, sibling, types, limit)[MarkerType.INTRO]
-        if is_kept_own(stored.status, stored.reason) and decision.status is not DecisionStatus.DECIDED:
-            continue  # still undecided, so still left to the servers' own marker; its own run checks the servers
-        if _decisions_changed(ctx.store, sibling.id, {MarkerType.INTRO: decision}, stored.settings_fingerprint):
-            stale.append(path)
-    if stale:
-        ctx.request_followups(stale)
-
-
 def _not_on_disk(path: str, ctx: PipelineContext) -> ItemOutcome:
     """The outcome of a file not on disk, by previews' rule (``source_replaced_reason``): one a newer file replaced in
     its folder (on any disk of its library) is gone from disk for good, and its job queues no retry (the newer file is
@@ -3255,8 +2989,6 @@ def _attempt(
     )
     if confirmed_kind is not None:
         ctx.store.set_server_kind(rec.id, confirmed_kind)
-    if not unchanged or probe is not None:
-        ctx.note_answer_changed()
     if probe is not None:
         ctx.store.set_frame_rate(rec.id, probe.frame_rate, identity=(rec.size, rec.mtime_ns))
         # The episode-only chapter names read the kind from the PATH, not the resolved kind: the path is
@@ -3296,11 +3028,7 @@ def _attempt(
     intro_limit = None
     if MarkerType.INTRO in types and ctx.settings.source_enabled(Source.CHAPTERS.value):
         phase("Comparing the season's intro chapters…")
-        intro_limit, sibling_limits = season_intro_chapter_limits(ctx, path)
-        _request_season_chapter_followups(ctx, sibling_limits)
-    for spec in ctx.local_detectors:
-        if spec.followups is not None and spec.types & types and ctx.settings.source_enabled(spec.source.value):
-            ctx.request_followups(spec.followups(rec, ctx))
+        intro_limit = season_intro_chapter_limit(ctx, path)
     # A normal run stops asking once stored answers decide everything beyond chapters alone (answers from an older
     # parser, reader or detector version are still asked again; ``_detector_pending`` says when a detector runs); a
     # forced run asks every source and runs every detector once, so no stale answer is left behind. A server never
@@ -3580,7 +3308,6 @@ def _attempt(
     changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
     if changed:
         ctx.store.save_decisions(rec.id, decisions, settings_fingerprint=fingerprint)
-        ctx.note_answer_changed()
     if ctx.store.version_rerun(rec.id, DECIDE_RULES) != DECIDE_RULES_VERSION:
         # Decided under today's rules: only a start after they change lists it to be decided again (``markers.versions``).
         ctx.store.record_version_reruns([(rec.canonical_path, DECIDE_RULES, DECIDE_RULES_VERSION)])
@@ -3627,16 +3354,10 @@ def _attempt(
     if outcome is not FileOutcome.FAILED:
         ctx.decided_by.add(decided_groups(decisions))
     try:
-        _log_file(ctx, rec, decisions, types, rows, notes, changed=changed, outcome=outcome, title=title)
+        _log_file(ctx, rows, notes, outcome=outcome, title=title)
     except Exception as exc:
         # The file is done: a problem describing it mustn't fail it.
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
-    if is_budget_exhausted(skipped.get(Source.THEINTRODB, "")) and any(
-        decisions[t].status is DecisionStatus.NO_EVIDENCE or is_carried_over(decisions[t].marker) for t in types
-    ):
-        with ctx._budget_lock:
-            ctx._budget_rechecks.add(path)
-            ctx._budget_refused_at = ctx._budget_refused_at or ctx.now()
     labels = tuple(sorted(_ONLINE_LABELS[source] for source, answer in skipped.items() if is_budget_exhausted(answer)))
     summary = _summary(decisions, types, labels)
     if read_failure:
@@ -3712,26 +3433,6 @@ def _server_result(
         else (None, False)
     )
     return ServerResult(row, ours, kept, withheld, had, had_is_ours)
-
-
-def _found_online(ctx: PipelineContext, rec: FileRecord, notes: RunNotes) -> bool:
-    """Whether an online source this run asked stored an entry for the file.
-
-    A run that isn't forced asks a source only when it has no stored answer, a "no entry" that is due, or one from an
-    older parser (``_needs_lookup``), so this is a database that newly has the file, bar the rare parser upgrade.
-
-    Args:
-        ctx: The job's context.
-        rec: The file.
-        notes: What this run did with each source.
-
-    Returns:
-        True when one did.
-    """
-    asked = {source for source, origin in notes.asked if source in _ONLINE_LABELS and origin == ""}
-    return any(
-        row.source in asked and row.origin == "" and row.type is not None for row in ctx.store.evidence_rows(rec.id)
-    )
 
 
 def _listed_title(item: ProcessableItem) -> str:
@@ -3879,35 +3580,18 @@ def _outcome_reason(rows: list[dict], status: str) -> str:
 
 def _log_file(
     ctx: PipelineContext,
-    rec: FileRecord,
-    decisions: dict[MarkerType, TypeDecision],
-    types: frozenset[MarkerType],
     rows: list[dict],
     notes: RunNotes,
     *,
-    changed: bool,
     outcome: FileOutcome,
     title: str,
 ) -> None:
-    """Log the file's last line(s): a Season job's (or a TheIntroDB recheck's, a decide-again job's, the weekly online
-    re-check's) own count of this file, and the worker's "completed" line or the checking thread's "done" line. Every
-    other line -- each source's, "Decided" and each server's -- was already logged live as that work happened.
+    """Log the file's last line: the worker's "completed" line or the checking thread's "done" line. Every other line
+    -- each source's, "Decided" and each server's -- was already logged live as that work happened.
 
-    Every file gets its "completed"/"done" line, whatever it did: an unchanged file, a Season job's unchanged episode,
-    a decide-again job's unchanged file and a weekly online re-check's file with nothing new all log it too. A failed
-    file is always logged, at WARNING.
+    Every file gets its "completed"/"done" line, whatever it did. A failed file is always logged, at WARNING.
     """
-    season = decided_again = rechecked_online = None
-    if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
-        name, episode = season_of(rec.canonical_path)
-        season = (name, SeasonEpisode(episode, changed))
-    if ctx.decide_again:
-        # "Still nothing found" is a file with no marker at all, not one missing a type it may simply not have.
-        nothing_found = not any(decisions[t].status is DecisionStatus.DECIDED for t in types if t in decisions)
-        decided_again = (changed, nothing_found)
-    if ctx.online_recheck:
-        rechecked_online = (_found_online(ctx, rec, notes), changed)
-    ctx._note_finished(rows, season, decided_again, rechecked_online)
+    ctx._note_finished(rows)
     failed = outcome is FileOutcome.FAILED
     seconds = _stage_seconds(ctx, notes)
     level = "WARNING" if failed else "INFO"

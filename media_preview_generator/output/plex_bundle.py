@@ -14,6 +14,7 @@ online or to have indexed the file.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from loguru import logger
@@ -22,6 +23,8 @@ from ..servers.base import MediaServer
 from ..utils import sanitize_path
 from .base import BifBundle, OutputAdapter
 from .plex_hash import SourceFileChangedError, calculate_plex_hash, get_source_fingerprint
+
+_BUNDLE_HASH_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class PlexBundleAdapter(OutputAdapter):
@@ -64,7 +67,7 @@ class PlexBundleAdapter(OutputAdapter):
         """
         self._validate_source(bundle)
         bundle_hash = self._server_hash(bundle, server, item_id) or calculate_plex_hash(bundle.canonical_path)
-        return [self._bundle_bif_path(bundle_hash)]
+        return [self.bundle_bif_path(self._plex_config_folder, bundle_hash)]
 
     @staticmethod
     def _server_hash(bundle: BifBundle, server: MediaServer | None, item_id: str | None) -> str | None:
@@ -81,7 +84,9 @@ class PlexBundleAdapter(OutputAdapter):
             for h, remote, part_size in get_parts(item_id, quiet=True)
             if part_size == size and os.path.basename(remote.replace("\\", "/")) == name
         }
-        return hashes.pop() if len(hashes) == 1 else None
+        # The hash becomes a directory name under the Plex config folder, so anything but 40 hex digits is distrusted.
+        server_hash = hashes.pop() if len(hashes) == 1 else None
+        return server_hash if server_hash and _BUNDLE_HASH_RE.fullmatch(server_hash) else None
 
     def publish(self, bundle: BifBundle, output_paths: list[Path], item_id: str | None = None) -> None:
         """Pack ``bundle.frame_dir`` into a BIF file at the first output path.
@@ -133,10 +138,6 @@ class PlexBundleAdapter(OutputAdapter):
         bundle_path = sanitize_path(os.path.join(plex_config_folder, "Media", "localhost", bundle_file))
         indexes_path = sanitize_path(os.path.join(bundle_path, "Contents", "Indexes"))
         return Path(sanitize_path(os.path.join(indexes_path, "index-sd.bif")))
-
-    def _bundle_bif_path(self, bundle_hash: str) -> Path:
-        """Instance-bound shim that calls :meth:`bundle_bif_path`."""
-        return self.bundle_bif_path(self._plex_config_folder, bundle_hash)
 
     @staticmethod
     def _validate_source(bundle: BifBundle) -> None:

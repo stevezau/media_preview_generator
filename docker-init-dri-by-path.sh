@@ -14,8 +14,7 @@
 # is a no-op in that case.
 #
 # Safe on every GPU configuration (idempotent ln -sf; existing symlinks
-# are skipped).  See plan file dapper-plotting-meadow.md for full
-# rationale and upstream references.
+# are skipped).
 set -euo pipefail
 
 [ -d /dev/dri ] || exit 0

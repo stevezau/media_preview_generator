@@ -918,8 +918,6 @@ def create_app(config_dir: str | None = None) -> Flask:
             "api.create_server",
             "api.test_server_connection",
             "api.refresh_server_libraries",
-            "api.fix_jellyfin_trickplay",
-            "api.get_jellyfin_trickplay_status",
             # Vendor auth-flow helpers (Emby/Jellyfin password exchange,
             # Jellyfin Quick Connect ceremony) — same exemption rationale.
             "api.emby_password_auth",

@@ -29,7 +29,7 @@ def _server():
 def test_chapter_toggle_persists_without_enabling_markers_or_losing_helper_key(backend_real_app, backend_real_page):
     url, config_dir = backend_real_app
     page = backend_real_page
-    for previous, desired in [(False, True), (True, False)]:
+    for previous, desired in [(False, True), (True, False), (False, True)]:
         page.goto(url + "/servers")
         page.locator(".edit-server-btn[data-id='plex-edit-test']").click()
         expect(page.locator("#editServerModal")).to_be_visible()
@@ -45,4 +45,5 @@ def test_chapter_toggle_persists_without_enabling_markers_or_losing_helper_key(b
         assert saved["markers"]["plex"]["agent"]["token"] == "chapter-ui-fixture-key-0123456789"
     page.reload()
     page.locator(".edit-server-btn[data-id='plex-edit-test']").click()
-    expect(page.locator("#editPlexChapterThumbnails")).not_to_be_checked()
+    page.locator("[data-bs-target='#edit-tab-processing']").click()
+    expect(page.locator("#editPlexChapterThumbnails")).to_be_checked()

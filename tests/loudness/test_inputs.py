@@ -9,7 +9,7 @@ import pytest
 from media_preview_generator.loudness import inputs, job
 from media_preview_generator.web.jobs import RETRY_STATE_CONFIG_KEYS, JobManager, JobStatus
 
-from .test_job_lifecycle import Lifecycle, lifecycle  # noqa: F401
+from .conftest import Lifecycle
 
 
 def _selection() -> list[str]:
@@ -153,7 +153,7 @@ def test_failed_input_write_creates_no_job_or_partial_selection(tmp_path, monkey
     assert list((tmp_path / "loudness_inputs").iterdir()) == []
 
 
-def test_manifest_runner_processes_only_selected_files(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_manifest_runner_processes_only_selected_files(lifecycle: Lifecycle, monkeypatch):
     monkeypatch.setattr(inputs, "INLINE_FILE_LIMIT", 2)
     lifecycle.api_ready = True
     paths = [lifecycle.add_file(f"chosen-{number}.mkv") for number in range(3)]
@@ -167,7 +167,7 @@ def test_manifest_runner_processes_only_selected_files(lifecycle: Lifecycle, mon
     assert sorted(lifecycle.analyses) == [(path, 1) for path in paths]
 
 
-def test_missing_manifest_fails_job_without_enumerating_other_libraries(lifecycle: Lifecycle, monkeypatch):  # noqa: F811
+def test_missing_manifest_fails_job_without_enumerating_other_libraries(lifecycle: Lifecycle, monkeypatch):
     monkeypatch.setattr(inputs, "INLINE_FILE_LIMIT", 2)
     paths = [lifecycle.add_file(f"chosen-{number}.mkv") for number in range(3)]
     created = job.create_loudness_job(library_name="Selected", priority=2, source="manual", file_paths=paths)

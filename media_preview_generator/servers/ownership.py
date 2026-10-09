@@ -67,6 +67,18 @@ def _normalize(path: str) -> str:
     return unicodedata.normalize("NFC", path.replace("\\", "/").rstrip("/")) + "/"
 
 
+def _swap_prefix(path_fwd: str, from_prefix: str, to_prefix: str) -> str | None:
+    """Replace ``from_prefix`` with ``to_prefix`` at the start of a forward-slashed ``path_fwd``.
+
+    Returns:
+        The translated path, or None when ``path_fwd`` isn't under ``from_prefix``.
+    """
+    from_fwd = from_prefix.replace("\\", "/")
+    if not _normalize(path_fwd).startswith(_normalize(from_fwd)):
+        return None
+    return to_prefix.rstrip("/") + path_fwd[len(from_fwd.rstrip("/")) :]
+
+
 def apply_webhook_prefixes(webhook_path: str, mappings: list[dict[str, Any]]) -> list[str]:
     """Translate a webhook-source path (Sonarr/Radarr view) to candidate local paths.
 
@@ -92,19 +104,14 @@ def apply_webhook_prefixes(webhook_path: str, mappings: list[dict[str, Any]]) ->
     # surviving into os.path.isfile). See GitHub #236.
     webhook_path_fwd = (webhook_path or "").replace("\\", "/")
     candidates: list[str] = []
-    norm = _normalize(webhook_path_fwd)
     for entry in mappings:
         local = entry.get("local_prefix") or ""
         if not local:
             continue
         for wp in entry.get("webhook_prefixes") or []:
-            if not wp:
-                continue
-            wp_fwd = wp.replace("\\", "/")
-            norm_wp = _normalize(wp_fwd)
-            if norm.startswith(norm_wp):
-                tail = webhook_path_fwd[len(wp_fwd.rstrip("/")) :]
-                candidates.append(local.rstrip("/") + tail)
+            swapped = _swap_prefix(webhook_path_fwd, wp, local) if wp else None
+            if swapped is not None:
+                candidates.append(swapped)
     if not candidates:
         candidates.append(webhook_path)
     return candidates
@@ -142,17 +149,14 @@ def path_mapping_candidates(remote_path: str, mappings: list[dict[str, Any]]) ->
     # Convert backslashes up-front on both sides — see apply_webhook_prefixes.
     remote_path_fwd = (remote_path or "").replace("\\", "/")
     candidates: list[tuple[str, str | None]] = []
-    norm = _normalize(remote_path_fwd)
     for entry in mappings:
         remote = entry.get("remote_prefix") or entry.get("plex_prefix") or ""
         local = entry.get("local_prefix") or ""
         if not remote or not local:
             continue
-        remote_fwd = remote.replace("\\", "/")
-        norm_remote = _normalize(remote_fwd)
-        if norm.startswith(norm_remote):
-            tail = remote_path_fwd[len(remote_fwd.rstrip("/")) :]
-            candidates.append((local.rstrip("/") + tail, local.rstrip("/") or "/"))
+        swapped = _swap_prefix(remote_path_fwd, remote, local)
+        if swapped is not None:
+            candidates.append((swapped, local.rstrip("/") or "/"))
     if not candidates:
         candidates.append((remote_path, None))
     return candidates
@@ -174,17 +178,15 @@ def apply_inverse_path_mappings(local_path: str, mappings: list[dict[str, Any]])
         return [local_path]
 
     local_fwd = (local_path or "").replace("\\", "/")
-    norm = _normalize(local_fwd)
     candidates: list[str] = []
     for entry in mappings:
         remote = entry.get("remote_prefix") or entry.get("plex_prefix") or ""
         local = entry.get("local_prefix") or ""
         if not remote or not local:
             continue
-        local_prefix_fwd = local.replace("\\", "/")
-        if norm.startswith(_normalize(local_prefix_fwd)):
-            tail = local_fwd[len(local_prefix_fwd.rstrip("/")) :]
-            candidates.append(remote.rstrip("/") + tail)
+        swapped = _swap_prefix(local_fwd, local, remote)
+        if swapped is not None:
+            candidates.append(swapped)
     if not candidates:
         candidates.append(local_path)
     return candidates

@@ -1,8 +1,7 @@
 """Notification-center surfacing of unhealthy media mounts.
 
 Mirrors the startup WARNING into the dashboard bell so the operator sees
-"this disk looks unmounted" in the UI — not just buried in the log. Born
-from job be0151d2; see project_stale_bindmount_missing_on_disk.
+"this disk looks unmounted" in the UI — not just buried in the log.
 """
 
 from __future__ import annotations

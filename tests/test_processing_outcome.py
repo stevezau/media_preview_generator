@@ -6,7 +6,7 @@ Covers:
   unified MultiServerStatus → ProcessingResult translator.
 - Worker.outcome_counts tracking.
 - WorkerPool outcome aggregation.
-- CLI enhanced logging and misconfiguration warnings.
+- Logging and misconfiguration warnings.
 - JobProgress.outcome field serialization.
 """
 
@@ -324,74 +324,3 @@ class TestSourceGoneOutcomeMapping:
 
         assert fired is False
         mock_logger.warning.assert_not_called()
-
-
-class TestOutcomeInWorkerPoolResult:
-    """Test that WorkerPool includes outcome in its return dict."""
-
-    @patch("media_preview_generator.processing.multi_server.process_canonical_path")
-    def test_process_items_headless_includes_outcome(self, mock_process):
-        """process_items_headless result dict contains an 'outcome' key."""
-        mock_process.return_value = _ms("skipped_bif_exists")
-
-        from media_preview_generator.jobs.worker import WorkerPool
-
-        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
-        config = MagicMock()
-        config.cpu_threads = 1
-        registry = MagicMock()
-        items = [("1", "Movie 1", "movie")]
-        result = pool.process_items_headless(
-            _pi_list_or_passthrough(items),
-            config,
-            registry,
-            title_max_width=30,
-            library_name="Test",
-        )
-
-        assert "outcome" in result
-        assert isinstance(result["outcome"], dict)
-        assert result["outcome"]["skipped_bif_exists"] >= 1
-
-    @patch("media_preview_generator.processing.multi_server.process_canonical_path")
-    def test_outcome_counts_match_items_processed(self, mock_process):
-        """Sum of all outcome values equals total items processed."""
-        results_iter = iter(
-            [
-                _ms("generated"),
-                _ms("skipped_bif_exists"),
-                _ms("generated"),
-            ]
-        )
-        mock_process.side_effect = lambda *args, **kwargs: next(results_iter)
-
-        from media_preview_generator.jobs.worker import WorkerPool
-
-        pool = WorkerPool(gpu_workers=0, cpu_workers=1, selected_gpus=[])
-        config = MagicMock()
-        config.cpu_threads = 1
-        registry = MagicMock()
-        items = [
-            ("1", "Movie 1", "movie"),
-            ("2", "Movie 2", "movie"),
-            ("3", "Movie 3", "movie"),
-        ]
-        result = pool.process_items_headless(
-            _pi_list_or_passthrough(items),
-            config,
-            registry,
-            title_max_width=30,
-            library_name="Test",
-        )
-
-        outcome = result["outcome"]
-        # 3 items processed; outcomes: 2 generated + 1 skipped_bif_exists.
-        # The legacy test tried to mix three distinct ProcessingResult enum
-        # values, but the unified pipeline only produces a subset
-        # (PUBLISHED → GENERATED, SKIPPED → SKIPPED_BIF_EXISTS,
-        # NO_OWNERS → NO_MEDIA_PARTS, FAILED → FAILED). The granular Plex-only
-        # SKIPPED_FILE_NOT_FOUND distinction is gone.
-        total_outcome = sum(outcome.values())
-        assert total_outcome == 3
-        assert outcome["generated"] == 2
-        assert outcome["skipped_bif_exists"] == 1

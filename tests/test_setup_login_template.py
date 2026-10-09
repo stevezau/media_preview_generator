@@ -11,7 +11,6 @@ from flask import render_template
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", str(tmp_path / "auth.json"))
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
     from media_preview_generator.web.app import create_app
     from media_preview_generator.web.settings_manager import reset_settings_manager
 
@@ -141,7 +140,7 @@ class TestSetupPage:
         advanced = setup_html[setup_html.index('id="setupAdvancedDetails"') :]
 
         for control in ("setupAddPathMappingBtn", "setupAddExcludePathBtn"):
-            assert advanced.index(f'id="{control}"') > 0
+            assert f'id="{control}"' in advanced
         assert setup_html.index('id="setupCheckFile"') < setup_html.index('id="setupAdvancedDetails"')
 
     def test_slim_top_bar_replaces_the_app_navbar_during_setup(self, setup_html):

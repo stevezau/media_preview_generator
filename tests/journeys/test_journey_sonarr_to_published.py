@@ -1,18 +1,8 @@
-"""TEST_AUDIT P1.1 — Sonarr POST → debounce → Job → Worker → Plex publish on disk.
+"""Sonarr POST -> debounce -> Job creation, ending at the ``_start_job_async`` boundary.
 
-The audit's flagship integration journey. Drives the full chain from
-HTTP webhook ingestion through to a BIF appearing on disk, mocking only
-at the FFmpeg subprocess + Plex HTTP boundary. Catches regressions at
-ANY seam between modules — webhook handler, debounce timer,
-``_execute_webhook_job``, ``_start_job_async``, orchestrator, worker,
-publisher.
-
-Why this matters: the existing test suite has good unit coverage at each
-seam in isolation (webhooks.py, job_runner.py, worker.py, multi_server.py
-each tested separately) — but no test that exercises the WHOLE chain.
-A regression that breaks the SEAM (e.g. orchestrator stops reading
-``config.webhook_paths``, or job_runner stops forwarding overrides to the
-orchestrator) would not be caught by any existing test.
+Drives HTTP webhook ingestion through the debounce timer and ``_execute_webhook_job``
+with ``_start_job_async`` patched, and asserts the Job and the config overrides handed
+to it. Orchestrator, worker and publisher are covered by their own journeys.
 """
 
 from __future__ import annotations

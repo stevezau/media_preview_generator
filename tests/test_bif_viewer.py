@@ -137,8 +137,6 @@ class TestReadBifMetadata:
 
     def test_reference_bif(self, reference_bif):
         """Validate parsing against the checked-in reference fixture."""
-        if not os.path.isfile(reference_bif):
-            pytest.skip("reference.bif fixture not present")
         meta = read_bif_metadata(reference_bif)
         assert meta.frame_count > 0
         assert meta.frame_interval_ms > 0

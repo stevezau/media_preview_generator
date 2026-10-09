@@ -31,16 +31,6 @@ def test_register_adds_url_when_not_present(fake_account):
     assert "http://host:8080/api/webhooks/plex?token=secret" in result
 
 
-def test_register_embeds_token_when_auth_provided():
-    """The auth token must be appended to the URL Plex stores."""
-    fake = MagicMock()
-    fake.webhooks.side_effect = [[], ["http://host/api/webhooks/plex?token=abc"]]
-    fake.subscriptionActive = True
-    with patch("plexapi.myplex.MyPlexAccount", return_value=fake):
-        pwh.register("token", "http://host/api/webhooks/plex", auth_token="abc")
-    fake.addWebhook.assert_called_once_with("http://host/api/webhooks/plex?token=abc")
-
-
 def test_register_removes_legacy_plex_endpoint_when_targeting_incoming():
     """Re-registering against /api/webhooks/incoming should also remove a
     stale /api/webhooks/plex registration (one-time migration so installs
@@ -86,7 +76,8 @@ def test_register_strips_trailing_slash():
     fake.webhooks.side_effect = [[], ["http://host/api/webhooks/plex?token=t"]]
     fake.subscriptionActive = True
     with patch("plexapi.myplex.MyPlexAccount", return_value=fake):
-        pwh.register("token", "http://host/api/webhooks/plex/", auth_token="t")
+        result = pwh.register("token", "http://host/api/webhooks/plex/", auth_token="t")
+    assert "http://host/api/webhooks/plex?token=t" in result
     fake.addWebhook.assert_called_once_with("http://host/api/webhooks/plex?token=t")
 
 

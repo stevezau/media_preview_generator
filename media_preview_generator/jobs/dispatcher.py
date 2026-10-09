@@ -124,7 +124,7 @@ class JobTracker:
         # Files a GPU worker finished on the CPU because its GPU failed (guarded by _counts_lock); the job summary's
         # "N files ran on the CPU because the GPU failed" line. Not an outcome: those files keep their own outcome.
         self.cpu_fallback_files = 0
-        # D12 — per-server aggregate (one entry per server_id) so the Job
+        # Per-server aggregate (one entry per server_id) so the Job
         # views render a fixed-size summary regardless of file count.
         # Per-file × per-server detail lives in the Files-panel JSONL via
         # record_file_result; duplicating it on the Job row caused the
@@ -465,7 +465,7 @@ class JobTracker:
                 valid.message,
             )
         # record_completion must run exactly once whatever happens above it — a skipped completion leaves
-        # tracker.wait() blocked forever while the job holds its gate slot.
+        # tracker.wait() blocked forever.
         with self._counts_lock:
             self.outcome_counts[valid.outcome_key] = self.outcome_counts.get(valid.outcome_key, 0) + 1
         try:
@@ -515,7 +515,7 @@ class JobTracker:
         return self.done_event.wait(timeout)
 
     def get_result(self) -> dict:
-        """Return a result dict compatible with WorkerPool.process_items_headless."""
+        """Return the per-job result dict: counts, failed paths, cancelled flag and outcome counts."""
         with self._counts_lock:
             failed_paths = list(self.failed_paths)
         return {
@@ -547,6 +547,9 @@ class JobDispatcher:
         self._trackers_lock = threading.RLock()
         self._pick_counter = 0  # Guarded by ``_trackers_lock``.
         self._dispatch_thread: threading.Thread | None = None
+        # Serialises the check-then-start of the dispatch thread and the checking cap: concurrent first
+        # submits from different job threads must not each start their own loop.
+        self._start_lock = threading.Lock()
         self._has_work = threading.Event()
         self._shutdown = False
         # Signalled by worker threads on completion so the dispatch loop
@@ -575,10 +578,9 @@ class JobDispatcher:
         # spawns one short-lived **daemon** thread per check, capped at
         # ``_max_checks`` in flight. Daemon matters: a check that blocks on a
         # hung mount inside process_canonical_path (the same os.path.isfile
-        # the processing worker hits) must NOT keep the process alive — the
-        # legacy worker threads were daemon for exactly this reason. A
-        # non-daemon pool (e.g. ThreadPoolExecutor) would leave a stuck check
-        # blocking interpreter/xdist-worker shutdown ("not properly
+        # the processing worker hits) must NOT keep the process alive — worker
+        # threads are daemon for the same reason. A non-daemon pool (e.g.
+        # ThreadPoolExecutor) would leave a stuck check blocking interpreter/xdist-worker shutdown ("not properly
         # terminated"). On-demand spawn means a 1-item webhook uses 1 thread,
         # not ``_max_checks``; threads exit when their check returns, so
         # nothing accumulates.
@@ -661,6 +663,8 @@ class JobDispatcher:
             tracker.emit_progress(0, force=True)
         except Exception as exc:
             logger.debug("Job {} submit progress callback raised (ignored): {}", job_id, exc)
+        if not items:
+            tracker.done_event.set()
         self._ensure_check_pool_running(config)
         self._has_work.set()
         self._ensure_dispatch_running()
@@ -684,11 +688,12 @@ class JobDispatcher:
 
     def _ensure_check_pool_running(self, config: Config) -> None:
         """Set the checking in-flight cap once, sized from ``scan_workers``."""
-        if self._check_pool_started:
-            return
-        self._max_checks = self._resolve_scan_workers(config)
-        self._check_pool_started = True
-        logger.info("Dispatcher: checking enabled ({} max in-flight)", self._max_checks)
+        with self._start_lock:
+            if self._check_pool_started:
+                return
+            self._max_checks = self._resolve_scan_workers(config)
+            self._check_pool_started = True
+            logger.info("Dispatcher: checking enabled ({} max in-flight)", self._max_checks)
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a job's remaining items in the dispatch queue."""
@@ -790,10 +795,11 @@ class JobDispatcher:
 
     def _ensure_dispatch_running(self) -> None:
         """Start the background dispatch thread if not already running."""
-        if self._dispatch_thread is not None and self._dispatch_thread.is_alive():
-            return
-        self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True, name="job-dispatcher")
-        self._dispatch_thread.start()
+        with self._start_lock:
+            if self._dispatch_thread is not None and self._dispatch_thread.is_alive():
+                return
+            self._dispatch_thread = threading.Thread(target=self._dispatch_loop, daemon=True, name="job-dispatcher")
+            self._dispatch_thread.start()
 
     def _dispatch_loop(self) -> None:
         """Persistent loop: check completions, assign tasks, sleep adaptively.
@@ -953,18 +959,10 @@ class JobDispatcher:
                     tracker.outcome_counts[key] += count
             if worker.last_task_cpu_fallback:
                 tracker.cpu_fallback_files += 1
-        # D12 — fold this task's per-server publisher rows into the
-        # tracker's per-server aggregate (server_id → status counts) and
-        # mirror that fixed-size summary onto the Job. The earlier D7
-        # design appended one publisher row per (file × server), which
-        # made job.publishers grow O(files × servers) — a 500-file
-        # library run blew up the Active Jobs and History sections to
-        # hundreds of rows. The per-file × per-server detail still lives
-        # in the Files-panel JSONL (record_file_result `servers` field).
-        # Shared helper so the full-scan ThreadPoolExecutor path
-        # (orchestrator._dispatch_processable_items) cannot drift from
-        # this aggregate shape — the original 1ecf099 fix patched only
-        # this method and the full-scan path kept appending per-file.
+        # Fold this task's per-server publisher rows into the tracker's per-server aggregate
+        # (server_id → status counts) and mirror that fixed-size summary onto the Job. One row
+        # per (file × server) would grow job.publishers O(files × servers); the per-file ×
+        # per-server detail lives in the Files-panel JSONL (record_file_result `servers` field).
         if worker.last_publishers:
             from .orchestrator import fold_publisher_rows_into_aggregate
 
@@ -1261,7 +1259,6 @@ class JobDispatcher:
                     registry=tracker.registry,
                     config=tracker.config,
                     item_id_by_server=getattr(item, "item_id_by_server", None) or None,
-                    bundle_metadata_by_server=getattr(item, "bundle_metadata_by_server", None) or None,
                     gpu=None,
                     gpu_device_path=None,
                     progress_callback=None,
@@ -1473,12 +1470,8 @@ class JobDispatcher:
                     "fallback_reason": getattr(worker, "fallback_reason", None),
                     # The fallback file's title outlives is_busy: a quick CPU rerun ends before the next poll.
                     "fallback_title": (worker.media_title or "") if fallback_active else "",
-                    # ffmpeg_started + current_phase drive the UI's pre-FFmpeg
-                    # branch. When the dispatcher dropped these (the legacy
-                    # process_items_headless path emitted them, this one did
-                    # not) every dispatcher-driven job got stuck rendering
-                    # "Working…" and hid the speed/ETA chips for the entire
-                    # run — user-reported "I never see ffmpeg %/speed".
+                    # ffmpeg_started + current_phase drive the UI's pre-FFmpeg branch; without them
+                    # the card renders "Working…" and hides the speed/ETA chips for the whole run.
                     "ffmpeg_started": ffmpeg_started,
                     "current_phase": current_phase,
                     "chapter_progress": progress_data.get("chapter_progress") if has_task else None,

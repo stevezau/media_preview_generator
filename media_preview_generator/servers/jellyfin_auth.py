@@ -18,12 +18,10 @@ Both flows surface :class:`JellyfinAuthResult` (an alias of the shared
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 import requests
 import urllib3
-from loguru import logger
 
 from ._mediabrowser_auth import (
     _AUTH_DEVICE_ID,
@@ -47,11 +45,6 @@ class QuickConnectInitiation:
 
     code: str
     secret: str
-
-
-def _device_id() -> str:
-    """Namespaced device id shared by Emby and Jellyfin sessions."""
-    return _AUTH_DEVICE_ID
 
 
 def authenticate_jellyfin_with_password(
@@ -100,7 +93,7 @@ def initiate_quick_connect(
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     headers = {
-        "Authorization": mediabrowser_authorization_header(device_id=device_id_override or _device_id()),
+        "Authorization": mediabrowser_authorization_header(device_id=device_id_override or _AUTH_DEVICE_ID),
         "Accept": "application/json",
     }
 
@@ -153,7 +146,7 @@ def poll_quick_connect(
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     headers = {
-        "Authorization": mediabrowser_authorization_header(device_id=device_id_override or _device_id()),
+        "Authorization": mediabrowser_authorization_header(device_id=device_id_override or _AUTH_DEVICE_ID),
         "Accept": "application/json",
     }
 
@@ -166,7 +159,7 @@ def poll_quick_connect(
             verify=verify_ssl,
         )
     except requests.RequestException as exc:
-        return False, f"Quick Connect poll failed: {exc}"
+        return False, f"Quick Connect poll failed: {type(exc).__name__}"
 
     if response.status_code == 401:
         return False, "Jellyfin rejected the poll (401)"
@@ -204,7 +197,7 @@ def exchange_quick_connect(
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     headers = {
-        "Authorization": mediabrowser_authorization_header(device_id=device_id_override or _device_id()),
+        "Authorization": mediabrowser_authorization_header(device_id=device_id_override or _AUTH_DEVICE_ID),
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
@@ -250,42 +243,3 @@ def exchange_quick_connect(
         server_name=str(user.get("ServerName") or "") or None,
         message="Authenticated via Quick Connect",
     )
-
-
-def quick_connect_blocking(
-    *,
-    base_url: str,
-    secret: str,
-    verify_ssl: bool = True,
-    timeout: int = 30,
-    poll_interval: float = 2.0,
-    deadline_seconds: int = 300,
-    device_id_override: str | None = None,
-) -> JellyfinAuthResult:
-    """Synchronous helper: poll Quick Connect until approved or deadline.
-
-    Useful for non-UI callers (tests, the integration setup script).
-    The web wizard normally orchestrates :func:`poll_quick_connect`
-    itself so the user can see "still waiting" UI state.
-    """
-    deadline = time.time() + deadline_seconds
-    while time.time() < deadline:
-        approved, _ = poll_quick_connect(
-            base_url=base_url,
-            secret=secret,
-            verify_ssl=verify_ssl,
-            timeout=timeout,
-            device_id_override=device_id_override,
-        )
-        if approved:
-            return exchange_quick_connect(
-                base_url=base_url,
-                secret=secret,
-                verify_ssl=verify_ssl,
-                timeout=timeout,
-                device_id_override=device_id_override,
-            )
-        time.sleep(poll_interval)
-
-    logger.info("Quick Connect deadline reached after {}s without approval", deadline_seconds)
-    return JellyfinAuthResult(ok=False, message="Quick Connect deadline reached without approval")

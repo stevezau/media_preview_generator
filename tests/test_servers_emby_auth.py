@@ -7,16 +7,16 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+from media_preview_generator.servers._mediabrowser_auth import mediabrowser_authorization_header
 from media_preview_generator.servers.emby_auth import (
     EmbyAuthResult,
-    _emby_authorization_header,
     authenticate_emby_with_password,
 )
 
 
 class TestAuthorizationHeader:
     def test_includes_required_fields(self):
-        header = _emby_authorization_header(device_id="abc123")
+        header = mediabrowser_authorization_header(device_id="abc123")
         # Emby/Jellyfin reject auth without all four fields.
         assert "Client=" in header
         assert "Device=" in header

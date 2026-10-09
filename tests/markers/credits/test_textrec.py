@@ -1,5 +1,5 @@
 """Reading a card's words (``textrec``): the pinned model, rapidocr's line pre- and post-processing, the reading order,
-and the reader over a detector's boxes (spec §5.4, "Prose cards")."""
+and the reader over a detector's boxes."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ import os
 import numpy as np
 import pytest
 
-textrec = pytest.importorskip("media_preview_generator.markers.credits.textrec")
-from media_preview_generator.markers.credits import textdet, textdet_helper  # noqa: E402
+from media_preview_generator.markers.credits import textdet, textdet_helper, textrec
 
 REC_BYTES = b"rec-model"
 
@@ -43,7 +42,7 @@ class TestModel:
     def test_the_helper_looks_for_the_pinned_file_where_the_image_puts_it(self):
         assert textdet_helper.DEFAULT_REC_MODEL_PATH == f"/app/models/{textrec.MODEL_FILE}"
 
-    def test_both_sessions_run_the_same_basic_graph(self, monkeypatch):
+    def test_both_sessions_run_the_same_basic_graph(self):
         # The extended level fuses each Conv with its activation, which ONNX Runtime's WebGPU provider can't build:
         # the GPU and the CPU must run the same graph for the self-test to compare like with like.
         opts = textrec._options(2)

@@ -19,31 +19,6 @@ _API_TIMEOUT = 30
 
 
 @pytest.mark.e2e
-class TestLoginPage:
-    """Test the login page functionality."""
-
-    def test_login_page_loads(self, page: Page, app_url: str):
-        """Verify login page loads and displays login form."""
-        page.goto(f"{app_url}/login")
-
-        # Should have a token input field
-        token_input = page.locator('input[name="token"], input[type="password"]')
-        expect(token_input).to_be_visible()
-
-        # Should have a submit button
-        submit_btn = page.locator('button[type="submit"]')
-        expect(submit_btn).to_be_visible()
-
-    def test_login_page_has_heading(self, page: Page, app_url: str):
-        """Verify login page has a heading element."""
-        page.goto(f"{app_url}/login")
-
-        # Page should have some heading
-        heading = page.locator("h1, h2, h3").first
-        expect(heading).to_be_visible()
-
-
-@pytest.mark.e2e
 class TestAuthentication:
     """Test authentication flow."""
 

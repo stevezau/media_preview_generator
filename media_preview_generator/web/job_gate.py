@@ -102,6 +102,7 @@ class JobGate:
         self._requests: dict[str, _Request] = {}
         self._refresh_lock = threading.Lock()
         self._refresh_at = 0.0
+        self._refreshed_epoch = -1
         self._policy_epoch = 0
 
     def register_request(
@@ -198,7 +199,7 @@ class JobGate:
     def _refresh_requests_once(self) -> None:
         with self._cond:
             epoch = self._policy_epoch
-            if time.monotonic() < self._refresh_at and getattr(self, "_refreshed_epoch", -1) == epoch:
+            if time.monotonic() < self._refresh_at and self._refreshed_epoch == epoch:
                 return
             queued = {entry[2] for entry in self._heap}
             snapshots = [(request, request.revision) for request in self._requests.values() if request.token in queued]

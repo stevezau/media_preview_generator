@@ -30,6 +30,7 @@ from .ffmpeg_runner import (
     has_hevc_parameter_failure,
     is_matroska_corruption_line,
 )
+from .filter_chain import build_hdr10_zscale_chain
 from .generator import CancellationError, MediaInfo
 from .hdr_detection import is_dv_no_backward_compat, is_hdr_transfer
 
@@ -349,12 +350,7 @@ def extract_chapter_frame(
         mapped = choices.get(value.strip().lower()) if isinstance(value, str) else None
         if mapped:
             input_colors.append(f"{option}={mapped}")
-    zscale_input = ":".join([*input_colors, "t=linear", "npl=100"])
-    tonemap = (
-        f"zscale={zscale_input},format=gbrpf32le,"
-        f"zscale=p=bt709,tonemap={config.tonemap_algorithm}:desat=0,"
-        "zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
-    )
+    tonemap = build_hdr10_zscale_chain(config.tonemap_algorithm, input_colors)
     runner_options = dict(
         video_file=video_path,
         output_folder=str(output.parent),

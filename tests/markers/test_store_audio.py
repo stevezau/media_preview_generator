@@ -19,13 +19,6 @@ from media_preview_generator.markers.store import (
 )
 
 
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
-
-
 def _file(store, name="/m/S01E01.mkv", size=100, mtime=1):
     return store.upsert_file(FileIdentity(name, size, mtime), duration_ms=1_300_000, season_key="/m", is_movie=False)
 
@@ -262,15 +255,15 @@ class TestEndPictureFailures:
     def test_the_fingerprint_sweep_forgets_a_gone_files_failure(self, store):
         a = _file(store, "/m/a.mkv")
         _fp(store, a)
-        store.record_end_picture_failure(FileIdentity(a.canonical_path, a.size, a.mtime_ns), self.NOW,
-                                         forget_before=self.NOW)  # fmt: skip
+        identity = FileIdentity(a.canonical_path, a.size, a.mtime_ns)
+        store.record_end_picture_failure(identity, self.NOW, forget_before=self.NOW)
         (check,) = store.fingerprint_checks(10)
         store.finish_fingerprint_checks(check.file_id, [check])
-        assert store.end_picture_failed_at(FileIdentity(a.canonical_path, a.size, a.mtime_ns)) is None
+        assert store.end_picture_failed_at(identity) is None
 
 
 class TestFilesDecidedByOnlineAndServerMarkers:
-    """The files the decide-again job lists after settings v18: an unlocked intro or credits decided by an IntroDB or
+    """The files the decide-again job lists: an unlocked intro or credits decided by an IntroDB or
     TheIntroDB answer with a server's own marker and no source that reads the file (such a pair can be a marker made
     for an earlier file and online times from a release at the other speed)."""
 
@@ -334,7 +327,7 @@ class TestFilesDecidedByOnlineAndServerMarkers:
 
 
 class TestFilesWithSeasonAudioIntro:
-    """The files the decide-again job lists after settings v17: an unlocked intro decided with season audio."""
+    """The files the decide-again job lists: an unlocked intro decided with season audio."""
 
     @pytest.mark.parametrize(
         ("decided_by", "locked", "listed"),
@@ -383,7 +376,13 @@ class TestRecordMember:
     def test_a_file_never_seen_is_added_with_its_chapters(self, store):
         rec = self._record(store, 100, 1)
         assert (rec.canonical_path, rec.size, rec.mtime_ns, rec.duration_ms, rec.season_key, rec.is_movie) == (
-            "/m/S01E02.mkv", 100, 1, 1_300_000, "/m", False)  # fmt: skip
+            "/m/S01E02.mkv",
+            100,
+            1,
+            1_300_000,
+            "/m",
+            False,
+        )
         assert store.get_evidence(rec.id) == self.CHAPTERS
         assert store.evidence_version(rec.id, Source.CHAPTERS) == 7
         assert store.get_frame_rate(rec.id) == (True, 25.0)
@@ -580,7 +579,7 @@ class TestFrameRates:
         ids=["unread-to-25", "25-to-film", "25-to-none", "same-rate"],
     )
     def test_a_changed_rate_drops_the_files_matched_pairs(self, store, first, second, dropped):
-        # Its pairs may have been matched at another speed (spec §5.3 "Two playback speeds").
+        # Its pairs may have been matched at another speed.
         a, b = self._paired(store)
         if first is not None:
             store.set_frame_rate(b.id, first, identity=(b.size, b.mtime_ns))
@@ -590,12 +589,15 @@ class TestFrameRates:
 
     def test_a_member_recorded_with_a_new_rate_drops_its_matched_pairs(self, store):
         a, b = self._paired(store)
-        store.record_member(FileIdentity(b.canonical_path, b.size, b.mtime_ns), duration_ms=1_300_000,
-                            season_key="/m", chapters=[], chapter_version=7, frame_rate=25.0)  # fmt: skip
+        identity = FileIdentity(b.canonical_path, b.size, b.mtime_ns)
+        store.record_member(
+            identity, duration_ms=1_300_000, season_key="/m", chapters=[], chapter_version=7, frame_rate=25.0
+        )
         assert store.get_season_pair(a.id, b.id, 6) is None
         _pair(store, a, b, [(1.0, 20.0, 3.0, 22.0)], version=6)
-        store.record_member(FileIdentity(b.canonical_path, b.size, b.mtime_ns), duration_ms=1_300_000,
-                            season_key="/m", chapters=[], chapter_version=7, frame_rate=25.0)  # fmt: skip
+        store.record_member(
+            identity, duration_ms=1_300_000, season_key="/m", chapters=[], chapter_version=7, frame_rate=25.0
+        )
         assert store.get_season_pair(a.id, b.id, 6) is not None  # the same rate again
 
 

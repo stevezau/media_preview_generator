@@ -183,15 +183,13 @@ def test_restored_tracker_keeps_success_failure_counts_without_repeating_finishe
     assert tracker.cpu_fallback_files == 3
 
 
-def test_checkpoint_drops_stale_bundle_metadata_and_rejects_foreign_reference(tmp_path):
+def test_checkpoint_rejects_foreign_reference(tmp_path):
     from media_preview_generator.jobs.checkpoints import item_descriptor
 
-    work = ProcessableItem(
-        "/media/movie", "plex", {"plex": "42"}, bundle_metadata_by_server={"plex": (("old", "file"),)}
-    )
+    work = ProcessableItem("/media/movie", "plex", {"plex": "42"})
     snapshot = {"kind": "previews", "items": [item_descriptor(work)], "state": {}}
     ref = write_checkpoint(tmp_path, "one", snapshot)
-    assert not checkpoint_items(read_checkpoint(tmp_path, "one", ref))[0].bundle_metadata_by_server
+    assert checkpoint_items(read_checkpoint(tmp_path, "one", ref))[0].canonical_path == "/media/movie"
     with pytest.raises(ValueError):
         read_checkpoint(tmp_path, "two", ref)
     with pytest.raises(ValueError):

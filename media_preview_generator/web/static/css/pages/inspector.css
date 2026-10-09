@@ -159,14 +159,10 @@ html[data-bs-theme="light"] .insp {
 .insp .btn.insp-btn,
 .insp .btn.insp-btn-primary,
 .insp .btn.insp-btn-danger {
-    height: 44px;
-    padding: 0 16px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 8px;
-    border-radius: 10px;
-    font: 500 14px var(--insp-sans);
     white-space: nowrap;
 }
 
@@ -198,7 +194,6 @@ html[data-bs-theme="light"] .insp {
 }
 
 .insp .btn.insp-btn-primary {
-    padding: 0 20px;
     background: var(--insp-amber);
     color: var(--insp-amber-ink);
     border: 1px solid var(--insp-amber);
@@ -216,12 +211,6 @@ html[data-bs-theme="light"] .insp {
     background: transparent;
     color: var(--insp-bad-text);
     border: 1px solid var(--insp-bad);
-}
-
-.insp .btn.insp-btn-danger:hover,
-.insp .btn.insp-btn-danger:focus-visible {
-    background: var(--insp-bad);
-    color: #ffffff;
 }
 
 .insp .btn:disabled {
@@ -272,18 +261,13 @@ html[data-bs-theme="light"] .insp {
 .insp-seg {
     display: inline-flex;
     padding: 3px;
-    background: var(--insp-card);
     border: 1px solid var(--insp-line);
-    border-radius: 10px;
 }
 
 .insp-seg-btn {
-    height: 34px;
-    padding: 0 14px;
     background: transparent;
     color: var(--insp-muted);
     border: 0;
-    border-radius: 8px;
     font: 500 13px var(--insp-sans);
     white-space: nowrap;
 }
@@ -293,7 +277,6 @@ html[data-bs-theme="light"] .insp {
 }
 
 .insp-seg-btn.active {
-    background: var(--insp-raised-2);
     color: var(--insp-text);
     font-weight: 600;
 }
@@ -304,16 +287,11 @@ html[data-bs-theme="light"] .insp {
     align-items: center;
     gap: 6px;
     padding: 0 10px;
-    background: var(--insp-raised);
-    border: 1px solid var(--insp-line-2);
-    border-radius: 12px;
     white-space: nowrap;
 }
 
 .insp-chip.is-locked {
-    background: var(--insp-amber-soft);
     border-color: var(--insp-amber-line);
-    color: var(--insp-amber-text);
 }
 
 .insp-dot {
@@ -351,11 +329,8 @@ html[data-bs-theme="light"] .insp {
 }
 
 .insp-pill {
-    height: 22px;
     display: inline-flex;
     align-items: center;
-    padding: 0 8px;
-    border-radius: 11px;
     font-size: 12px;
     font-weight: 600;
     white-space: nowrap;
@@ -578,12 +553,6 @@ html[data-bs-theme="light"] .insp {
     color: var(--insp-faint);
 }
 
-button.insp-row:hover,
-button.insp-row:focus-visible,
-.insp-row.is-open {
-    background: var(--insp-raised);
-}
-
 button.insp-row:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
@@ -603,38 +572,26 @@ button.insp-row:focus-visible {
 .insp-row .bi-chevron-right,
 .insp-row .bi-chevron-down {
     justify-self: end;
-    color: var(--insp-text-2);
 }
 
 .insp-show {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 18px 20px;
     border-bottom: 1px solid var(--insp-line);
 }
 
 .insp-seasons {
     display: flex;
-    gap: 8px;
     flex-wrap: wrap;
 }
 
-.insp .insp-seasons .btn.insp-btn {
-    height: 40px;
-    padding: 0 14px;
-    border-radius: 8px;
-}
-
 .insp .insp-seasons .btn.insp-btn.active {
-    background: var(--insp-line);
     border-color: var(--insp-amber);
     font-weight: 600;
 }
 
 .insp-episodes {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 8px;
 }
 
@@ -642,18 +599,9 @@ button.insp-row:focus-visible {
     display: flex;
     flex-direction: column;
     gap: 3px;
-    padding: 10px 12px;
-    background: var(--insp-raised);
-    border: 1px solid transparent;
     border-radius: 8px;
     color: var(--insp-text);
     text-align: left;
-}
-
-.insp-episode:hover,
-.insp-episode:focus-visible {
-    background: var(--insp-raised-2);
-    border-color: var(--insp-control);
 }
 
 .insp-episode:focus-visible {
@@ -662,13 +610,11 @@ button.insp-row:focus-visible {
 }
 
 .insp-episode-code {
-    font-size: 14px;
     font-weight: 600;
 }
 
 .insp-episode-state {
     font-size: 12px;
-    color: var(--insp-muted);
 }
 
 /* --- A file: back link, banner, header, confirm bars ------------------- */
@@ -688,13 +634,9 @@ button.insp-row:focus-visible {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    height: 36px;
-    padding: 0 14px;
     background: transparent;
     border: 1px solid var(--insp-line-2);
-    border-radius: 8px;
     color: var(--insp-text-2);
-    font-size: 14px;
 }
 
 .insp-back:hover,
@@ -714,7 +656,6 @@ button.insp-row:focus-visible {
     padding: 12px 16px;
     background: var(--insp-banner-bg);
     border: 1px solid var(--insp-banner-line);
-    border-radius: 10px;
     font-size: 14px;
 }
 
@@ -758,16 +699,7 @@ button.insp-row:focus-visible {
 
 .insp-title {
     margin: 0;
-    font-size: 34px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    line-height: 1.15;
     overflow-wrap: anywhere;
-}
-
-.insp-title-sub {
-    font-size: 22px;
-    color: var(--insp-muted-2);
 }
 
 .insp-head-chips {
@@ -799,9 +731,7 @@ button.insp-row:focus-visible {
     display: flex;
     flex-wrap: wrap;
     justify-content: flex-end;
-    gap: 10px;
     flex-shrink: 0;
-    padding-top: 22px;
 }
 
 .insp-confirm-bar {
@@ -811,9 +741,7 @@ button.insp-row:focus-visible {
     flex-wrap: wrap;
     gap: 16px;
     padding: 16px 22px;
-    background: var(--insp-card);
     border: 1px solid var(--insp-amber-line);
-    border-radius: 12px;
 }
 
 .insp-confirm-title {
@@ -840,11 +768,6 @@ button.insp-row:focus-visible {
     color: var(--insp-muted);
 }
 
-.insp-scope .insp-seg-btn {
-    padding: 0 16px;
-    font-size: 14px;
-}
-
 .insp-loading {
     display: flex;
     align-items: center;
@@ -860,14 +783,8 @@ button.insp-row:focus-visible {
 }
 
 .insp-message-title {
-    font-size: 18px;
     font-weight: 600;
     margin-bottom: 4px;
-}
-
-.insp-message-text {
-    font-size: 15px;
-    color: var(--insp-text-2);
 }
 
 .insp-empty-strip {
@@ -894,24 +811,17 @@ button.insp-row:focus-visible {
 .insp-stat {
     display: flex;
     flex-direction: column;
-    gap: 6px;
     min-width: 0;
-    padding: 16px 18px;
     background: var(--insp-card);
     border: 1px solid var(--insp-line);
     border-radius: 12px;
 }
 
 .insp-stat-label {
-    font-size: 12px;
-    font-weight: 600;
     letter-spacing: 0.06em;
-    color: var(--insp-muted-2);
 }
 
 .insp-stat-title {
-    font-size: 19px;
-    font-weight: 600;
     overflow-wrap: anywhere;
 }
 
@@ -958,18 +868,9 @@ button.insp-row:focus-visible {
     gap: 10px;
 }
 
-.insp-tl-range {
-    font-size: 13px;
-    color: var(--insp-muted-2);
-}
-
 .insp-tl-note {
     font-size: 13px;
     color: var(--insp-muted);
-}
-
-.insp-tl-title .insp-legend {
-    margin-left: 14px;
 }
 
 .insp-jumps {
@@ -2005,33 +1906,11 @@ button.insp-frame:focus-visible {
 
 .insp-ev-icon.is-used,
 .insp-ev-icon.is-locked {
-    background: var(--insp-amber);
     border-color: var(--insp-amber);
-    color: var(--insp-amber-ink);
 }
 
 .insp-ev-icon.is-warn {
     border-color: var(--insp-amber-line);
-    color: var(--insp-amber-fg);
-}
-
-.insp-ev-icon.is-own {
-    border: 1.5px solid var(--insp-slate);
-    color: var(--insp-slate);
-}
-
-.insp-ev-name {
-    font-size: 15px;
-    font-weight: 500;
-}
-
-.insp-ev-found {
-    font-size: 14px;
-}
-
-.insp-ev:has(.insp-ev-icon.is-used) .insp-ev-note,
-.insp-ev:has(.insp-ev-icon.is-locked) .insp-ev-note {
-    color: var(--insp-amber-fg);
 }
 
 .insp-notchecked {

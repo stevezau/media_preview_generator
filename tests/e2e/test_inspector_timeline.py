@@ -42,6 +42,21 @@ def _seconds(text: str) -> int:
     return total
 
 
+def _wait_now_near(page: Page, seconds: float, tolerance: int = 10) -> None:
+    """Wait (retrying) until #inspNow shows a time within ``tolerance`` seconds of ``seconds``."""
+    page.wait_for_function(
+        """([target, tol]) => {
+            const text = document.getElementById('inspNow').textContent.trim();
+            if (!/^\\d+(:\\d+)*$/.test(text)) return false;
+            const secs = text.split(':').reduce((acc, part) => acc * 60 + Number(part), 0);
+            return Math.abs(secs - target) <= tol;
+        }""",
+        arg=[seconds, tolerance],
+        timeout=5000,
+    )
+    assert abs(_seconds(page.locator("#inspNow").inner_text()) - seconds) <= tolerance
+
+
 def _tile(page: Page, key: str):
     return page.locator(f"#inspTiles [data-tile='{key}']")
 
@@ -169,8 +184,7 @@ class TestCheckedFilm:
         authed_page.mouse.click(box["x"] + box["width"] * 0.25, box["y"] + box["height"] / 2)
         # A quarter of 2:16:18, to within a pixel of the bar (about 7 s) and one preview frame.
         expect(authed_page.locator("#inspNow")).not_to_have_text("2:09:26")
-        authed_page.wait_for_timeout(700)
-        assert abs(_seconds(authed_page.locator("#inspNow").inner_text()) - fx.FILM_MS / 4000) <= 10
+        _wait_now_near(authed_page, fx.FILM_MS / 4000)
         expect(authed_page.locator("#inspOvNow")).to_have_text(authed_page.locator("#inspNow").inner_text())
         expect(authed_page.locator("#inspNowTag")).to_have_text("Story")
 
@@ -204,22 +218,21 @@ class TestCheckedFilm:
         authed_page.mouse.move(box["x"] + box["width"] * 0.4, y, steps=6)
         # The strip follows the pointer before the button is let go: two fifths of 2:16:18, within a pixel and a frame.
         expect(now).not_to_have_text("2:09:26")
-        authed_page.wait_for_timeout(200)
-        assert abs(_seconds(now.inner_text()) - fx.FILM_MS * 0.4 / 1000) <= 10
+        _wait_now_near(authed_page, fx.FILM_MS * 0.4 / 1000)
         expect(bar).to_have_class(re.compile(r"\bis-scrubbing\b"))
         authed_page.mouse.move(box["x"] + box["width"] * 0.5, y, steps=6)
         authed_page.mouse.up()
 
-        authed_page.wait_for_timeout(200)
-        assert abs(_seconds(now.inner_text()) - fx.FILM_MS * 0.5 / 1000) <= 10
+        _wait_now_near(authed_page, fx.FILM_MS * 0.5 / 1000)
         expect(bar).not_to_have_class(re.compile(r"\bis-scrubbing\b"))
         assert authed_page.evaluate("window.__barClicks") == [False]
         expect(authed_page.locator("#inspFrameDialog")).not_to_be_visible()
 
-        # A plain click afterwards still jumps.
+        # A plain click afterwards still jumps. The drag swallows only the click that ends it, cleared by a
+        # setTimeout(0); Chrome can run input before timers, so let one timer task pass before clicking.
+        authed_page.evaluate("() => new Promise((resolve) => setTimeout(resolve, 0))")
         authed_page.mouse.click(box["x"] + box["width"] * 0.25, y)
-        authed_page.wait_for_timeout(700)
-        assert abs(_seconds(now.inner_text()) - fx.FILM_MS * 0.25 / 1000) <= 10
+        _wait_now_near(authed_page, fx.FILM_MS * 0.25 / 1000)
         assert authed_page.evaluate("window.__barClicks") == [False, True]
 
     def test_a_touch_drag_along_the_overview_bar_scrubs_too(self, authed_page: Page, app_url: str) -> None:
@@ -243,8 +256,7 @@ class TestCheckedFilm:
             [box["x"] + box["width"] * 0.1, box["x"] + box["width"] * 0.75, box["y"] + box["height"] / 2],
         )
 
-        authed_page.wait_for_timeout(200)
-        assert abs(_seconds(authed_page.locator("#inspNow").inner_text()) - fx.FILM_MS * 0.75 / 1000) <= 10
+        _wait_now_near(authed_page, fx.FILM_MS * 0.75 / 1000)
         expect(bar).not_to_have_class(re.compile(r"\bis-scrubbing\b"))
 
     def test_the_timeline_info_says_the_bar_can_be_dragged(self, authed_page: Page, app_url: str) -> None:
@@ -342,8 +354,8 @@ class TestLongFilm:
         api = fx.install(authed_page, _api_with(fx.long_film()))
         _open(authed_page, app_url, fx.LONG_FILM)
         expect(authed_page.locator("#inspFrameText")).to_have_text("preview frame 5,251 of 5,400 · one every 2 s")
-        authed_page.wait_for_timeout(600)
         tiles = authed_page.locator("#inspStrip .insp-tl-frame")
+        expect(tiles.first).to_be_visible()
         assert tiles.count() <= 40
         # Beside the overview's thumbnails, every image asked for is a tile near 2:55:00 (frame 5,250).
         near = [i for i in api.image_requests if abs(i - 5250) <= 40]
@@ -356,7 +368,7 @@ class TestLongFilm:
         assert bar
         authed_page.mouse.click(bar["x"] + 0.5, bar["y"] + 10)
         expect(authed_page.locator("#inspNow")).to_have_text(re.compile(r"^0:0\d$"))
-        authed_page.wait_for_timeout(600)
+        expect(tiles.first).to_be_visible()
         assert tiles.count() <= 40
         assert len(api.image_requests) - before <= 40
         # The scroll width holds every frame, but the page holds only a window of them.

@@ -541,7 +541,7 @@ def bif_search():
         results.append(_item_to_result(item, plex_url, plex_token, plex_config, verify_ssl, req))
         return True
 
-    # --- Phase 1: expand "show" hubs into individual episodes -----------
+    # --- Expand "show" hubs into individual episodes -----------
     for hub in hubs:
         if hub.get("type") != "show":
             continue
@@ -568,7 +568,7 @@ def bif_search():
             except req.RequestException as e:
                 logger.debug("BIF viewer: Failed to fetch episodes for {}: {}", show_key, e)
 
-    # --- Phase 2: direct movie/episode hub hits (no SxxExx filter) ------
+    # --- Direct movie/episode hub hits (no SxxExx filter) ------
     if season_filter is None:
         for hub in hubs:
             if hub.get("type") not in ("movie", "episode"):
@@ -655,7 +655,7 @@ def bif_frame():
         jpeg_data,
         mimetype="image/jpeg",
         headers={
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": "private, max-age=3600",
             "Content-Length": str(len(jpeg_data)),
         },
     )
@@ -781,7 +781,7 @@ def bif_servers_search(server_id: str):
     try:
         # Use the vendor's native search API via MediaServer.search_items.
         # Pre-fix this loop walked every library and every item client-side
-        # (D4 — 13.6s for a single-word query against a 119k-item Plex
+        # (13.6s for a single-word query against a 119k-item Plex
         # install). Each vendor adapter overrides search_items to use its
         # own server-side index — Plex /hubs/search via library.search(),
         # Emby/Jellyfin /Items?searchTerm=…
@@ -911,7 +911,7 @@ def _resolve_previews_for_item(item, server_cfg) -> list[dict]:
 
         plex_url = server_cfg.url or ""
         plex_token = str((server_cfg.auth or {}).get("token") or "")
-        plex_config = _get_plex_config_folder()
+        plex_config = str(output_cfg.get("plex_config_folder") or "").strip() or _get_plex_config_folder()
         parts: list[dict] = []
         try:
             parts = _resolve_bif_for_item_all_parts(
@@ -1073,7 +1073,10 @@ def trickplay_info():
     # know it from disk (Jellyfin tracks it in its DB) so we default to
     # 10000 — matches our generator's default and is overridable by the
     # caller adding ``?interval_ms=`` to the request.
-    interval_ms = int(request.args.get("interval_ms") or 10000)
+    try:
+        interval_ms = int(request.args.get("interval_ms") or 10000)
+    except ValueError:
+        return jsonify({"error": "interval_ms must be an integer"}), 400
 
     return jsonify(
         {
@@ -1156,14 +1159,14 @@ def trickplay_frame():
             buf = BytesIO()
             tile.save(buf, format="JPEG", quality=85)
             jpeg_bytes = buf.getvalue()
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
         return jsonify({"error": f"Could not slice tile: {exc}"}), 500
 
     return Response(
         jpeg_bytes,
         mimetype="image/jpeg",
         headers={
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": "private, max-age=3600",
             "Content-Length": str(len(jpeg_bytes)),
         },
     )

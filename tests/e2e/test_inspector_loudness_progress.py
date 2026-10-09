@@ -18,7 +18,7 @@ from media_preview_generator.loudness import job
 from media_preview_generator.servers.plex import PlexServer
 from media_preview_generator.web.app import socketio
 from media_preview_generator.web.jobs import JobStatus
-from tests.loudness.test_job_lifecycle import lifecycle  # noqa: F401
+from tests.loudness.conftest import lifecycle  # noqa: F401
 from tests.test_api_inspector import _reset_singletons, app, authed_client, client  # noqa: F401
 
 

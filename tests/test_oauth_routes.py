@@ -1,7 +1,5 @@
 """
-Tests for Plex OAuth API routes.
-
-Tests the OAuth authentication flow and settings API endpoints.
+Tests for the settings, setup wizard, Plex server/PIN, auth-token and worker-status API routes.
 """
 
 import json
@@ -39,21 +37,6 @@ def flask_app(tmp_path, mock_auth_config):
     return app
 
 
-@pytest.fixture
-def client(flask_app):
-    """Create test client."""
-    return flask_app.test_client()
-
-
-@pytest.fixture
-def auth_headers(flask_app):
-    """Get auth headers for API calls."""
-    from media_preview_generator.web.auth import get_auth_token
-
-    token = get_auth_token()
-    return {"X-Auth-Token": token}
-
-
 class TestSettingsAPIRoutes:
     """Tests for settings API endpoints."""
 
@@ -62,7 +45,7 @@ class TestSettingsAPIRoutes:
 
         The fixture seeds only ``setup_complete=True``; everything else must
         come back at the documented defaults baked into ``get_settings``
-        (api_settings.py:259). Pinning the actual values catches a regression
+        (api_settings.py). Pinning the actual values catches a regression
         where a default flips silently — key-presence alone passes even if
         ``thumbnail_interval`` quietly switched to None.
         """
@@ -76,8 +59,8 @@ class TestSettingsAPIRoutes:
         # - gpu_threads is computed from gpu_config (empty -> 0)
         # - thumbnail_interval default is 10s -- the BIF/Plex community
         #   convention and the value every other site in the codebase
-        #   converged on after #238 (settings_manager.py:344,
-        #   config/__init__.py:509, settings.html, docs/reference.md)
+        #   converged on after #238 (settings_manager.py,
+        #   config/__init__.py, settings.html, docs/reference.md)
         assert data["plex_url"] == ""
         assert data["gpu_threads"] == 0
         assert data["thumbnail_interval"] == 10
@@ -199,6 +182,12 @@ class TestSetupRoutes:
 
     def test_complete_setup(self, client, auth_headers):
         """Test completing the setup wizard."""
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        # The fixture marks setup complete; clear it so the endpoint has to do the work.
+        get_settings_manager().set("setup_complete", False)
+        assert not get_settings_manager().is_setup_complete()
+
         # First save some settings
         client.post(
             "/api/settings",
@@ -361,27 +350,20 @@ class TestJobLogsAndWorkers:
     def test_get_worker_statuses(self, client, auth_headers):
         """Worker-statuses endpoint returns the contract shape, not just a list.
 
-        Audit fix — the original assertion (``isinstance(workers, list)``)
-        is tautological: a response of ``{"workers": []}`` always passes
-        even when there are real workers being silently dropped. Verify
-        the route returns a well-shaped envelope so a regression that
-        flipped the field name (e.g. ``worker_statuses``) or returned a
-        bare list at top level would fail.
+        A bare ``isinstance(workers, list)`` passes for ``{"workers": []}`` even
+        when real workers are dropped, so a seeded worker must come back.
         """
+        from media_preview_generator.web.jobs import WorkerStatus, get_job_manager
+
+        get_job_manager().update_worker_status("cpu-1", WorkerStatus(worker_id=1, status="processing"))
+
         response = client.get("/api/jobs/workers", headers=auth_headers)
+
         assert response.status_code == 200
-        data = json.loads(response.data)
-        # Stable envelope shape — caller-side JS depends on this.
-        assert isinstance(data, dict), f"expected dict envelope, got {type(data).__name__}"
-        assert "workers" in data
-        assert isinstance(data["workers"], list)
-        # When workers ARE present, each must carry the dispatcher's
-        # contract shape — but the test fixture has no workers, so just
-        # assert the list shape doesn't accidentally include garbage.
-        for entry in data["workers"]:
-            assert isinstance(entry, dict)
-            assert "worker_id" in entry, f"worker entry missing worker_id: {entry!r}"
-            assert "status" in entry, f"worker entry missing status: {entry!r}"
+        workers = json.loads(response.data)["workers"]
+        assert len(workers) == 1
+        assert workers[0]["worker_id"] == 1
+        assert workers[0]["status"] == "processing"
 
     def test_job_logs_requires_auth(self, client):
         """Test that job logs endpoint requires authentication."""
@@ -453,10 +435,7 @@ class TestAuthTokenFunctions:
     def test_get_token_info_structure(self, mock_auth_config, monkeypatch):
         """``get_token_info`` returns a well-shaped dict AND the values are right.
 
-        Audit fix — original asserted only key presence. A regression
-        returning ``{"env_controlled": "yes", "token": None, ...}`` would
-        have passed. Now also assert types + that the token is masked
-        (last-4 visible, rest replaced with ``*``).
+        Types are asserted, and the token must be masked (last 4 visible, the rest ``*``).
         """
         monkeypatch.delenv("WEB_AUTH_TOKEN", raising=False)
         from media_preview_generator.web.auth import get_token_info
@@ -468,19 +447,11 @@ class TestAuthTokenFunctions:
         )
         assert isinstance(info["token"], str)
         assert isinstance(info["token_length"], int)
-        assert info["source"] in ("config", "environment"), f"unexpected source: {info['source']!r}"
+        assert info["env_controlled"] is False
+        assert info["source"] == "config"
         # Token must be masked — never expose more than the last 4 chars.
         assert info["token"].startswith("*"), f"token leaked unmasked: {info['token']!r}"
         assert info["token_length"] >= 8, "auto-generated tokens are at least 8 chars"
-
-    def test_get_token_info_config_source(self, mock_auth_config, monkeypatch):
-        """Test get_token_info returns config source when not env controlled."""
-        monkeypatch.delenv("WEB_AUTH_TOKEN", raising=False)
-        from media_preview_generator.web.auth import get_token_info
-
-        info = get_token_info()
-        assert info["env_controlled"] is False
-        assert info["source"] == "config"
 
     def test_get_token_info_env_source(self, mock_auth_config, monkeypatch):
         """Test get_token_info returns environment source when env var set."""

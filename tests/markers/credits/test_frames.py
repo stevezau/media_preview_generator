@@ -37,6 +37,10 @@ from media_preview_generator.markers.probe import (
     VideoPacket,
     VideoPackets,
 )
+from tests.markers.credits.helpers import RENDER, VENDORS, VERDICT, cant_decode_lines, fake_ffmpeg
+from tests.markers.fakes import poll_until as _wait_for
+from tests.markers.fakes import process_state as _state
+from tests.markers.fakes import read_count as _progress
 
 # Imported before ``tests/markers/conftest.py`` fakes it for every test: these are its own tests.
 readable_video_s = frames.readable_video_s
@@ -44,7 +48,6 @@ readable_video_s = frames.readable_video_s
 FF = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 MOVIE = "/media/Movie (2020)/Movie.mkv"
 TAIL = ["-an", "-sn", "-dn", "-fps_mode", "passthrough"]
-RENDER = "/dev/dri/renderD128"
 
 
 class TestCommand:
@@ -100,7 +103,7 @@ class TestCommand:
     @pytest.mark.parametrize("download_format", ["nv12", "p010le"], ids=["8-bit", "10-bit"])
     @pytest.mark.parametrize(("gpu", "device"), [("INTEL", RENDER), ("AMD", "/dev/dri/renderD129")])
     def test_a_vaapi_download_never_takes_a_decoder_surface(self, gpu, device, download_format, fps):
-        # Production, Intel UHD 770: 54 credit reads fell back to the CPU on ffmpeg's exit 251 (46 H.264, 7 of 7 AV1).
+        # Seen in production on an Intel iGPU: 54 credit reads fell back to the CPU on ffmpeg's exit 251 (46 H.264, 7 of 7 AV1).
         # hwdownload's sync of a decoder surface failed there ("Failed to sync surface: 1 (operation failed)" or "34
         # (HW busy now)"): 15 of 16 runs of an AV1 keyframe pass, 16 of 30 of an H.264 1 fps window. Behind a VAAPI
         # filter, as in previews, 0 of 40 each, and the frames are the same bytes (H.264 8-bit, HEVC and AV1 10-bit).
@@ -355,77 +358,6 @@ class TestCommand:
         assert frames.tail_length_s(is_episode=False) == 900.0
 
 
-def _fake_ffmpeg(
-    frame_values: list[int],
-    pts: list[str],
-    *,
-    exit_code: int = 0,
-    sleep_s: float = 0.0,
-    extra_bytes: int = 0,
-    pid_file: str = "",
-    child_pid_file: str = "",
-    close_stdout: bool = False,
-    linger_s: float = 0.0,
-    ignore_sigterm: bool = False,
-    progress_file: str = "",
-    width: int = 320,
-    height: int = 180,
-    stderr_tail: str = "",
-    stderr_head: str = "",
-    head_wait_s: float = 0.0,
-) -> list[str]:
-    """A child that writes NV12 frames (Y plane filled with each value) to stdout and showinfo lines to stderr.
-
-    ``pts`` entries past the frames become showinfo lines with no whole frame behind them (ffmpeg dying mid-write);
-    ``child_pid_file`` spawns a grandchild in the same process group, so the group kill can be asserted;
-    ``ignore_sigterm`` stands in for an ffmpeg that won't take a polite signal; ``progress_file`` records how many
-    frames have been written, so how far the decoder ran ahead of text detection can be read; ``width`` and ``height``
-    are the frames' size; ``stderr_tail`` is written to stderr after the frames (what ffmpeg says as it exits);
-    ``stderr_head`` is written before them, which then wait ``head_wait_s`` (what a decoder says before any frame).
-    """
-    script = textwrap.dedent(f"""
-        import os, signal, subprocess, sys, time
-        if {ignore_sigterm!r}:
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        if {pid_file!r}:
-            open({pid_file!r}, "w").write(str(os.getpid()))
-        if {child_pid_file!r}:
-            child = subprocess.Popen(["sleep", "30"])
-            open({child_pid_file!r}, "w").write(str(child.pid))
-        out = sys.stdout.buffer
-        pts = {pts!r}
-
-        def line(i):
-            sys.stderr.write("[Parsed_showinfo_3 @ 0x1] n:%d pts:%d pts_time:%-7s duration:1\\n" % (i, i, pts[i]))
-
-        def progress(n):
-            if {progress_file!r}:
-                open({progress_file!r} + ".tmp", "w").write(str(n))
-                os.replace({progress_file!r} + ".tmp", {progress_file!r})
-
-        sys.stderr.write({stderr_head!r})
-        sys.stderr.flush()
-        time.sleep({head_wait_s})
-        for i, value in enumerate({frame_values!r}):
-            if i < len(pts):
-                line(i)
-            out.write(bytes([value]) * ({width} * {height}) + bytes([128]) * ({width} * {height} // 2))
-            out.flush()
-            progress(i + 1)
-            time.sleep({sleep_s})
-        for i in range(len({frame_values!r}), len(pts)):
-            line(i)
-        out.write(b"x" * {extra_bytes})
-        out.flush()
-        sys.stderr.write({stderr_tail!r})
-        if {close_stdout!r}:
-            os.close(1)
-        time.sleep({linger_s})
-        sys.exit({exit_code})
-    """)
-    return [sys.executable, "-c", script]
-
-
 # What _detector answers for a bright frame: three boxes, each at its own place in the 320x180 frame.
 BRIGHT_BOXES = ((40, 24, 128, 44), (41, 55, 130, 75), (44, 85, 133, 105))
 
@@ -464,17 +396,11 @@ def _readers() -> list[threading.Thread]:
     return [t for t in threading.enumerate() if t.name == "credits-frames"]
 
 
-def _wait_for(condition, *, within_s: float) -> bool:
-    deadline = time.monotonic() + within_s
-    while not condition() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    return condition()
-
-
 class TestReadFrames:
-    def test_the_end_marker_waits_for_room_however_slow_the_consumer_is(self):
+    def test_the_end_marker_waits_for_room_however_slow_the_consumer_is(self, monkeypatch):
         # Directly pins the reader's half of the end-of-stream contract: with a queue too small for the stream and a
         # consumer that takes longer than any put timeout, every frame and the end marker still arrive.
+        monkeypatch.setattr(frames, "_POLL_S", 0.02)
         stream = io.BytesIO(b"".join(bytes([value]) * (320 * 180 * 3 // 2) for value in (1, 2, 3)))
         items: queue.Queue = queue.Queue(maxsize=1)
         stop = threading.Event()
@@ -483,7 +409,7 @@ class TestReadFrames:
         drained = []
         try:
             for _ in range(4):
-                time.sleep(1.5)  # the queue is full each time the reader has more to put, the end marker included
+                time.sleep(0.2)  # ten put timeouts: the queue is full each time the reader has more to put
                 drained.append(items.get(timeout=5))
         finally:
             stop.set()
@@ -500,7 +426,7 @@ class TestRunDecode:
         pts = ["5100.1234", "5102.5", "5101.9", "5104", "5106.0005"]
         before = _reapers()
         rows = frames.run_decode(
-            _fake_ffmpeg(values, pts), hw_active=False, pts_offset_s=0.0, detect_boxes=_detector(calls), chunk_frames=2
+            fake_ffmpeg(values, pts), hw_active=False, pts_offset_s=0.0, detect_boxes=_detector(calls), chunk_frames=2
         )
         assert rows == [
             (5100.123, 0, 10.0, ()),
@@ -523,7 +449,7 @@ class TestRunDecode:
             return [((0, 0, 639, 359), (321, 181, 323, 183))] * len(planes)
 
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250], ["1", "2"], width=640, height=360),
+            fake_ffmpeg([10, 250], ["1", "2"], width=640, height=360),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=detect,
@@ -540,7 +466,7 @@ class TestRunDecode:
         per_frame = [(), (BRIGHT_BOXES[0],), BRIGHT_BOXES]
 
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 20, 30], ["1", "2", "3"]),
+            fake_ffmpeg([10, 20, 30], ["1", "2", "3"]),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=lambda planes: per_frame[: len(planes)],
@@ -553,7 +479,7 @@ class TestRunDecode:
         # The helper's JSON answers arrive as lists; rows must hold tuples, so a row can be a dict key, compared and
         # stored without a copy of its own.
         rows = frames.run_decode(
-            _fake_ffmpeg([10], ["1"]),
+            fake_ffmpeg([10], ["1"]),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=lambda planes: [[[10, 20, 30, 40]]] * len(planes),
@@ -579,7 +505,7 @@ class TestRunDecode:
         # box count onto an earlier second and store a credits start there.
         calls: list[np.ndarray] = []
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250, 250], ["100", "NOPTS", "106"]),
+            fake_ffmpeg([10, 250, 250], ["100", "NOPTS", "106"]),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=_detector(calls),
@@ -589,7 +515,7 @@ class TestRunDecode:
 
     def test_several_frames_without_timestamps_drop_only_their_own_rows(self):
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250, 250, 250, 5], ["100", "NOPTS", "104", "NOPTS", "108"]),
+            fake_ffmpeg([10, 250, 250, 250, 5], ["100", "NOPTS", "104", "NOPTS", "108"]),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=_detector([]),
@@ -599,7 +525,7 @@ class TestRunDecode:
 
     def test_a_partial_trailing_frame_is_ignored(self):
         rows = frames.run_decode(
-            _fake_ffmpeg([10], ["1"], extra_bytes=1000),
+            fake_ffmpeg([10], ["1"], extra_bytes=1000),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=lambda p: [()] * len(p),
@@ -617,7 +543,7 @@ class TestRunDecode:
         # Pairing what's left would time later frames from earlier lines, and the wrong answer would be stored as good.
         with pytest.raises(FrameDecodeError, match=message) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg(values, pts, extra_bytes=extra),
+                fake_ffmpeg(values, pts, extra_bytes=extra),
                 hw_active=False,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -629,7 +555,7 @@ class TestRunDecode:
         # Exact classes: a CPU exit must not look like a GPU failure (the worker would rerun it on the CPU again).
         with pytest.raises(FrameDecodeError, match="exited 3") as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([10], ["1"], exit_code=3),
+                fake_ffmpeg([10], ["1"], exit_code=3),
                 hw_active=hw,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -637,8 +563,7 @@ class TestRunDecode:
             )
         assert type(excinfo.value) is error
 
-    # What jellyfin-ffmpeg 8.1.2 says for a 10-bit AV1 file on an NVIDIA GPU without AV1 decode (Pascal here, Turing
-    # on sflix: 21 Bridges, 2026-09-25), the input and the lines before its end kept.
+    # What jellyfin-ffmpeg 8.1.2 says for a 10-bit AV1 file on an NVIDIA GPU without AV1 decode (Pascal), the input and the lines before its end kept.
     AV1_ON_A_GPU_WITHOUT_AV1 = (
         "Input #0, matroska,webm, from '/media/21 Bridges (2019).mkv':\n"
         "  Stream #0:0(eng): Video: av1 (libdav1d) (Main), yuv420p10le(tv, bt2020nc/bt2020/smpte2084), 3840x1600\n"
@@ -692,7 +617,7 @@ class TestRunDecode:
         # return code -22 ... Conversion failed!" for a GPU that can't decode AV1.
         with pytest.raises(GpuDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=exit_code, stderr_tail=stderr),
+                fake_ffmpeg([], [], exit_code=exit_code, stderr_tail=stderr),
                 hw_active=True,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -709,12 +634,12 @@ class TestRunDecode:
         assert excinfo.value.stderr_tail == ()
 
     def test_a_gpu_failure_keeps_ffmpegs_last_lines_that_say_why(self):
-        # Production: 53 Intel reads fell back to the CPU with only the classified reason logged; ffmpeg's own lines
+        # Seen in production: 53 Intel reads fell back to the CPU with only the classified reason logged; ffmpeg's own lines
         # went to DEBUG. Its closing lines (the progress line, "Terminating thread", "Nothing was written",
         # "Conversion failed!") end every failed run and say nothing.
         with pytest.raises(GpuDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=69, stderr_tail=self.AV1_ON_A_GPU_WITHOUT_AV1),
+                fake_ffmpeg([], [], exit_code=69, stderr_tail=self.AV1_ON_A_GPU_WITHOUT_AV1),
                 hw_active=True,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -731,7 +656,7 @@ class TestRunDecode:
         stderr = "".join(f"[hevc @ 0x1] error {n} " + "x" * 400 + "\n" for n in range(9))
         with pytest.raises(GpuDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=251, stderr_tail=stderr),
+                fake_ffmpeg([], [], exit_code=251, stderr_tail=stderr),
                 hw_active=True,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -774,7 +699,7 @@ class TestRunDecode:
         # neither showinfo's lines nor the "Conversion failed!" every failed run ends on stand in for it.
         with pytest.raises(FrameDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=1, stderr_tail=stderr),
+                fake_ffmpeg([], [], exit_code=1, stderr_tail=stderr),
                 hw_active=False,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -787,7 +712,7 @@ class TestRunDecode:
         # to tell a GPU that missed the frames from a file that has none there.
         with pytest.raises(GpuReadNothingError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], []), hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
+                fake_ffmpeg([], []), hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
             )
         assert isinstance(excinfo.value, GpuDecodeError)
         assert str(excinfo.value) == "the GPU read no frames in that part of the file"
@@ -795,7 +720,7 @@ class TestRunDecode:
     def test_no_frames_on_the_cpu_is_an_empty_answer(self):
         assert (
             frames.run_decode(
-                _fake_ffmpeg([], []), hw_active=False, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
+                fake_ffmpeg([], []), hw_active=False, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
             )
             == []
         )
@@ -817,7 +742,7 @@ class TestRunDecode:
         try:
             with pytest.raises(DecodeCancelledError):
                 frames.run_decode(
-                    _fake_ffmpeg(
+                    fake_ffmpeg(
                         [10] * 50,
                         ["1"] * 50,
                         sleep_s=0.2,
@@ -840,7 +765,7 @@ class TestRunDecode:
     @pytest.mark.parametrize("hw", [True, False], ids=["gpu", "cpu"])
     @pytest.mark.parametrize("frames_left", [50, 3], ids=["mid-decode", "last-chunk"])
     def test_a_cancel_during_a_slow_text_detection_call_kills_ffmpeg_at_once(self, tmp_path, hw, frames_left):
-        # Lab phase 3 row 6: a fresh app's first text detection request waits 10-14 s for its helper to start and
+        # a fresh app's first text detection request waits 10-14 s for its helper to start and
         # self-test. A cancel landing then must stop ffmpeg within a poll, not after the request, and the decode ends
         # as cancelled (never as a GPU failure, which would read the file again on the CPU). "last-chunk": ffmpeg has
         # written its last frames, so the decode is in its final, partial text detection call when the cancel lands.
@@ -859,7 +784,7 @@ class TestRunDecode:
         def decode():
             try:
                 frames.run_decode(
-                    _fake_ffmpeg(
+                    fake_ffmpeg(
                         [10] * frames_left,
                         ["1"] * frames_left,
                         sleep_s=0.05,
@@ -893,7 +818,7 @@ class TestRunDecode:
         # The watcher only acts on a cancel: a decode that finishes on its own keeps its rows and exit code.
         before = set(threading.enumerate())
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250], ["1", "2"]), hw_active=True, pts_offset_s=0.0, detect_boxes=_detector([]),
+            fake_ffmpeg([10, 250], ["1", "2"]), hw_active=True, pts_offset_s=0.0, detect_boxes=_detector([]),
             cancel_check=lambda: False, chunk_frames=4,
         )  # fmt: skip
         assert [row[:2] for row in rows] == [(1.0, 0), (2.0, 3)]
@@ -910,7 +835,7 @@ class TestRunDecode:
         try:
             with pytest.raises(DecodeCancelledError):
                 frames.run_decode(
-                    _fake_ffmpeg([10], ["1"], pid_file=str(pid_file), close_stdout=True, linger_s=30),
+                    fake_ffmpeg([10], ["1"], pid_file=str(pid_file), close_stdout=True, linger_s=30),
                     hw_active=False,
                     pts_offset_s=0.0,
                     detect_boxes=lambda p: [()] * len(p),
@@ -924,12 +849,12 @@ class TestRunDecode:
 
     @pytest.mark.parametrize("hw", [True, False])
     def test_a_decode_past_the_timeout_is_killed_and_is_never_a_gpu_failure(self, hw, tmp_path):
-        # T-R7: a stalled read times out the same on either worker; a GpuDecodeError would add a CPU rerun of the stall.
+        # A stalled read times out the same on either worker; a GpuDecodeError would add a CPU rerun of the stall.
         pid_file = tmp_path / "ffmpeg.pid"
         started = time.monotonic()
         with pytest.raises(FrameDecodeError, match="timed out") as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=1.0, pid_file=str(pid_file)),
+                fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=1.0, pid_file=str(pid_file)),
                 hw_active=hw,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -994,7 +919,7 @@ class TestRunDecode:
         try:
             with pytest.raises(DecodeTimeoutError):
                 frames.run_decode(
-                    _fake_ffmpeg(
+                    fake_ffmpeg(
                         [10],
                         ["1"],
                         pid_file=str(pid_file),
@@ -1025,7 +950,7 @@ class TestRunDecode:
 
         with pytest.raises(DecodeCancelledError):
             frames.run_decode(
-                _fake_ffmpeg([10] * 50, ["1"] * 50),
+                fake_ffmpeg([10] * 50, ["1"] * 50),
                 hw_active=False,
                 pts_offset_s=0.0,
                 detect_boxes=count,
@@ -1047,7 +972,7 @@ class TestRunDecode:
             return [()] * len(planes)
 
         rows = frames.run_decode(
-            _fake_ffmpeg([10] * 100, [str(i) for i in range(100)], progress_file=str(progress)),
+            fake_ffmpeg([10] * 100, [str(i) for i in range(100)], progress_file=str(progress)),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=count,
@@ -1059,7 +984,7 @@ class TestRunDecode:
 
     @pytest.mark.parametrize("hw", [True, False])
     def test_an_ffmpeg_that_cannot_be_started_is_a_decode_error(self, hw, tmp_path):
-        # Task 8 only catches FrameDecodeError; a bare OSError would fail the whole item. A GPU worker must not rerun
+        # The caller only catches FrameDecodeError; a bare OSError would fail the whole item. A GPU worker must not rerun
         # on the CPU either, since it would run the same missing binary.
         missing = str(tmp_path / "ffmpeg")
         with pytest.raises(FrameDecodeError, match="could not run") as excinfo:
@@ -1076,7 +1001,7 @@ class TestRunDecode:
     def test_rows_are_seconds_from_the_start_of_the_file(self):
         # A recorded .ts reports pts from its PCR base; rule J and the published marker need file seconds.
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250], ["30020.5", "30021.5"]),
+            fake_ffmpeg([10, 250], ["30020.5", "30021.5"]),
             hw_active=False,
             detect_boxes=lambda p: [()] * len(p),
             pts_offset_s=30000.0,
@@ -1086,7 +1011,7 @@ class TestRunDecode:
     def test_the_timestamp_offset_has_to_be_given(self):
         # No default: a caller that forgets it would silently publish a recording's raw container timestamps.
         with pytest.raises(TypeError, match="pts_offset_s"):
-            frames.run_decode(_fake_ffmpeg([10], ["1"]), hw_active=False, detect_boxes=lambda p: [()] * len(p))
+            frames.run_decode(fake_ffmpeg([10], ["1"]), hw_active=False, detect_boxes=lambda p: [()] * len(p))
 
     def test_slow_text_detection_never_loses_the_end_of_the_stream(self):
         def slow(planes):
@@ -1095,7 +1020,7 @@ class TestRunDecode:
 
         started = time.monotonic()
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 10, 10], ["1", "2", "3"]),
+            fake_ffmpeg([10, 10, 10], ["1", "2", "3"]),
             hw_active=False,
             pts_offset_s=0.0,
             detect_boxes=slow,
@@ -1115,7 +1040,7 @@ class TestRunDecode:
 
         started = time.monotonic()
         rows = frames.run_decode(
-            _fake_ffmpeg([10] * count, [str(i) for i in range(count)]),
+            fake_ffmpeg([10] * count, [str(i) for i in range(count)]),
             hw_active=True,
             pts_offset_s=0.0,
             detect_boxes=slow,
@@ -1133,7 +1058,7 @@ class TestRunDecode:
         started = time.monotonic()
         with pytest.raises(RuntimeError, match="helper gone"):
             frames.run_decode(
-                _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
+                fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
                 hw_active=False,
                 pts_offset_s=0.0,
                 detect_boxes=count,
@@ -1156,7 +1081,7 @@ class TestRunDecode:
         pid_file = tmp_path / "ffmpeg.pid"
         with pytest.raises(FrameDecodeError, match="aren't four numbers each") as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
+                fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
                 hw_active=True,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: answer * len(p),
@@ -1171,7 +1096,7 @@ class TestRunDecode:
         pid_file = tmp_path / "ffmpeg.pid"
         with pytest.raises(FrameDecodeError, match="answered 1 frames' boxes for 2 frames") as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
+                fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
                 hw_active=True,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()],
@@ -1181,25 +1106,8 @@ class TestRunDecode:
         _assert_gone(pid_file)
 
 
-VERDICT = "Your platform doesn't support hardware accelerated AV1 decoding."
 # The hwaccel line FFmpeg prints for any decoder whose GPU setup failed; healthy H.264/HEVC runs print it and decode on.
 GENERIC_HWACCEL_LINE = "[h264 @ 0x1] Failed setup for format {hwaccel}: hwaccel initialisation returned error.\n"
-VENDORS = [("NVIDIA", "cuda:0", "cuda"), ("INTEL", RENDER, "vaapi"), ("AMD", "/dev/dri/renderD129", "vaapi")]
-
-
-def _cant_decode_lines(hwaccel: str, packets: int = 3) -> str:
-    """What ffmpeg's own AV1 decoder says, once per packet to the end of the file, on a GPU without AV1 decode
-    (ffmpeg 8.0.1 on a Quadro P5000, 2026-10-02: 6 lines a packet, 3,756 lines in 1.5 s; "Hardware is lacking" is
-    NVDEC's own line and is left out)."""
-    packet = (
-        f"[av1 @ 0x58ba5204abc0] Failed setup for format {hwaccel}: hwaccel initialisation returned error.\n"
-        f"[av1 @ 0x58ba5204abc0] {VERDICT}\n"
-        "[av1 @ 0x58ba5204abc0] Failed to get pixel format.\n"
-        "[av1 @ 0x58ba5204abc0] Get current frame error\n"
-        "[vist#0:0/av1 @ 0x58ba520356c0] [dec:av1 @ 0x58ba5204a680] Error submitting packet to decoder: Function not "
-        "implemented\n"
-    )
-    return "  Stream #0:0: Video: av1 (libdav1d) (Main), yuv420p(tv), 1280x720\n" + packet * packets
 
 
 def _hw(gpu: str | None, device: str | None) -> bool:
@@ -1215,13 +1123,13 @@ class TestAGpuThatCantDecodeTheFile:
 
     @pytest.mark.parametrize(("gpu", "device", "hwaccel"), VENDORS, ids=[v[0] for v in VENDORS])
     def test_a_gpu_run_is_stopped_at_the_verdict_and_is_a_gpu_failure(self, gpu, device, hwaccel, tmp_path):
-        # Production: the end-picture check's GPU decode of an AV1 episode failed on every packet to its 120 s timeout
-        # on a TITAN RTX (Person of Interest S02E19, 2026-10-02); the frames after the wait stand for a file walked on.
+        # Seen in production: the end-picture check's GPU decode of an AV1 episode failed on every packet to its 120 s timeout
+        # on an NVIDIA GPU; the frames after the wait stand for a file walked on.
         pid_file = tmp_path / "ffmpeg.pid"
         started = time.monotonic()
         with pytest.raises(GpuDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([10, 250], ["1", "2"], stderr_head=_cant_decode_lines(hwaccel), head_wait_s=30,
+                fake_ffmpeg([10, 250], ["1", "2"], stderr_head=cant_decode_lines(hwaccel), head_wait_s=30,
                              pid_file=str(pid_file)),
                 hw_active=_hw(gpu, device),
                 pts_offset_s=0.0,
@@ -1239,7 +1147,7 @@ class TestAGpuThatCantDecodeTheFile:
         # A short tail ends by itself (exit 69) before the first look at stderr; which comes first is timing.
         with pytest.raises(GpuDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=69, stderr_tail=TestRunDecode.AV1_ON_A_GPU_WITHOUT_AV1,
+                fake_ffmpeg([], [], exit_code=69, stderr_tail=TestRunDecode.AV1_ON_A_GPU_WITHOUT_AV1,
                              linger_s=linger_s),
                 hw_active=True,
                 pts_offset_s=0.0,
@@ -1260,7 +1168,7 @@ class TestAGpuThatCantDecodeTheFile:
         # 0.4 s without a frame is four looks at stderr: the generic line alone stops nothing.
         head = GENERIC_HWACCEL_LINE.format(hwaccel=hwaccel) if said == "generic" else ""
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250], ["1", "2"], stderr_head=head, head_wait_s=0.4),
+            fake_ffmpeg([10, 250], ["1", "2"], stderr_head=head, head_wait_s=0.4),
             hw_active=_hw(gpu, device),
             pts_offset_s=0.0,
             detect_boxes=_detector([]),
@@ -1270,7 +1178,7 @@ class TestAGpuThatCantDecodeTheFile:
     @pytest.mark.parametrize(("gpu", "device", "hwaccel"), VENDORS, ids=[v[0] for v in VENDORS])
     def test_a_gpu_run_that_already_gave_frames_is_never_stopped(self, gpu, device, hwaccel):
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250], ["1", "2"], stderr_tail=_cant_decode_lines(hwaccel), linger_s=0.4),
+            fake_ffmpeg([10, 250], ["1", "2"], stderr_tail=cant_decode_lines(hwaccel), linger_s=0.4),
             hw_active=_hw(gpu, device),
             pts_offset_s=0.0,
             detect_boxes=_detector([]),
@@ -1281,12 +1189,12 @@ class TestAGpuThatCantDecodeTheFile:
     # and on a GPU worker's CPU rerun alike.
     @pytest.mark.parametrize(
         "head",
-        [_cant_decode_lines("cuda"), _cant_decode_lines("vaapi"), GENERIC_HWACCEL_LINE.format(hwaccel="cuda"), ""],
+        [cant_decode_lines("cuda"), cant_decode_lines("vaapi"), GENERIC_HWACCEL_LINE.format(hwaccel="cuda"), ""],
         ids=["verdict-cuda", "verdict-vaapi", "generic", "nothing"],
     )
     def test_a_cpu_run_is_never_stopped(self, head):
         rows = frames.run_decode(
-            _fake_ffmpeg([10, 250], ["1", "2"], stderr_head=head, head_wait_s=0.4),
+            fake_ffmpeg([10, 250], ["1", "2"], stderr_head=head, head_wait_s=0.4),
             hw_active=_hw(None, None),
             pts_offset_s=0.0,
             detect_boxes=_detector([]),
@@ -1297,10 +1205,10 @@ class TestAGpuThatCantDecodeTheFile:
     def test_the_verdict_is_found_wherever_it_falls_in_what_ffmpeg_wrote(self, before, tmp_path):
         # Across the edge of one read, and in a later read of the same look.
         pid_file = tmp_path / "ffmpeg.pid"
-        head = "x" * (before - 1) + "\n" + _cant_decode_lines("cuda")
+        head = "x" * (before - 1) + "\n" + cant_decode_lines("cuda")
         with pytest.raises(GpuDecodeError, match="can't decode this file's AV1 video"):
             frames.run_decode(
-                _fake_ffmpeg([], [], stderr_head=head, head_wait_s=30, pid_file=str(pid_file)),
+                fake_ffmpeg([], [], stderr_head=head, head_wait_s=30, pid_file=str(pid_file)),
                 hw_active=True,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -1334,7 +1242,7 @@ class TestAGpuThatCantDecodeTheFile:
         # Previews' rule: a CPU rerun would fail the same way, so a GPU worker's failure isn't a GpuDecodeError.
         with pytest.raises(FrameDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=234, stderr_tail=self.NO_DECODER),
+                fake_ffmpeg([], [], exit_code=234, stderr_tail=self.NO_DECODER),
                 hw_active=hw,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -1390,7 +1298,7 @@ class TestAGpuThatCantDecodeTheFile:
     def test_a_keyframe_pass_with_no_decoder_for_the_video_is_the_files_failure_on_either_worker(self, hw):
         with pytest.raises(FrameDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=234, stderr_tail=self.KEYFRAME_NO_DECODER),
+                fake_ffmpeg([], [], exit_code=234, stderr_tail=self.KEYFRAME_NO_DECODER),
                 hw_active=hw,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
@@ -1404,24 +1312,13 @@ class TestAGpuThatCantDecodeTheFile:
     def test_a_failure_that_isnt_the_videos_decoder_keeps_the_cpu_rerun(self, stderr, hw, raised):
         with pytest.raises(FrameDecodeError) as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], [], exit_code=234, stderr_tail=getattr(self, stderr)),
+                fake_ffmpeg([], [], exit_code=234, stderr_tail=getattr(self, stderr)),
                 hw_active=hw,
                 pts_offset_s=0.0,
                 detect_boxes=lambda p: [()] * len(p),
                 name="Movie.mkv",
             )
         assert type(excinfo.value) is raised
-
-
-def _state(pid: int) -> str:
-    return pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split(" ", 1)[0]
-
-
-def _progress(path: pathlib.Path) -> int:
-    try:
-        return int(path.read_text() or 0)
-    except (FileNotFoundError, ValueError):
-        return 0
 
 
 @pytest.fixture
@@ -1472,7 +1369,7 @@ class TestRunDecodePause:
 
         # 20 frames over about 1 s of work; the pause lasts longer than the whole time limit.
         thread, out = self._decode_in_background(
-            _fake_ffmpeg([10] * 20, ["1"] * 20, sleep_s=0.05, pid_file=str(pid_file), progress_file=str(progress)),
+            fake_ffmpeg([10] * 20, ["1"] * 20, sleep_s=0.05, pid_file=str(pid_file), progress_file=str(progress)),
             detect_boxes=detect, pause_check=paused.is_set, chunk_frames=2, timeout_s=2.5,
         )  # fmt: skip
         try:
@@ -1499,7 +1396,7 @@ class TestRunDecodePause:
             return [()] * len(planes)
 
         thread, out = self._decode_in_background(
-            _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.1, pid_file=str(pid_file)),
+            fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.1, pid_file=str(pid_file)),
             detect_boxes=detect, pause_check=paused.is_set, cancel_check=cancelled.is_set, chunk_frames=2,
         )  # fmt: skip
         assert _wait_for(paused.is_set, within_s=5)
@@ -1520,7 +1417,7 @@ class TestRunDecodePause:
         paused = threading.Event()
         paused.set()
         thread, out = self._decode_in_background(
-            _fake_ffmpeg([10, 250], ["1", "2"], pid_file=str(pid_file)),
+            fake_ffmpeg([10, 250], ["1", "2"], pid_file=str(pid_file)),
             detect_boxes=lambda planes: [()] * len(planes), pause_check=paused.is_set, timeout_s=1.0,
         )  # fmt: skip
         time.sleep(1.5)  # past the time limit: it starts counting once the decode starts
@@ -1534,7 +1431,7 @@ class TestRunDecodePause:
         pid_file = tmp_path / "ffmpeg.pid"
         with pytest.raises(DecodeCancelledError):
             frames.run_decode(
-                _fake_ffmpeg([10], ["1"], pid_file=str(pid_file)), hw_active=False, pts_offset_s=0.0,
+                fake_ffmpeg([10], ["1"], pid_file=str(pid_file)), hw_active=False, pts_offset_s=0.0,
                 detect_boxes=lambda planes: [()] * len(planes), pause_check=lambda: True, cancel_check=lambda: True,
             )  # fmt: skip
         assert not pid_file.exists()

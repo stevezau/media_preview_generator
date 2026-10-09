@@ -56,8 +56,8 @@ def test_lock_factory_is_used():
 
     locks = KeyedLocks(lock_factory=factory)
     with locks.hold("x"):
-        pass
-    assert len(made) == 1
+        assert made[0].locked()
+    assert len(made) == 1 and not made[0].locked()
 
 
 def test_try_hold_takes_a_free_lock_and_holds_it_exclusively():

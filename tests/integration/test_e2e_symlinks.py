@@ -19,7 +19,6 @@ from __future__ import annotations
 import shutil
 import struct
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,39 +28,7 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
-
-_BIF_MAGIC = bytes([0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A])
-
-
-@pytest.fixture
-def symlink_config(tmp_path):
-    config = MagicMock()
-    config.plex_url = ""
-    config.plex_token = ""
-    config.plex_timeout = 60
-    config.plex_libraries = []
-    config.plex_config_folder = ""
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
+from tests.integration.conftest import BIF_MAGIC
 
 
 @pytest.fixture
@@ -113,7 +80,7 @@ def symlink_registry(emby_credentials, symlinked_media):
 
 @pytest.mark.integration
 class TestSymlinkedSourcePath:
-    def test_publish_via_symlink_works(self, symlinked_media, symlink_registry, symlink_config):
+    def test_publish_via_symlink_works(self, symlinked_media, symlink_registry, live_config):
         """Canonical path is the symlink; FFmpeg follows it transparently
         and the sidecar lands next to the symlink (not next to the real
         target — the user's library directory layout is preserved).
@@ -126,7 +93,7 @@ class TestSymlinkedSourcePath:
             result = process_canonical_path(
                 canonical_path=canonical,
                 registry=symlink_registry,
-                config=symlink_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
             )
@@ -136,7 +103,7 @@ class TestSymlinkedSourcePath:
             # Sidecar landed next to the SYMLINK, not next to the real target.
             assert sidecar.exists()
             head = sidecar.read_bytes()[:8]
-            assert head == _BIF_MAGIC
+            assert head == BIF_MAGIC
 
             # Decode count to confirm a real BIF.
             count = struct.unpack("<I", sidecar.read_bytes()[12:16])[0]
@@ -147,7 +114,7 @@ class TestSymlinkedSourcePath:
             for f in link_path.parent.glob("*.bif.meta"):
                 f.unlink()
 
-    def test_journal_uses_underlying_source_mtime(self, symlinked_media, symlink_registry, symlink_config):
+    def test_journal_uses_underlying_source_mtime(self, symlinked_media, symlink_registry, live_config):
         """The .meta journal records the real file's mtime+size, not the
         symlink's. So if the user replaces the underlying file (via
         Sonarr upgrade), the journal mismatch correctly triggers regen
@@ -166,7 +133,7 @@ class TestSymlinkedSourcePath:
             result = process_canonical_path(
                 canonical_path=canonical,
                 registry=symlink_registry,
-                config=symlink_config,
+                config=live_config,
                 gpu=None,
                 gpu_device_path=None,
             )

@@ -1,7 +1,7 @@
 """FFmpeg subprocess runner factory for the per-file thumbnail pipeline.
 
 This module owns the work that ``_run_ffmpeg`` used to do inside a
-nested closure in :func:`media_processing.generate_images` — building
+nested closure in :func:`generator.generate_images` — building
 the FFmpeg argv, selecting the vendor-specific filter chain, invoking
 the subprocess, streaming progress to the caller's callback, detecting
 stalls, and diagnosing non-zero exit codes.
@@ -143,7 +143,7 @@ def create_ffmpeg_runner(
     The returned callable has the same signature as the original nested
     ``_run_ffmpeg`` function and captures every piece of per-file state
     (video_file, filter-chain choice, retry flags, etc.) exactly as the
-    original closure did.  Callers in :func:`media_processing.generate_images`
+    original closure did.  Callers in :func:`generator.generate_images`
     replace ``def _run_ffmpeg(...)`` with a single assignment and then
     invoke the returned callable through the full retry cascade.
     """
@@ -279,13 +279,9 @@ def create_ffmpeg_runner(
         # across all supported vendors.
         #
         # The DV Profile 5 libplacebo path (``init_vulkan=True``) used
-        # to blanket-skip HW decode on non-NVIDIA vendors.  That gate
-        # was added in ``a06ed98`` after a bad P7/8 + libplacebo output
-        # (issue #178, P7/8 now uses zscale on the HDR10 base layer so
-        # the original reason no longer applies) and then re-validated
-        # on 2026-04-12 against a CPU path that was still pinned to 2
-        # threads.  A 2026-04-16 bench on an Intel iGPU (Raptor Lake-S)
-        # with the ``-threads:v 0`` fix in place compared:
+        # to blanket-skip HW decode on non-NVIDIA vendors (P7/8 now uses
+        # zscale on the HDR10 base layer, so that gate's reason is gone).
+        # A bench on an Intel iGPU (Raptor Lake-S) compared:
         #   - software decode + libplacebo:  12.9x, ~10 cores saturated
         #   - VAAPI decode + drm→va@dr→vk@dr: 16.1x,  ~0 cores (1s CPU)
         # Output was pixel-identical (PSNR=inf) across dark, mid, and
@@ -480,6 +476,8 @@ def create_ffmpeg_runner(
             f"ffmpeg_output_{os.getpid()}_{thread_id}_{time.time_ns()}.log",
         )
         stderr_fh = open(output_file, "w", encoding="utf-8")
+        proc = None
+        stderr_reader = None
         try:
             proc = subprocess.Popen(
                 args,
@@ -501,7 +499,6 @@ def create_ffmpeg_runner(
             stalled = False
             gpu_cant_decode = False
             wrote_frame = False
-            stderr_reader = None
             unfinished_line = ""
 
             def remember(line: str) -> None:
@@ -714,7 +711,7 @@ def create_ffmpeg_runner(
                     reap_killed_process()
                     remember(STALL_WATCHDOG_LINE)
                     break
-                time.sleep(0.005)
+                time.sleep(0.05)
 
             # Process any remaining data
             try:
@@ -723,6 +720,16 @@ def create_ffmpeg_runner(
                     total_duration = parse_ffmpeg_progress_line(line, total_duration, speed_capture_callback)
             except OSError:
                 pass
+        except BaseException as exc:
+            # A raising callback must not leave FFmpeg running (or SIGSTOPped by a pause).
+            # CancellationError is raised only after the loop has already stopped the process.
+            if not isinstance(exc, CancellationError) and proc is not None and proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            raise
         finally:
             # Ensure stderr file handle is always closed
             stderr_fh.close()

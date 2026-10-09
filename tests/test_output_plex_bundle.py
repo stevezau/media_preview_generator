@@ -19,12 +19,7 @@ from media_preview_generator.output.plex_hash import (
 from media_preview_generator.servers import PlexServer
 
 
-def _make_bundle(
-    canonical_path: str,
-    frame_dir: Path,
-    *,
-    prefetched_bundle_metadata: tuple[tuple[str, str], ...] = (),
-) -> BifBundle:
+def _make_bundle(canonical_path: str, frame_dir: Path) -> BifBundle:
     return BifBundle(
         canonical_path=canonical_path,
         frame_dir=frame_dir,
@@ -33,7 +28,6 @@ def _make_bundle(
         width=320,
         height=180,
         frame_count=0,
-        prefetched_bundle_metadata=prefetched_bundle_metadata,
     )
 
 
@@ -71,24 +65,6 @@ class TestComputeOutputPaths:
         server._ensure_connected.assert_not_called()
         server.get_bundle_metadata.assert_not_called()
 
-    @pytest.mark.parametrize("metadata_kind", ["exact_stale", "ambiguous", "unrelated", "invalid"])
-    def test_prefetched_metadata_cannot_redirect_current_file(self, tmp_path, metadata_kind):
-        media = tmp_path / "movie.mkv"
-        media.write_bytes(b"replacement media" * 20000)
-        metadata = {
-            "exact_stale": (("a" * 40, str(media)),),
-            "ambiguous": (("a" * 40, "/4k/movie.mkv"), ("b" * 40, "/1080/movie.mkv")),
-            "unrelated": (("c" * 40, "/different/disc2.mkv"),),
-            "invalid": (("", str(media)),),
-        }[metadata_kind]
-        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
-        bundle = _make_bundle(str(media), tmp_path, prefetched_bundle_metadata=metadata)
-
-        paths = adapter.compute_output_paths(bundle, None, "42")
-
-        assert paths == [adapter.bundle_bif_path("/cfg", calculate_plex_hash(media))]
-        assert paths[0] != adapter.bundle_bif_path("/cfg", "a" * 40)
-
     def test_same_basename_versions_use_their_own_bytes(self, tmp_path):
         paths = []
         adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
@@ -116,9 +92,9 @@ class TestComputeOutputPaths:
         assert current != previous
         assert current == [adapter.bundle_bif_path("/cfg", calculate_plex_hash(media))]
 
-    def test_missing_source_does_not_use_stale_metadata(self, tmp_path):
+    def test_missing_source_raises(self, tmp_path):
         media = tmp_path / "missing.mkv"
-        bundle = _make_bundle(str(media), tmp_path, prefetched_bundle_metadata=(("a" * 40, str(media)),))
+        bundle = _make_bundle(str(media), tmp_path)
         adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
         with pytest.raises(FileNotFoundError):
             adapter.compute_output_paths(bundle, None, "42")
@@ -162,10 +138,7 @@ class TestOutputPathPerPart:
             pytest.param(_COPY_PARTS, 2, "b49d6c4a7413613eccc8985005c46a7d421efdd6", id="different-version"),
         ],
     )
-    @pytest.mark.parametrize("prefetched", [False, True])
-    def test_output_path_is_the_parts_own_bundle(
-        self, tmp_path, mock_config, parts, selected, expected_hash, prefetched
-    ):
+    def test_output_path_is_the_parts_own_bundle(self, tmp_path, mock_config, parts, selected, expected_hash):
         adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)
         server = PlexServer(mock_config)
         server._plex = MagicMock()
@@ -175,8 +148,7 @@ class TestOutputPathPerPart:
             local_path = tmp_path / filename
             local_path.write_bytes(content)
             local_paths.append(str(local_path))
-        metadata = tuple(("f" * 40, path) for path in local_paths) if prefetched else ()
-        bundle = _make_bundle(local_paths[selected], tmp_path, prefetched_bundle_metadata=metadata)
+        bundle = _make_bundle(local_paths[selected], tmp_path)
         expected = Path(
             f"/cfg/Media/localhost/{expected_hash[0]}/{expected_hash[1:]}.bundle/Contents/Indexes/index-sd.bif"
         )

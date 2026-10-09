@@ -302,7 +302,8 @@ document.addEventListener('DOMContentLoaded', function() {
 </template>
 <template id="infoScheduleCronTpl">
     <p>Format: <code>minute hour day-of-month month day-of-week</code></p>
-    <p>Examples: <code>0 */2 * * *</code> (every 2 hrs), <code>0,30 * * * *</code> (every 30 min), <code>0 3 * * 0</code> (Sun 3 AM)</p>
+    <p>Examples: <code>0 */2 * * *</code> (every 2 hrs), <code>0,30 * * * *</code> (every 30 min), <code>0 3 * * sun</code> (Sun 3 AM)</p>
+    <p>Use day names (<code>mon</code>, <code>sun</code>, <code>mon-fri</code>) for the day of week. Numbers are not standard cron here: <code>0</code> is Monday and <code>6</code> is Sunday.</p>
 </template>
 <template id="infoScheduleStopTimeTpl">
     <p>Pauses any running job from this schedule at this time of day. The next start tick resumes from where it stopped &mdash; no progress lost.
@@ -315,5 +316,4 @@ document.addEventListener('DOMContentLoaded', function() {
 <template id="infoSchedulePriorityTpl">
     <p><strong>Default</strong>: a Recently Added sweep follows Settings → Processing Options → Incoming job priority (High out of the box, so new imports overtake a running full scan); a full-library scan runs at Normal.</p>
     <p>Pick High/Normal/Low to pin this schedule regardless of that setting.</p>
-    <p>Priority assigned to jobs created by this schedule. <strong>Default</strong> lets Recently Added sweeps follow the global <em>Incoming job priority</em> setting; full-library scans stay at Normal.</p>
 </template>

@@ -1,9 +1,8 @@
 """Regression: a webhook-origin job whose ``webhook_paths`` got lost must
 NOT silently fall through to a full library scan.
 
-This guards against the Job e7968486 incident (May 2026): a single Sonarr
-webhook for one TV episode triggered eight separate full-library scans
-(~128k items each) across eleven container restarts. The root cause was
+This guards against a single Sonarr webhook for one TV episode triggering
+repeated full-library scans across container restarts. The root cause was
 that the "Job-at-batch-open" refactor created Jobs without persisting
 ``webhook_paths`` in ``job.config``. Auto-requeue-on-restart revived the
 job with no path list, and ``run_processing``'s branch silently
@@ -23,41 +22,10 @@ refuses to fall through to ``_run_full_scan_multi_server`` /
 
 from __future__ import annotations
 
-import logging as _std_logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-from loguru import logger as _loguru_logger
-
 from media_preview_generator.jobs.orchestrator import _classify_processing_mode, run_processing
-
-
-@pytest.fixture
-def loguru_caplog(caplog):
-    """Bridge loguru → pytest caplog so assertions can inspect ``logger.error``
-    output. Without this bridge, loguru sinks bypass the stdlib logging
-    plumbing that ``caplog`` captures. Pattern lifted from
-    ``test_full_scan_multi_server.py``.
-    """
-    handler_id = _loguru_logger.add(
-        lambda msg: caplog.records.append(
-            _std_logging.LogRecord(
-                name="loguru",
-                level=_std_logging.ERROR,
-                pathname="",
-                lineno=0,
-                msg=msg.record["message"],
-                args=(),
-                exc_info=None,
-            )
-        ),
-        level="ERROR",
-    )
-    try:
-        yield caplog
-    finally:
-        _loguru_logger.remove(handler_id)
 
 
 class TestClassifyProcessingMode:

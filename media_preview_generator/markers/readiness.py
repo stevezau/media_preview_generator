@@ -1,4 +1,4 @@
-"""Setup Health rows for Intro & Credits (spec §7 item 6; plan phase 4, Task 9).
+"""Setup Health rows for Intro & Credits.
 
 Every row is built from the facts the server Edit tab already computed — the capability report behind
 ``GET /api/markers/servers/<id>/status`` — so the two surfaces can never disagree, and a server with Intro &
@@ -7,8 +7,7 @@ Credits switched off is never contacted for them.
 Two things ``web/static/js/servers.js`` requires of these rows:
 
 * ``severity`` is never ``"info"``: ``_partitionChecks`` drops an info row on purpose, so an info row would
-  simply never render. A row with nothing to fix is ``"recommended"`` with ``ok: True`` and lands in "All good"
-  (plan P-R6).
+  simply never render. A row with nothing to fix is ``"recommended"`` with ``ok: True`` and lands in "All good".
 * The Jellyfin and Emby plugin rows live in a section whose ``id`` is ``"plugin"``, whose first check's
   ``current`` is ``"not installed"`` or a version string — the install controls read exactly that.
 
@@ -39,7 +38,6 @@ PLUGIN_DOCS_ANCHOR = "plugin"
 CRITICAL = "critical"
 RECOMMENDED = "recommended"
 
-# --- The approved copy (evidence/design/phase4/ui-copy.md §7) ------------------------------------------------
 OFF_LABEL = "Intro & Credits is off for this server"
 OFF_REASON = "Nothing here is checked until you switch it on."
 OFF_TOOLTIP = "Turn it on in the Intro & Credits tab to send intro and credits markers to this server."
@@ -508,7 +506,7 @@ def _section(checks: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def off_section() -> dict[str, Any]:
-    """The one row a server with Intro & Credits switched off gets (plan P-R6).
+    """The one row a server with Intro & Credits switched off gets.
 
     Emitted as ``recommended`` + ``ok: True`` so it lands in "All good": an ``info`` row is dropped by
     ``servers.js _partitionChecks`` and would never render. No ``current``/``recommended`` pair — the label

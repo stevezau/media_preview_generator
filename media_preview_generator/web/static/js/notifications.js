@@ -164,7 +164,10 @@ function dismissNotificationSession(notificationId) {
         method: 'POST',
     })
         .then(function (r) { return r.json(); })
-        .then(function () {
+        .then(function (data) {
+            if (!data || !data.ok) {
+                throw new Error((data && data.error) || 'Unknown error');
+            }
             if (typeof showToast === 'function') {
                 showToast('Dismissed', 'Notification hidden for this session', 'info');
             }

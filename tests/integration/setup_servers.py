@@ -20,8 +20,9 @@ Two server types are fully automated:
   library at ``/jf-media``. ``--jellyfin-token``/``--jellyfin-user-id`` still
   accept a manually-captured token to skip the injection.
 
-Plex needs a one-time ``PLEX_CLAIM`` token from <https://plex.tv/claim>;
-its setup is not currently automated by this script.
+Plex needs a one-time ``PLEX_CLAIM`` token from <https://plex.tv/claim>
+(4-minute validity) set before the container starts. Once Plex has consumed
+it, ``setup_plex()`` reads the persisted admin token out of the container.
 
 The output ``servers.env`` is consumed by the integration tests (which
 import it via :mod:`os.environ` to address the live containers).
@@ -225,7 +226,9 @@ def _plugin_version() -> str:
 
     text = (_PLUGIN_DIR / "Jellyfin.Plugin.MediaPreviewBridge.csproj").read_text(encoding="utf-8")
     m = re.search(r"<Version>([^<]+)</Version>", text)
-    return m.group(1) if m else "10.11.0.0"
+    if not m:
+        raise RuntimeError("No <Version> in the Media Preview Bridge csproj; cannot name the plugin install dir")
+    return m.group(1)
 
 
 def _ensure_plugin_dll() -> Path:

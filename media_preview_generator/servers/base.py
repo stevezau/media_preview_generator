@@ -6,6 +6,7 @@ pipeline interacts with servers exclusively through this interface; vendor
 specifics live in concrete subclasses under this package.
 """
 
+import os
 import re
 import threading
 from abc import ABC, abstractmethod
@@ -51,6 +52,14 @@ class LibraryNotYetIndexedError(Exception):
     cadences: this one waits minutes for the server to catch up; transport
     failures retry within seconds.
     """
+
+
+# Plex's "never / scheduled / asap" choices for its own server-wide background generation prefs.
+NATIVE_MODES = {
+    "never": "Never",
+    "scheduled": "As a scheduled task",
+    "asap": "As a scheduled task and when media is added",
+}
 
 
 @dataclass(frozen=True)
@@ -482,15 +491,13 @@ class MediaServer(ABC):
                 try:
                     self._trigger_path_refresh(candidate)
                 except Exception as exc:
-                    logger.debug(
+                    logger.warning(
                         "Scan-nudge failed on {} for {}: {}",
                         self.name,
                         candidate,
                         exc,
                     )
         if deleted_paths:
-            import os as _os
-
             from ..config.paths import expand_path_mapping_candidates
 
             for old in deleted_paths:
@@ -501,10 +508,9 @@ class MediaServer(ABC):
                 # new content) lists the path of the file that was
                 # overwritten — telling the server it's deleted would
                 # drop a library entry that should stay. Same guard the
-                # cleanup function uses; both fired in the Gary (2026)
-                # smoke test 2026-05-09 before this fix.
+                # cleanup function uses.
                 try:
-                    if _os.path.exists(old):
+                    if os.path.exists(old):
                         logger.debug(
                             "Deleted-path nudge: skipping {!r} — still exists on disk.",
                             old,
@@ -518,7 +524,7 @@ class MediaServer(ABC):
                     # on a different mount. Stat each candidate before
                     # nudging the server.
                     try:
-                        if _os.path.exists(candidate):
+                        if os.path.exists(candidate):
                             logger.debug(
                                 "Deleted-path nudge on {}: candidate {!r} still exists; skipping.",
                                 self.name,
@@ -536,7 +542,7 @@ class MediaServer(ABC):
                     try:
                         self._trigger_path_deleted(candidate)
                     except Exception as exc:
-                        logger.debug(
+                        logger.warning(
                             "Deleted-path nudge failed on {} for {}: {}",
                             self.name,
                             candidate,
@@ -546,7 +552,7 @@ class MediaServer(ABC):
             try:
                 self._trigger_item_refresh(item_id)
             except Exception as exc:
-                logger.debug(
+                logger.warning(
                     "Item refresh failed on {} for item {}: {}",
                     self.name,
                     item_id,
@@ -817,7 +823,7 @@ class ServerConfig:
     exclude_paths: list[dict[str, Any]] = field(default_factory=list)
     output: dict[str, Any] = field(default_factory=dict)
     server_identity: str | None = None
-    # Intro & Credits per-server block (spec §8); validated by markers.settings.validate_server.
+    # Intro & Credits per-server block; validated by markers.settings.validate_server.
     markers: dict[str, Any] = field(default_factory=dict)
     # Plex loudness per-server block; validated by loudness.settings.validate_server_loudness.
     loudness: dict[str, Any] = field(default_factory=dict)

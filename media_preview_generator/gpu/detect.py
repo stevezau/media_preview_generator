@@ -28,10 +28,9 @@ from .enumeration import (
 from .ffmpeg_capabilities import (
     _get_ffmpeg_hwaccels,
     _is_hwaccel_available,
+    ffmpeg_binary,
 )
 from .vaapi_probe import _format_driver_label
-
-# MIN_FFMPEG_VERSION is re-exported from gpu/ffmpeg_capabilities.py above.
 
 # GPU vendor to acceleration method mapping
 # This defines which acceleration methods to use for each GPU vendor
@@ -82,21 +81,6 @@ GPU_ACCELERATION_MAP = {
         "test_encoder": None,  # Use hwaccel test instead
     },
 }
-
-# DRIVER_VENDOR_MAP moved to media_preview_generator/gpu/enumeration.py;
-# re-exported from this module's top-of-file imports for backwards compat.
-
-# VA-API driver probing moved to media_preview_generator/gpu/vaapi_probe.py;
-# re-exported from this module's top-of-file imports.
-
-
-# FFmpeg capability probing moved to media_preview_generator/gpu/ffmpeg_capabilities.py;
-# re-exported from this module's top-of-file imports.
-
-
-# Platform-specific GPU enumeration moved to
-# media_preview_generator/gpu/enumeration.py; re-exported from this
-# module's top-of-file imports.
 
 
 def _check_device_access(device_path: str) -> tuple[bool, str]:
@@ -231,7 +215,7 @@ def _test_hwaccel_functionality(
             return False
 
         # Build FFmpeg command - test hardware decode -> scale -> JPEG encode
-        cmd = ["ffmpeg"]
+        cmd = [ffmpeg_binary()]
 
         # Add hardware acceleration flags (before -i)
         if hwaccel == "cuda":

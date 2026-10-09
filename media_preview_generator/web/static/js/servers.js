@@ -1,8 +1,7 @@
 // Servers page — fetches /api/servers and drives the Add Server wizard.
 //
 // Stays vanilla JS / Bootstrap 5; no framework so the page mounts the same
-// way as the rest of the app. CSRF token comes from the <meta> tag the base
-// template renders.
+// way as the rest of the app. csrf_fetch.js adds the CSRF header to every write.
 
 (function () {
     'use strict';
@@ -10,21 +9,18 @@
     const $ = (sel, el) => (el || document).querySelector(sel);
     const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
 
-    function csrfToken() {
-        const meta = document.querySelector('meta[name="csrf-token"]');
-        return meta ? meta.getAttribute('content') : '';
-    }
-
     async function api(method, url, body) {
-        const opts = {
-            method,
-            headers: { 'X-CSRFToken': csrfToken() },
-        };
+        const opts = { method };
         if (body !== undefined) {
-            opts.headers['Content-Type'] = 'application/json';
+            opts.headers = { 'Content-Type': 'application/json' };
             opts.body = JSON.stringify(body);
         }
-        const r = await fetch(url, opts);
+        let r;
+        try {
+            r = await fetch(url, opts);
+        } catch (_) {
+            return { ok: false, status: 0, data: { error: 'Network error' } };
+        }
         let data = null;
         try { data = await r.json(); } catch (_) { /* non-JSON */ }
         return { ok: r.ok, status: r.status, data };
@@ -73,7 +69,7 @@
         list.innerHTML = '<div class="srv-state text-muted"><div class="spinner-border" role="status"></div></div>';
         const r = await api('GET', '/api/servers');
         if (!r.ok) {
-            list.innerHTML = `<div class="srv-state"><div class="alert alert-danger mb-0">Failed to load servers (HTTP ${r.status}).</div></div>`;
+            list.innerHTML = `<div class="srv-state"><div class="alert alert-danger mb-0">Failed to load servers (${r.status ? 'HTTP ' + r.status : 'network error'}).</div></div>`;
             return;
         }
         const servers = (r.data && r.data.servers) || [];
@@ -599,15 +595,6 @@
         return false;
     }
 
-    function escapeHtml(s) {
-        return String(s == null ? '' : s)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
-    }
-
     // ---------- Add Server wizard ---------------------------------------------
     const wizard = {
         type: null,
@@ -774,9 +761,9 @@
         document.addEventListener('click', (ev) => {
             const copy = ev.target.closest('.sm-qc-copy');
             if (copy) {
-                const value = copy.dataset.code || '';
-                if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(value).catch(() => {});
-                copy.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied';
+                copyToClipboard(copy.dataset.code || '').then((ok) => {
+                    if (ok) copy.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied';
+                });
                 return;
             }
             const cancel = ev.target.closest('.sm-qc-cancel');
@@ -880,10 +867,7 @@
                 btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Discovering servers…';
                 wizard.plexToken = token;
                 const r = await fetch('/api/plex/servers', {
-                    headers: {
-                        'X-Plex-Token': token,
-                        'X-CSRFToken': csrfToken(),
-                    },
+                    headers: { 'X-Plex-Token': token },
                 });
                 let data = null;
                 try { data = await r.json(); } catch (_) { /* */ }
@@ -1070,29 +1054,36 @@
         // Poll every 2 seconds.
         if (wizard.quickConnectPoll) clearInterval(wizard.quickConnectPoll);
         const startedAt = Date.now();
+        let polling = false;
         wizard.quickConnectPoll = setInterval(async () => {
-            const p = await api('POST', '/api/servers/auth/jellyfin/quick-connect/poll',
-                { url, secret: wizard.quickConnectSecret });
-            if (p.ok && p.data && p.data.authenticated) {
-                clearInterval(wizard.quickConnectPoll);
-                wizard.quickConnectPoll = null;
-                const e = await api('POST', '/api/servers/auth/jellyfin/quick-connect/exchange',
+            if (polling) return;
+            polling = true;
+            try {
+                const p = await api('POST', '/api/servers/auth/jellyfin/quick-connect/poll',
                     { url, secret: wizard.quickConnectSecret });
-                if (e.ok && e.data && e.data.ok) {
-                    wizard.accessToken = e.data.access_token;
-                    wizard.userId = e.data.user_id;
-                    renderQuickConnect(card, 'approved', {
-                        code: r.data.code, url: qcUrl, target: 'add',
-                        who: e.data.server_name || 'Jellyfin user', after: 'Continue with Test connection.',
-                    });
-                } else {
-                    card.className = 'sm-status bad';
-                    card.textContent = (e.data && e.data.message) || 'Token exchange failed';
+                if (p.ok && p.data && p.data.authenticated) {
+                    clearInterval(wizard.quickConnectPoll);
+                    wizard.quickConnectPoll = null;
+                    const e = await api('POST', '/api/servers/auth/jellyfin/quick-connect/exchange',
+                        { url, secret: wizard.quickConnectSecret });
+                    if (e.ok && e.data && e.data.ok) {
+                        wizard.accessToken = e.data.access_token;
+                        wizard.userId = e.data.user_id;
+                        renderQuickConnect(card, 'approved', {
+                            code: r.data.code, url: qcUrl, target: 'add',
+                            who: e.data.server_name || 'Jellyfin user', after: 'Continue with Test connection.',
+                        });
+                    } else {
+                        card.className = 'sm-status bad';
+                        card.textContent = (e.data && e.data.message) || 'Token exchange failed';
+                    }
+                } else if (quickConnectExpired(p, startedAt)) {
+                    clearInterval(wizard.quickConnectPoll);
+                    wizard.quickConnectPoll = null;
+                    renderQuickConnect(card, 'expired', { code: r.data.code, url: qcUrl, target: 'add' });
                 }
-            } else if (quickConnectExpired(p, startedAt)) {
-                clearInterval(wizard.quickConnectPoll);
-                wizard.quickConnectPoll = null;
-                renderQuickConnect(card, 'expired', { code: r.data.code, url: qcUrl, target: 'add' });
+            } finally {
+                polling = false;
             }
         }, 2000);
     }
@@ -1328,7 +1319,7 @@
             hintEl.className = 'sm-hint';
             const plugin = info.plugin || {};
             const installLink = plugin.install_url
-                ? ` <a href="${plugin.install_url}" target="_blank" rel="noopener">${escapeHtml(plugin.plugin_name || 'plugin')} install instructions ↗</a>`
+                ? ` <a href="${escapeHtml(plugin.install_url)}" target="_blank" rel="noopener">${escapeHtml(plugin.plugin_name || 'plugin')} install instructions ↗</a>`
                 : '';
             hintEl.innerHTML = '<i class="bi bi-info-circle me-1"></i>' +
                 'You need the ' + escapeHtml(plugin.plugin_name || 'webhook plugin') +
@@ -1343,14 +1334,8 @@
         }
 
         if (copyBtn && urlInput) {
-            copyBtn.onclick = () => {
-                const value = urlInput.value;
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(value).catch(() => {});
-                } else {
-                    urlInput.select();
-                    try { document.execCommand('copy'); } catch (_) {}
-                }
+            copyBtn.onclick = async () => {
+                if (!await copyToClipboard(urlInput.value)) return;
                 copyBtn.innerHTML = '<i class="bi bi-check2"></i>';
                 setTimeout(() => { copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>'; }, 1500);
             };
@@ -1504,33 +1489,40 @@
 
         if (_editReauthQcPoll) clearInterval(_editReauthQcPoll);
         const startedAt = Date.now();
+        let polling = false;
         _editReauthQcPoll = setInterval(async () => {
-            const p = await api('POST', '/api/servers/auth/jellyfin/quick-connect/poll',
-                { url, secret: _editReauthQcSecret });
-            if (p.ok && p.data && p.data.authenticated) {
-                clearInterval(_editReauthQcPoll);
-                _editReauthQcPoll = null;
-                const e = await api('POST', '/api/servers/auth/jellyfin/quick-connect/exchange',
+            if (polling) return;
+            polling = true;
+            try {
+                const p = await api('POST', '/api/servers/auth/jellyfin/quick-connect/poll',
                     { url, secret: _editReauthQcSecret });
-                if (e.ok && e.data && e.data.ok) {
-                    document.getElementById('editReauthPending').value = JSON.stringify({
-                        method: 'quick_connect',
-                        access_token: e.data.access_token,
-                        user_id: e.data.user_id,
-                    });
-                    setEditDirty(true);
-                    renderQuickConnect(status, 'approved', {
-                        code: r.data.code, url: qcUrl, target: 'edit',
-                        who: e.data.server_name || 'Jellyfin user', after: 'Click Save changes to apply.',
-                    });
-                } else {
-                    status.className = 'sm-status bad';
-                    status.textContent = (e.data && e.data.message) || 'Token exchange failed';
+                if (p.ok && p.data && p.data.authenticated) {
+                    clearInterval(_editReauthQcPoll);
+                    _editReauthQcPoll = null;
+                    const e = await api('POST', '/api/servers/auth/jellyfin/quick-connect/exchange',
+                        { url, secret: _editReauthQcSecret });
+                    if (e.ok && e.data && e.data.ok) {
+                        document.getElementById('editReauthPending').value = JSON.stringify({
+                            method: 'quick_connect',
+                            access_token: e.data.access_token,
+                            user_id: e.data.user_id,
+                        });
+                        setEditDirty(true);
+                        renderQuickConnect(status, 'approved', {
+                            code: r.data.code, url: qcUrl, target: 'edit',
+                            who: e.data.server_name || 'Jellyfin user', after: 'Click Save changes to apply.',
+                        });
+                    } else {
+                        status.className = 'sm-status bad';
+                        status.textContent = (e.data && e.data.message) || 'Token exchange failed';
+                    }
+                } else if (quickConnectExpired(p, startedAt)) {
+                    clearInterval(_editReauthQcPoll);
+                    _editReauthQcPoll = null;
+                    renderQuickConnect(status, 'expired', { code: r.data.code, url: qcUrl, target: 'edit' });
                 }
-            } else if (quickConnectExpired(p, startedAt)) {
-                clearInterval(_editReauthQcPoll);
-                _editReauthQcPoll = null;
-                renderQuickConnect(status, 'expired', { code: r.data.code, url: qcUrl, target: 'edit' });
+            } finally {
+                polling = false;
             }
         }, 2000);
     }
@@ -2049,10 +2041,7 @@
         try {
             const resp = await fetch(endpoint, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': typeof getCsrfToken === 'function' ? getCsrfToken() : '',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path }),
             });
             const data = await resp.json();
@@ -2283,99 +2272,6 @@
         }
     }
 
-    async function setVendorExtraction(scanExtraction) {
-        const id = ($('#editServerId').value || '').trim();
-        if (!id) return;
-        const result = document.getElementById('editVendorExtractionResult');
-        const disableBtn = document.getElementById('editDisableVendorExtractionBtn');
-        const enableBtn = document.getElementById('editEnableVendorExtractionBtn');
-        const both = [disableBtn, enableBtn].filter(Boolean);
-        const labels = both.map(b => b.innerHTML);
-        both.forEach(b => { b.disabled = true; });
-        const targetBtn = scanExtraction ? enableBtn : disableBtn;
-        if (targetBtn) targetBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Working…';
-        result.className = 'small text-muted';
-        result.textContent = '';
-        try {
-            const r = await api('POST', `/api/servers/${encodeURIComponent(id)}/vendor-extraction`, { scan_extraction: scanExtraction });
-            const data = r.data || {};
-            const okCount = data.ok_count || 0;
-            const skippedCount = data.skipped_count || 0;
-            const errorCount = data.error_count || 0;
-            const total = data.total || 0;
-            const verb = scanExtraction ? 'Re-enabled' : 'Disabled';
-            const parts = [`${okCount}/${total} libraries`];
-            if (skippedCount > 0) parts.push(`${skippedCount} skipped (custom agent — toggle in Plex UI)`);
-            if (errorCount > 0) parts.push(`${errorCount} failed`);
-            if (errorCount === 0) {
-                result.className = skippedCount > 0 ? 'small text-warning' : 'small text-success';
-                result.innerHTML = `<i class="bi bi-${skippedCount > 0 ? 'info-circle' : 'check-circle'} me-1"></i>${verb}: ${parts.join(' · ')}`;
-            } else {
-                result.className = 'small text-danger';
-                result.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i>${verb}: ${parts.join(' · ')} — see Logs page`;
-            }
-        } catch (e) {
-            result.className = 'small text-danger';
-            result.textContent = String(e);
-        } finally {
-            both.forEach((b, i) => { b.disabled = false; b.innerHTML = labels[i]; });
-            // Re-probe so the panel snaps to the new state's CTA.
-            renderVendorExtractionState(id);
-        }
-    }
-
-    async function renderVendorExtractionState(serverId) {
-        // Probe per-library state and pick the right CTA. Avoids
-        // showing both Disable and Re-enable when one of them would
-        // be a no-op. Critical → red, mixed → yellow,
-        // already-recommended → success message + small Re-enable link.
-        const disableBtn = document.getElementById('editDisableVendorExtractionBtn');
-        const enableBtn = document.getElementById('editEnableVendorExtractionBtn');
-        const stateMsg = document.getElementById('editVendorExtractionState');
-        if (!disableBtn || !enableBtn) return;
-        // Default to hiding both until the probe answers.
-        disableBtn.classList.add('d-none');
-        enableBtn.classList.add('d-none');
-        if (stateMsg) { stateMsg.className = 'small text-muted'; stateMsg.textContent = 'Checking…'; }
-
-        const r = await api('GET', `/api/servers/${encodeURIComponent(serverId)}/vendor-extraction/status`);
-        if (!r.ok || !r.data) {
-            // Probe failed — show both buttons so the user can still act manually.
-            disableBtn.classList.remove('d-none');
-            enableBtn.className = 'btn btn-sm btn-outline-secondary';
-            if (stateMsg) { stateMsg.className = 'small text-warning'; stateMsg.textContent = 'Could not check current state — try Test Connection above.'; }
-            return;
-        }
-
-        const { extracting_count = 0, stopped_count = 0, skipped_count = 0, total = 0 } = r.data;
-        if (stateMsg) {
-            const fragments = [];
-            if (stopped_count > 0) fragments.push(`${stopped_count}/${total} disabled`);
-            if (skipped_count > 0) fragments.push(`${skipped_count} skipped (custom agent — toggle in Plex UI)`);
-            stateMsg.textContent = fragments.length > 0 ? fragments.join(' · ') : '';
-            stateMsg.className = 'small text-muted';
-        }
-
-        if (extracting_count > 0) {
-            // At least one library is still doing its own extraction —
-            // primary action is "disable on this server" (idempotent for
-            // libraries already disabled).
-            disableBtn.classList.remove('d-none');
-            disableBtn.disabled = false;
-            disableBtn.innerHTML = '<i class="bi bi-stop-circle me-1"></i>Disable on this server';
-        } else {
-            // All libraries at recommended state — hide Disable, keep Re-enable available for revert.
-            disableBtn.classList.add('d-none');
-            enableBtn.className = 'btn btn-sm btn-outline-secondary';
-            enableBtn.disabled = false;
-            enableBtn.innerHTML = 'Re-enable';
-            if (stateMsg) {
-                stateMsg.className = 'small text-success';
-                stateMsg.innerHTML = `<i class="bi bi-check-circle me-1"></i>Server isn't generating its own previews. ${skipped_count > 0 ? `(${skipped_count} library could not be checked — toggle in Plex UI.)` : ''}`;
-            }
-        }
-    }
-
     async function testEditConnection() {
         const id = ($('#editServerId').value || '').trim();
         if (!id) return;
@@ -2402,10 +2298,6 @@
                     setCredFormsOpen(true);
                 }
             }
-            // Plugin badge — only present in the response for Jellyfin
-            // servers that connected successfully. updateJellyfinPluginPanel
-            // hides the panel for non-Jellyfin and missing-plugin cases.
-            updateJellyfinPluginPanel(data.plugin);
         } catch (e) {
             result.className = 'sm-tres bad';
             result.textContent = String(e);
@@ -2450,11 +2342,9 @@
         const body = document.getElementById('editReadinessBody');
         const fixCtl = document.getElementById('editReadinessFixControls');
         const fixResult = document.getElementById('editReadinessFixResult');
-        const pluginCtl = document.getElementById('editReadinessPluginControls');
         if (!group || !badge || !body || !fixCtl) return;
         group.classList.remove('d-none');
         fixCtl.classList.add('d-none');
-        if (pluginCtl) pluginCtl.classList.add('d-none');
         if (fixResult) { fixResult.className = 'sm-hint'; fixResult.textContent = ''; }
         badge.className = 'pill';
         badge.textContent = 'disabled';
@@ -2469,14 +2359,12 @@
         const body = document.getElementById('editReadinessBody');
         const fixCtl = document.getElementById('editReadinessFixControls');
         const fixResult = document.getElementById('editReadinessFixResult');
-        const pluginCtl = document.getElementById('editReadinessPluginControls');
         if (!group || !badge || !body || !fixCtl) return;
 
         // Reset state from any prior modal open.
         group.classList.remove('d-none');
         body.innerHTML = '';
         fixCtl.classList.add('d-none');
-        if (pluginCtl) pluginCtl.classList.add('d-none');
         if (fixResult) { fixResult.className = 'sm-hint'; fixResult.textContent = ''; }
         badge.className = 'pill';
         badge.textContent = 'checking…';
@@ -2589,7 +2477,6 @@
         const body = document.getElementById('editReadinessBody');
         const fixCtl = document.getElementById('editReadinessFixControls');
         const fixCritBtn = document.getElementById('editReadinessFixCriticalBtn');
-        const pluginCtl = document.getElementById('editReadinessPluginControls');
         if (!badge || !body || !fixCtl) return;
 
         const sections = data.sections || [];
@@ -2684,10 +2571,6 @@
                 fixCritBtn.classList.add('d-none');
             }
         }
-
-        // Hide the legacy plugin opt-in checkbox — install happens
-        // inline via the per-check toggle now.
-        if (pluginCtl) pluginCtl.classList.add('d-none');
 
         // Re-init Bootstrap tooltips on any new ⓘ icons.
         if (typeof _initBootstrapTooltips === 'function') {
@@ -2869,13 +2752,13 @@
             tierBadge = '<span class="badge bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle" title="Recommended optimisation — currently applied.">Recommended</span>';
         } else if (sev === 'critical' && !hasFixAction) {
             tone = 'bad';
-            tierBadge = `<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle" title="${escapeAttr(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
+            tierBadge = `<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle" title="${escapeHtml(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
         } else if (sev === 'critical') {
             tone = 'bad';
             tierBadge = '<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle" title="Required for the server to work — apply the fix.">Required — fix to enable</span>';
         } else if (!hasFixAction) {
             tone = 'warn';
-            tierBadge = `<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle" title="${escapeAttr(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
+            tierBadge = `<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle" title="${escapeHtml(manualBadgeTitle)}">${escapeHtml(manualBadgeText)}</span>`;
         } else {
             tone = 'warn';
             tierBadge = '<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle" title="Recommended improvement — server still works without it.">Recommended</span>';
@@ -2894,16 +2777,16 @@
         const infoIcon = (tooltip || explanationHtml)
             ? `<button type="button" class="info-icon" `
                 + `data-bs-toggle="tooltip" data-bs-placement="top" `
-                + `title="${escapeAttr(tooltip || reason)}" `
-                + `data-explain-title="${escapeAttr(check.label || tooltip || 'About this check')}" `
-                + `aria-label="Explain ${escapeAttr(check.label || '')}">`
+                + `title="${escapeHtml(tooltip || reason)}" `
+                + `data-explain-title="${escapeHtml(check.label || tooltip || 'About this check')}" `
+                + `aria-label="Explain ${escapeHtml(check.label || '')}">`
                 + `<i class="bi bi-info-circle"></i></button>`
             : '';
 
         const valuesHtml = _renderValueDiff(check.current, check.recommended, ok, check.label || '');
 
         const reasonStr = reason
-            ? `<div class="rd-reason" title="${escapeAttr(reason)}">${escapeHtml(reason)}</div>`
+            ? `<div class="rd-reason" title="${escapeHtml(reason)}">${escapeHtml(reason)}</div>`
             : '';
 
         const labelHtml = escapeHtml(check.label || check.id || '');
@@ -3317,12 +3200,9 @@
         const submitBtn = document.getElementById('readinessConfirmSubmit');
 
         if (titleEl) titleEl.textContent = 'Confirm action';
-        // ``confirm.body`` is server-emitted HTML (Python code in the
-        // readiness probes). Render it as HTML so ``<code>``,
-        // ``<strong>``, ``<br>`` etc. format correctly — pre-fix this
-        // used ``textContent`` and users saw literal tag markup in
-        // the confirmation modal.
-        if (bodyEl) bodyEl.innerHTML = confirm.body || '';
+        // ``confirm.body`` is server-built HTML (``<code>``, ``<strong>``, ``<br>``); the sanitizer keeps only that
+        // formatting in case an interpolated name was not escaped server-side.
+        if (bodyEl) bodyEl.innerHTML = sanitizeNotificationHtml(confirm.body || '');
         const kind = confirm.kind || 'button';
         const phrase = confirm.phrase || '';
 
@@ -3376,38 +3256,6 @@
         return plugin.checks[0].current !== 'not installed';
     }
 
-    function _makeSection(title) {
-        // No external docs link — see _renderSectionSubhead. Row-level
-        // ⓘ icons open the inline explain modal which is the only
-        // place rich help text should live.
-        const sec = document.createElement('div');
-        sec.className = 'mb-3';
-        const heading = document.createElement('div');
-        heading.className = 'text-muted small text-uppercase fw-bold mb-1 d-flex align-items-center gap-1';
-        heading.style.letterSpacing = '0.5px';
-        const label = document.createElement('span');
-        label.textContent = title;
-        heading.appendChild(label);
-        sec.appendChild(heading);
-        return sec;
-    }
-
-    function _makeRow({ ok, severity, label, reason, htmlLabel }) {
-        const row = document.createElement('div');
-        row.className = 'd-flex align-items-start gap-2 mb-1';
-        const icon = ok
-            ? '<i class="bi bi-check-circle-fill text-success mt-1"></i>'
-            : (severity === 'critical'
-                ? '<i class="bi bi-x-circle-fill text-danger mt-1"></i>'
-                : '<i class="bi bi-exclamation-triangle-fill text-warning mt-1"></i>');
-        const renderedLabel = htmlLabel ? label : escapeHtml(label);
-        const detail = reason
-            ? `<div class="small text-muted">${escapeHtml(reason)}</div>`
-            : '';
-        row.innerHTML = `${icon}<div class="flex-grow-1">${renderedLabel}${detail}</div>`;
-        return row;
-    }
-
     // Poll /previews-readiness until ``predicate(data)`` holds, or we
     // hit ``deadlineMs``. Used after install/fix actions to reflect the
     // post-action state without racing Jellyfin's ~15-30s restart.
@@ -3430,91 +3278,6 @@
         // "action needed" if install failed).
         await runReadinessProbe(serverId, serverType);
         return null;
-    }
-
-    async function runReadinessFixAll(serverId, serverType) {
-        const fixCtl = document.getElementById('editReadinessFixControls');
-        const fixBtn = document.getElementById('editReadinessFixAllBtn');
-        const fixResult = document.getElementById('editReadinessFixResult');
-        if (!fixCtl || !fixBtn) return;
-
-        const vendor = (serverType || '').toLowerCase();
-        const isJellyfin = vendor === 'jellyfin';
-
-        // Figure out whether we actually need to install the plugin.
-        // Default: install if Jellyfin AND plugin currently absent per
-        // the last-rendered readiness. Legacy checkbox from the old
-        // collapse-block is honoured if someone has it ticked.
-        const pluginOptIn = document.getElementById('editReadinessPluginOptIn');
-        // If the checkbox exists and user explicitly unchecked it,
-        // respect that. Otherwise default based on current state.
-        let installPlugin = true;
-        if (pluginOptIn && pluginOptIn.dataset.userTouched === 'true') {
-            installPlugin = !!pluginOptIn.checked;
-        }
-
-        const original = fixBtn.innerHTML;
-        fixBtn.disabled = true;
-        fixBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Fixing…';
-        if (fixResult) { fixResult.className = 'small text-muted'; fixResult.textContent = ''; }
-
-        try {
-            let r;
-            if (isJellyfin) {
-                r = await api('POST', `/api/servers/${encodeURIComponent(serverId)}/trickplay-fix-all`, {
-                    install_plugin: installPlugin,
-                });
-            } else {
-                // Emby + Plex: the only fixable things are the
-                // vendor-extraction toggles. Drive those via the
-                // existing endpoints.
-                r = await api('POST', `/api/servers/${encodeURIComponent(serverId)}/health-check/apply`, {});
-            }
-            if (!r.ok || !r.data) {
-                if (fixResult) {
-                    fixResult.className = 'small text-danger';
-                    fixResult.textContent = `Failed: HTTP ${r.status}`;
-                }
-                return;
-            }
-            const allOk = !!r.data.ok;
-            if (fixResult) {
-                if (allOk) {
-                    fixResult.className = 'small text-success';
-                    fixResult.textContent = installPlugin && isJellyfin
-                        ? '✓ Fix applied. Waiting for Jellyfin restart…'
-                        : '✓ Fix applied. Re-probing…';
-                } else {
-                    fixResult.className = 'small text-warning';
-                    fixResult.textContent = `Some steps failed: ${escapeHtml(r.data.error || 'see logs')}`;
-                }
-            }
-            // Re-probe with convergence polling. If we requested a plugin
-            // install, wait until plugin.installed=true (Jellyfin takes
-            // 15-30s to restart). Otherwise just reflect the current
-            // state immediately.
-            if (isJellyfin && installPlugin) {
-                await reprobeUntilConverged(
-                    serverId,
-                    serverType,
-                    (d) => _pluginInstalledFromEnvelope(d) === true,
-                    { deadlineMs: 90_000, intervalMs: 3_000 },
-                );
-            } else {
-                await runReadinessProbe(serverId, serverType);
-            }
-        } finally {
-            fixBtn.disabled = false;
-            fixBtn.innerHTML = original;
-        }
-    }
-
-    // Legacy health-check probe kept for back-compat; new Edit modal
-    // flow uses runReadinessProbe instead.
-    async function runHealthCheckProbe(serverId) {
-        // Deprecated — no-op. Left in place so external callers (if any)
-        // don't raise ReferenceError.
-        void serverId;
     }
 
     function formatHealthValue(v) {
@@ -3826,147 +3589,6 @@
         modal.show();
     }
 
-    function escapeHtml(s) {
-        return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    }
-    function escapeAttr(s) {
-        return escapeHtml(s);
-    }
-
-    async function applyHealthFixes(serverId) {
-        const fixCtl = document.getElementById('editHealthFixControls');
-        const fixBtn = document.getElementById('editHealthFixAllBtn');
-        const fixResult = document.getElementById('editHealthFixResult');
-        if (!fixCtl || !fixBtn) return;
-
-        const original = fixBtn.innerHTML;
-        fixBtn.disabled = true;
-        fixBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Applying…';
-        if (fixResult) { fixResult.className = 'small text-muted'; fixResult.textContent = ''; }
-
-        try {
-            const r = await api('POST', `/api/servers/${encodeURIComponent(serverId)}/health-check/apply`, {});
-            if (!r.ok || !r.data) {
-                if (fixResult) {
-                    fixResult.className = 'small text-danger';
-                    fixResult.textContent = `Failed: HTTP ${r.status}`;
-                }
-                return;
-            }
-            const allOk = !!r.data.ok;
-            const okCount = Object.values(r.data.results || {}).filter((v) => v === 'ok').length;
-            const errCount = Object.values(r.data.results || {}).filter((v) => v !== 'ok').length;
-            if (fixResult) {
-                if (allOk) {
-                    fixResult.className = 'small text-success';
-                    fixResult.textContent = `✓ Applied ${okCount} setting${okCount === 1 ? '' : 's'}`;
-                } else if (okCount > 0) {
-                    fixResult.className = 'small text-warning';
-                    fixResult.textContent = `Applied ${okCount}, ${errCount} failed — see logs`;
-                } else {
-                    fixResult.className = 'small text-danger';
-                    fixResult.textContent = `Failed: ${errCount} error${errCount === 1 ? '' : 's'}`;
-                }
-            }
-            // Re-probe so the panel reflects the new state.
-            runHealthCheckProbe(serverId);
-        } finally {
-            fixBtn.disabled = false;
-            fixBtn.innerHTML = original;
-        }
-    }
-
-    // ─── Media Preview Bridge plugin status / install ──────────────────
-    // Drives the Jellyfin-only "Media Preview Bridge plugin" card in the
-    // Edit Server modal. Visible only when the connection succeeded AND
-    // the server is Jellyfin.
-    function updateJellyfinPluginPanel(plugin) {
-        const group = document.getElementById('editJellyfinPluginGroup');
-        const badge = document.getElementById('editJellyfinPluginBadge');
-        const installBtn = document.getElementById('editInstallPluginBtn');
-        if (!group || !badge) return;
-
-        if (!plugin) {
-            // Non-Jellyfin or connection failed — hide the panel entirely.
-            group.classList.add('d-none');
-            return;
-        }
-        group.classList.remove('d-none');
-        if (plugin.installed) {
-            badge.className = 'badge bg-success ms-1';
-            badge.textContent = `installed${plugin.version ? ` · v${plugin.version}` : ''}`;
-            if (installBtn) installBtn.classList.add('d-none');
-        } else {
-            badge.className = 'badge bg-warning text-dark ms-1';
-            badge.textContent = 'not installed';
-            if (installBtn) installBtn.classList.remove('d-none');
-        }
-    }
-
-    async function installJellyfinPlugin() {
-        const id = ($('#editServerId').value || '').trim();
-        if (!id) return;
-        const btn = document.getElementById('editInstallPluginBtn');
-        const result = document.getElementById('editInstallPluginResult');
-        const original = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Installing…';
-        result.className = 'small text-muted';
-        result.textContent = 'Adding repo, queuing install, requesting Jellyfin restart…';
-        try {
-            const r = await api('POST', `/api/servers/${encodeURIComponent(id)}/install-plugin`);
-            const data = r.data || {};
-            if (!data.ok) {
-                result.className = 'small text-danger';
-                result.innerHTML = `<i class="bi bi-x-circle me-1"></i>${escapeHtml(data.error || 'Install failed')}`;
-                return;
-            }
-            result.className = 'small text-info';
-            result.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Jellyfin restarting — polling for plugin (up to 60s)…';
-
-            // Poll the test-connection endpoint every 3s; flip the badge
-            // when it reports plugin.installed=true. 60s deadline matches
-            // a typical Jellyfin restart on a small install.
-            const deadline = Date.now() + 60_000;
-            while (Date.now() < deadline) {
-                await new Promise((res) => setTimeout(res, 3000));
-                try {
-                    const probe = await api('POST', `/api/servers/${encodeURIComponent(id)}/test-connection`);
-                    const probePlugin = probe.data && probe.data.plugin;
-                    if (probePlugin && probePlugin.installed) {
-                        updateJellyfinPluginPanel(probePlugin);
-                        result.className = 'small text-success';
-                        result.innerHTML = `<i class="bi bi-check-circle me-1"></i>Plugin installed (v${escapeHtml(probePlugin.version || '?')}) — Jellyfin will now register published trickplay instantly.`;
-                        return;
-                    }
-                } catch (_) {
-                    // Keep polling — Jellyfin may still be down mid-restart.
-                }
-            }
-            result.className = 'small text-warning';
-            result.innerHTML = '<i class="bi bi-clock-history me-1"></i>Restart taking longer than expected. Click Test Connection in a minute to re-check the plugin status.';
-        } catch (e) {
-            result.className = 'small text-danger';
-            result.textContent = String(e);
-        } finally {
-            btn.disabled = false;
-            btn.innerHTML = original;
-        }
-    }
-
-    function copyPluginRepoUrl() {
-        const input = document.getElementById('editJellyfinPluginRepoUrl');
-        if (!input) return;
-        navigator.clipboard.writeText(input.value).then(
-            () => showToast('Copied', 'Plugin repo URL copied to clipboard.', 'success'),
-            () => {
-                input.select();
-                document.execCommand('copy');
-                showToast('Copied', 'Plugin repo URL copied (fallback).', 'success');
-            }
-        );
-    }
-
     async function refreshLibrariesFromModal(btn) {
         const id = ($('#editServerId').value || '').trim();
         if (!id) return;
@@ -4145,15 +3767,6 @@
             const type = (_editState && _editState.server && _editState.server.type) || '';
             if (id) runReadinessProbe(id, type);
         });
-        // Plugin opt-out warning — show when the user unticks the checkbox.
-        const pluginOptIn = document.getElementById('editReadinessPluginOptIn');
-        const pluginOptOutWarning = document.getElementById('editReadinessPluginOptOutWarning');
-        if (pluginOptIn && pluginOptOutWarning) {
-            pluginOptIn.addEventListener('change', () => {
-                pluginOptOutWarning.classList.toggle('d-none', pluginOptIn.checked);
-            });
-        }
-
         // D24 — vendor-aware re-auth wiring inside the Edit modal.
         document.querySelectorAll('input[name="editReauthJfMethod"]').forEach((r) =>
             r.addEventListener('change', _onEditReauthMethodChange));
@@ -4209,8 +3822,6 @@
     window.MPGShared.validateLocalPathInput = _validateLocalPathInput;
     window.MPGShared.debouncedValidatePath = _debouncedValidatePath;
     window.MPGShared.addPathMappingRow = addPathMappingRow;
-    // Quote-safe (attribute values too); markers_server_tab.js renders with it.
-    window.MPGShared.escapeHtml = escapeHtml;
     // Used by the /setup wizard's vendor picker to enter the inlined
     // connection form at "step-connect" without going through #step-type
     // (which only exists in the modal).

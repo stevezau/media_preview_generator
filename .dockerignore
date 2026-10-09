@@ -40,7 +40,6 @@ media_preview_generator/_version.py
 .env
 .env.*
 *.local
-env.example
 
 # Virtual environments
 venv/
@@ -61,5 +60,10 @@ docs/
 # Unraid templates (not needed in image)
 unraid-templates/
 
-# Copilot processing file
-Copilot-Processing.md
+# Sources the app image never COPYs (it uses only scripts/fetch_textdet_model.py from here).
+# plex-marker-agent/ stays in: its image builds from the repo root context.
+emby-plugin/
+jellyfin-plugin/
+tools/
+scripts/*
+!scripts/fetch_textdet_model.py

@@ -15,8 +15,8 @@ brought up by ``docker-compose.test.yml``. They are NOT mocked. They:
   per-vendor admin tokens captured from a live boot.
 * Take 5–60s each (real FFmpeg on real video, real HTTP to containers).
 
-To keep the default ``pytest`` run fast (~5s, 1300+ tests, no Docker
-dependency), every test file here is decorated with
+To keep the default ``pytest`` run fast with no Docker dependency, every
+test file here is decorated with
 ``@pytest.mark.integration`` (file-level ``pytestmark`` or per-class).
 The default ``pyproject.toml`` ``addopts`` includes
 ``-m "not gpu and not e2e and not integration"`` which deselects the
@@ -26,8 +26,8 @@ Explicit invocations:
 
 * ``pytest -m integration --no-cov tests/integration/`` — full suite
   against the live containers (boot the stack first).
-* ``pytest --no-cov tests/integration/`` — collects 94 tests but selects
-  0 (default ``-m`` filter still applies).  Confirms no ImportError.
+* ``pytest --no-cov tests/integration/`` — collects the whole directory but
+  selects 0 (default ``-m`` filter still applies).  Confirms no ImportError.
 
 If you ever see ``no tests collected`` from an explicit
 ``-m integration`` invocation, the most likely cause is a missing
@@ -42,12 +42,55 @@ documents the ``integration`` marker explicitly.
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 HERE = Path(__file__).resolve().parent
 SERVERS_ENV = HERE / "servers.env"
+
+BIF_MAGIC = bytes([0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A])
+JPEG_SOI = bytes([0xFF, 0xD8, 0xFF])
+
+
+def assert_webhook_queued(response, kind: str, canonical: str) -> None:
+    """Assert a webhook was accepted, classified as ``kind`` and queued as one Job for ``canonical``.
+
+    Webhooks only queue a Job (run later by the job runner), so the response
+    cannot say anything about published output.
+    """
+    from media_preview_generator.web.jobs import get_job_manager
+
+    assert response.status_code == 202, response.get_data(as_text=True)
+    body = response.get_json()
+    assert body["status"] == "queued", body
+    assert body["kind"] == kind, body
+    assert body["canonical_path"] == canonical, body
+    job = get_job_manager().get_job(body["job_id"])
+    assert job is not None, body
+    assert job.config["webhook_paths"] == [canonical], job.config
+
+
+def decode_bif_count(path: Path) -> int:
+    """Return the image count from a BIF header after checking its magic."""
+    raw = path.read_bytes()
+    assert raw[:8] == BIF_MAGIC
+    return struct.unpack("<I", raw[12:16])[0]
+
+
+def decode_bif(path: Path) -> dict:
+    """Validate a BIF's magic and first-frame JPEG marker; return basic metadata."""
+    raw = path.read_bytes()
+    assert len(raw) >= 64
+    assert raw[:8] == BIF_MAGIC
+    image_count = struct.unpack("<I", raw[12:16])[0]
+    interval_ms = struct.unpack("<I", raw[16:20])[0]
+    assert image_count > 0
+    first_offset = struct.unpack("<I", raw[64 + 4 : 64 + 8])[0]
+    assert raw[first_offset : first_offset + 3] == JPEG_SOI
+    return {"image_count": image_count, "interval_ms": interval_ms, "size_bytes": len(raw)}
 
 
 def _parse_env(path: Path) -> dict[str, str]:
@@ -129,9 +172,54 @@ def media_root() -> Path:
 
 @pytest.fixture(autouse=True)
 def _reset_singletons():
-    """Reset the frame-cache singleton between tests in this directory."""
+    """Reset the frame-cache and webhook de-duplication state between tests in this directory.
+
+    Without the webhook reset, a second test posting the same file within the
+    dedup window is silently dropped as a duplicate of the first.
+    """
     from media_preview_generator.processing.frame_cache import reset_frame_cache
+    from media_preview_generator.web.webhooks import reset_webhook_debounce
 
     reset_frame_cache()
+    reset_webhook_debounce()
     yield
     reset_frame_cache()
+    reset_webhook_debounce()
+
+
+@pytest.fixture
+def live_config(tmp_path: Path) -> MagicMock:
+    """Config-shaped MagicMock for the live-stack tests: no Plex, CPU-only FFmpeg.
+
+    Config is a frozen dataclass at runtime and the pipeline reads only a few
+    attributes, so a MagicMock with explicit values avoids building the full
+    schema while still hitting real FFmpeg. Tests that need Plex or a plex
+    config folder override the relevant attributes in their own fixture.
+    """
+    config = MagicMock()
+    config.plex_url = ""
+    config.plex_token = ""
+    config.plex_timeout = 60
+    config.plex_libraries = []
+    config.plex_config_folder = ""
+    config.plex_local_videos_path_mapping = ""
+    config.plex_videos_path_mapping = ""
+    config.path_mappings = []
+    config.plex_bif_frame_interval = 5
+    config.thumbnail_quality = 4
+    config.regenerate_thumbnails = False
+    config.gpu_threads = 0
+    config.cpu_threads = 2
+    config.gpu_config = []
+    config.tmp_folder = str(tmp_path / "tmp")
+    config.working_tmp_folder = str(tmp_path / "tmp")
+    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
+    config.tmp_folder_created_by_us = False
+    config.ffmpeg_path = "/usr/bin/ffmpeg"
+    config.ffmpeg_threads = 2
+    config.tonemap_algorithm = "hable"
+    config.log_level = "INFO"
+    config.worker_pool_timeout = 60
+    config.plex_library_ids = None
+    config.plex_verify_ssl = True
+    return config

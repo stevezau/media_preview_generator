@@ -186,28 +186,6 @@ class TestCheckedEpisode:
 
 
 @pytest.mark.e2e
-class TestBackToAutomatic:
-    def test_back_to_automatic_unlocks_the_types_you_set(self, authed_page: Page, app_url: str) -> None:
-        api = fx.InspectorApi()
-        file, item = fx.checked_episode()
-        item["decisions"]["credits"]["marker"]["locked"] = True
-        item["decisions"]["credits"]["marker"]["decided_by"] = ["user"]
-        api.add(file, item, fx.default_kinds(fx.EPISODE))
-        fx.install(authed_page, api)
-        _open(authed_page, app_url, fx.EPISODE)
-
-        locked = authed_page.locator("#inspLocked")
-        expect(locked.locator(".insp-ev-found")).to_have_text("Credits 24:59 → end")
-        expect(locked.locator(".insp-ev-note")).to_have_text("Locked · later checks keep them")
-        authed_page.locator("#inspUnlock").click()
-        with authed_page.expect_response(
-            lambda r: r.url.endswith("/api/markers/item/markers") and r.request.method == "DELETE"
-        ):
-            authed_page.locator("#inspUnlockConfirm").click()
-        assert api.unlocks == [{"path": fx.EPISODE, "types": ["credits"]}]
-
-
-@pytest.mark.e2e
 class TestAdjust:
     def test_nudging_an_edge_reads_exact_frames_and_saves_the_new_time(self, authed_page: Page, app_url: str) -> None:
         api = fx.install(authed_page)

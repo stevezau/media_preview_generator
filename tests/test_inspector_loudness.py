@@ -305,3 +305,13 @@ def test_preview_metadata_failure_does_not_hide_native_loudness(authed_client, f
     assert row["state"] == "available"
     assert row["streams"][0]["integrated_lufs"] == -23.1
     native.query.assert_called_once_with("/library/metadata/42")
+
+
+def test_unreadable_local_file_is_not_reported_as_a_plex_failure(tmp_path):
+    from media_preview_generator.inspector.loudness import _server_loudness
+    from media_preview_generator.servers.base import ServerConfig, ServerType
+
+    cfg = ServerConfig(id="plex-gone", name="Plex", type=ServerType.PLEX, enabled=True, url="http://plex", auth={})
+    row = _server_loudness(cfg, object(), str(tmp_path / "missing.mkv"), [], "1")
+    assert row["state"] == "unavailable"
+    assert "disk" in row["note"]

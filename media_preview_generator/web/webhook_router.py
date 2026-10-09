@@ -46,6 +46,7 @@ from ..servers import (
     WebhookEvent,
 )
 from ..servers.ownership import apply_path_mappings
+from .routes._helpers import _param_to_bool
 from .settings_manager import get_settings_manager
 from .webhooks import _authenticate_webhook, _validate_webhook_delay, create_vendor_webhook_job, webhooks_bp
 
@@ -63,41 +64,7 @@ def _build_registry_from_settings() -> ServerRegistry:
     if not isinstance(raw_servers, list):
         raw_servers = []
 
-    # Plex needs the legacy config; Emby/Jellyfin don't. If load_config
-    # fails (no Plex configured, or running in a multi-server-only
-    # deployment), continue with legacy_config=None — the registry's
-    # _build_server skips Plex entries that lack one. Pass
-    # log_validation_errors=False so a non-Plex deployment doesn't
-    # spam ❌ Configuration Error lines on every webhook.
-    legacy_config = None
-    try:
-        from ..config import load_config
-
-        legacy_config = load_config(log_validation_errors=False)
-    except Exception as exc:
-        logger.debug("Webhook router: load_config failed (Plex paths disabled): {}", exc)
-
-    return ServerRegistry.from_settings(raw_servers, legacy_config=legacy_config)
-
-
-def _load_config_or_minimal():
-    """Deprecated stub kept for backwards compatibility with integration tests.
-
-    The webhook router no longer calls ``process_canonical_path`` directly —
-    every webhook becomes a Job that goes through the orchestrator's worker
-    pool, which builds its own Config. This function is unreachable from
-    the production code path. It's preserved so existing integration test
-    patches (``patch("...webhook_router._load_config_or_minimal", ...)``)
-    don't AttributeError. Safe to delete once those tests are updated to
-    patch the new entry point (``create_vendor_webhook_job``).
-    """
-    try:
-        from ..config import load_config
-
-        return load_config(log_validation_errors=False)
-    except Exception as exc:
-        logger.debug("_load_config_or_minimal: load_config failed ({}: {}) — returning None.", type(exc).__name__, exc)
-        return None
+    return ServerRegistry.from_settings(raw_servers)
 
 
 def _classify_payload(req) -> tuple[str, dict[str, Any] | None, str]:
@@ -523,11 +490,7 @@ def _extract_regenerate_flag(payload: dict | None) -> bool:
         raw = payload.get("regenerate")
     if raw is None:
         raw = request.args.get("regenerate")
-    if raw is None:
-        return False
-    if isinstance(raw, bool):
-        return raw
-    return str(raw).strip().lower() in ("true", "1", "yes")
+    return _param_to_bool(raw, False)
 
 
 def _dispatch_resolved(

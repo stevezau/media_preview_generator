@@ -169,7 +169,7 @@ overtake a running scan.
 
 **Manual Generation:**
 
-The **Process a file or folder** button runs **Previews**, **Intro & Credits**, or **Plex loudness** for specific media on demand. Choose a job type, then select at least one file or folder. There are three ways to pick what to process, and they can be mixed:
+The **Process a file or folder** button runs **Previews**, **Intro & Credits**, or **Plex loudness** for specific media on demand. Tick one or more job types, then select at least one file or folder. There are three ways to pick what to process, and they can be mixed:
 
 - **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to process its episodes; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
 - **Browse** — open the folder picker to navigate your mounted media and select either a **folder** (expanded to every video inside) or an individual **video file**.

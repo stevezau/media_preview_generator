@@ -143,13 +143,8 @@ class TestRunScheduledJob:
             app = create_app(config_dir=config_dir)
             with app.app_context():
                 run_scheduled_job(library_name="Movies")
-                # Audit fix — bug-blind D34 paradigm. Original test only
-                # asserted ``mock_start.assert_called_once()`` which would
-                # pass even if run_scheduled_job created a job with no
-                # library_name (or the wrong one) and forwarded a bogus
-                # job_id. Pin the kwargs the SUT controls: the positional
-                # job_id passed to _start_job_async must resolve to a real
-                # Job in the manager that carries the seeded library_name.
+                # Pin what the SUT controls: the job_id passed to _start_job_async
+                # must resolve to a real Job carrying the seeded library_name.
                 mock_start.assert_called_once()
                 job_id = mock_start.call_args.args[0]
                 assert isinstance(job_id, str) and job_id, (
@@ -221,14 +216,8 @@ class TestRunScheduledJob:
             with app.app_context():
                 run_scheduled_job(library_id="1", library_name="Movies")
                 config_overrides = mock_start.call_args[0][1]
-                # Audit fix — original asserted ``"1" in str(config_overrides)``
-                # which is a substring match: passes if ANY field in the dict
-                # contains "1" (e.g. cpu_threads=1). Now assert the specific
-                # field the SUT controls.
-                # ``run_scheduled_job`` propagates the library_id ("1") as
-                # the legacy ``selected_libraries`` entry (history: scheduler
-                # interface predates the selected_library_ids/name split).
-                # Whichever field carries it, the dispatcher sees ["1"].
+                # Assert the specific field the SUT controls, not a substring of the
+                # whole dict. Whichever field carries the library id, the dispatcher sees ["1"].
                 assert config_overrides.get("selected_library_ids") == ["1"] or config_overrides.get(
                     "selected_libraries"
                 ) == ["1"], (
@@ -238,7 +227,7 @@ class TestRunScheduledJob:
 
     @patch("media_preview_generator.web.routes._start_job_async")
     def test_scheduled_job_infers_server_id_from_library_id(self, mock_start, tmp_path):
-        """TEST_AUDIT P0.2 — closes incident 933a26d (server-pin gap).
+        """A schedule's library id pins the scheduled run to the owning server.
 
         When a schedule passes ``library_id`` but no ``server_id``, the
         scheduler callback must infer the server from the library.
@@ -251,7 +240,7 @@ class TestRunScheduledJob:
         Daily" took 20 min for 202 items, only 1 ran FFmpeg, the rest
         were redundant cross-server lookups.
 
-        Production wiring at app.py:72-76:
+        Production wiring in app.py:
             if not server_id and library_id:
                 server_id, server_name, server_type = _infer_server_from_library_id(library_id)
         """
@@ -387,11 +376,8 @@ class TestWsgiModule:
     def test_wsgi_importable(self, tmp_path, monkeypatch):
         """wsgi module IMPORTS cleanly + exports the WSGI app object.
 
-        Audit fix — original asserted ``find_spec is not None`` which only
-        checks the file exists. A regression that broke the import path
-        (e.g. circular import, missing dependency) would only show up at
-        gunicorn startup, not in this test. Actually IMPORT the module
-        and verify it exposes ``app`` (the WSGI callable gunicorn loads).
+        Importing (not just ``find_spec``) catches a circular import or missing
+        dependency before gunicorn startup; ``app`` is the WSGI callable gunicorn loads.
 
         Environment isolation: ``wsgi.py`` calls ``create_app()`` at
         module load, which writes ``flask_secret.key`` into ``CONFIG_DIR``

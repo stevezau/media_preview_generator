@@ -100,10 +100,13 @@
 // Webhook activity history viewer. Relocated verbatim from the Automation
 // page's Triggers tab; relies on the global helpers from app.js (apiGet,
 // apiDelete, escapeHtml, showToast, appConfirm).
+// Events before this date predate per-event server attribution.
+const HISTORY_SERVER_FIELD_SINCE = new Date('2026-04-29').getTime();
 let allHistoryEvents = [];
 let filteredHistoryEvents = [];
 let historyPage = 1;
-let historyPerPage = parseInt(localStorage.getItem('historyPerPage') || '25', 10);
+let historyPerPage = 25;
+try { historyPerPage = parseInt(localStorage.getItem('historyPerPage') || '25', 10); } catch (e) { /* storage blocked: keep the default */ }
 if (![10, 25, 50].includes(historyPerPage)) historyPerPage = 25;
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -127,7 +130,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 function historyServerKey(evt) {
     return evt.server_id || evt.server_name || (evt.server_type ? evt.server_type :
-        (new Date(evt.timestamp).getTime() < new Date('2026-04-29').getTime() ? '__unknown' : '__all'));
+        (new Date(evt.timestamp).getTime() < HISTORY_SERVER_FIELD_SINCE ? '__unknown' : '__all'));
 }
 
 function populateHistoryFilters() {
@@ -148,6 +151,7 @@ function populateHistoryFilters() {
 const HISTORY_STATUS_LABELS = {
     triggered: 'Triggered',
     queued: 'Queued',
+    deduped: 'Duplicate',
     ignored: 'Ignored',
     ignored_no_path: 'No file path',
     ignored_no_paths: 'No file paths',
@@ -155,10 +159,11 @@ const HISTORY_STATUS_LABELS = {
     disabled: 'Disabled',
     error: 'Error'
 };
-// Tone and icon carry the state; the word stays because there are seven of them.
+// Tone and icon carry the state; the word stays so the pills are readable without colour.
 const HISTORY_STATUS_PILLS = {
     triggered: ['ok', 'check-circle-fill'],
     queued: ['warn', 'hourglass-split'],
+    deduped: ['', 'copy'],
     ignored: ['', 'dash-circle'],
     disabled: ['', 'dash-circle'],
     ignored_no_path: ['bad', 'exclamation-triangle-fill'],
@@ -296,7 +301,7 @@ function renderHistoryPage() {
             const label = evt.server_name || stype.toUpperCase() || 'Server';
             // A server named after its own source ("Plex" on a Plex event) repeats the source chip.
             serverCell = label.toLowerCase() === String(sourceBadgeLabel).toLowerCase() ? '' : '<span class="pill">' + escapeHtml(label) + '</span>';
-        } else if (evt.timestamp && new Date(evt.timestamp).getTime() < new Date('2026-04-29').getTime()) {
+        } else if (evt.timestamp && new Date(evt.timestamp).getTime() < HISTORY_SERVER_FIELD_SINCE) {
             // Entries from before per-server attribution existed: em-dash rather than the misleading "All".
             serverCell = '<span class="wh-faint" title="This webhook fired before the per-server attribution column was added in this version. Future events will show the destination server.">—</span>';
         } else {
@@ -398,7 +403,7 @@ function goToHistoryPage(page) {
 function changeHistoryPerPage(value) {
     historyPerPage = parseInt(value, 10) || 25;
     historyPage = 1;
-    localStorage.setItem('historyPerPage', String(historyPerPage));
+    try { localStorage.setItem('historyPerPage', String(historyPerPage)); } catch (e) { /* storage blocked: not remembered */ }
     renderHistoryPage();
 }
 

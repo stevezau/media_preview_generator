@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 import requests
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 
 from ._mocks import _fulfill_json
 
@@ -23,9 +23,9 @@ class TestLogsPage:
             lambda r: _fulfill_json(r, {"logs": [], "files": []}),
         )
         authed_page.goto(f"{app_url}/logs")
-        authed_page.wait_for_load_state("domcontentloaded")
-        # Page heading or some logs container element exists.
-        assert authed_page.locator("h1, h2, h3, .container-fluid").first.is_visible()
+        expect(authed_page.locator("h1.page-title")).to_have_text("Logs")
+        expect(authed_page.locator("#logSearch")).to_be_visible()
+        expect(authed_page.locator("#logClearBtn")).to_be_visible()
 
     def test_logs_page_returns_200(self, app_url: str, session_cookie: dict) -> None:
         # Plain GET should NOT redirect to /login. /logs is @login_required

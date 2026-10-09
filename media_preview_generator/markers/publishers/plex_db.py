@@ -1,4 +1,4 @@
-"""Plex publisher: direct writes into Plex's library database (spec §3.1, §6.3).
+"""Plex publisher: direct writes into Plex's library database.
 
 Plex has no API for intro/credits markers. It serves markers from ``taggings`` rows on its single
 ``tags(tag_type=12, tag='')`` row, and rebuilds those rows from ``media_parts.extra_data`` when it re-detects, so
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from ..settings import ServerMarkersSettings
 
 MARKER_TAG_TYPE = 12
-# Plex serves credits starting 2 s later than stored and non-final credits ending 2 s earlier (spec §3.1).
+# Plex serves credits starting 2 s later than stored and non-final credits ending 2 s earlier.
 CREDITS_SERVE_SHIFT_MS = 2_000
 FINAL_TOLERANCE_MS = 2_000
 INTRO_JSON_VERSION = 5
@@ -65,7 +65,7 @@ SAME_HOST_PATH_ADVICE = (
 # write lock) before giving up; a job then tries the file again a few minutes later. capability() allows this twice:
 # once for the lock probe, once for its read-only checks after the Plex calls. It is a job's wait: another program
 # writing to Plex's database (a Kometa-style tool) was observed holding its write lock 30.8 s, past the 30 s this was.
-# A caller that must answer sooner passes its own ``db_timeout_s`` (the Inspector's publish, ruling P-R1).
+# A caller that must answer sooner passes its own ``db_timeout_s`` (the Inspector's publish).
 BUSY_TIMEOUT_S = 120.0
 # A job's worker holds a GPU or CPU worker previews need, so its publish waits this long instead, when the job retries a
 # write the database refused a few minutes later (the checking stage, which holds no worker, keeps BUSY_TIMEOUT_S).
@@ -360,8 +360,8 @@ def publish_error_from_sqlite(exc: sqlite3.Error) -> PublishError:
 def _plex_quote(value: str) -> str:
     # Matches Plex's own encoder: everything but alphanumerics and -_~ is %-escaped, including "." (verified
     # byte-for-byte against every extra_data row of media_parts, media_items, metadata_items, media_streams and
-    # taggings in the lab Plex 1.43.4 DB, and of media_parts, media_items and marker taggings in the owner's
-    # production DB: 517,476 rows, read-only, 2026-09-19).
+    # taggings in a Plex 1.43.4 DB, and of media_parts, media_items and marker taggings in a production DB: 517,476
+    # rows).
     return urllib.parse.quote(value, safe="").replace(".", "%2E")
 
 
@@ -380,7 +380,7 @@ def encode_extra_data(d: dict[str, str], *, url_form: bool = False) -> str:
     ``url`` field holding the URL-encoded form of the other fields. The URL-encoded form alone (``k=v&k=v``, sorted
     keys, no ``url`` field) is the format before that migration, and what its rollback (``extra_data ->> 'url'``)
     turns a row back into. PMS 1.43.4 still writes it: its one-time credits ``final`` migration, run at a new
-    database's first weekly optimize, rewrote the 24 parts it changed in this form (lab, 2026-09-17).
+    database's first weekly optimize, rewrote the 24 parts it changed in this form.
 
     Args:
         d: The fields; a ``url`` field is ignored and rebuilt.
@@ -691,7 +691,7 @@ def merge_part_extra_data(
                 d[key] = _part_payload(mtype, of_type, duration_ms)
             continue
         ours_before = [m for m in previous if m.type is mtype]
-        # Removing the key (not writing "") lets Plex's own non-forced detection analyse the part again (spec §14).
+        # Removing the key (not writing "") lets Plex's own non-forced detection analyse the part again.
         if ours_before and _part_served(mtype, d.get(key)) == _served_of(ours_before, mtype):
             del d[key]
     return encode_extra_data(d, url_form=url_form)
@@ -789,7 +789,7 @@ def _refresh_final_types(
     on the other version's next run. Only with the file's duration known. Under "Keep Plex's" only for a type the user
     locked: rows serving the wanted times can be Plex's own even when our record lists those times (a write that
     changed nothing still records them), and those rows are never touched — but a locked type's rows are ours whatever
-    the setting says (spec §5.5 rule 1). Under "Use ours", Plex's rows with identical times get our flag.
+    the setting says. Under "Use ours", Plex's rows with identical times get our flag.
     """
     if not duration_ms or duration_ms <= 0 or len(_version_files(parts)) != 1:
         return frozenset()
@@ -826,7 +826,7 @@ def _kept_types(
     is better than nothing.
 
     Locks are not read here: this answers only what the **setting** would keep. ``_plan`` takes the types the user
-    locked back out of the answer, since a locked marker wins over "Keep Plex's" (spec §5.5 rule 1), and reports them
+    locked back out of the answer, since a locked marker wins over "Keep Plex's", and reports them
     as replaced instead.
     """
     if not keep_plex:
@@ -882,9 +882,8 @@ def _epoch(value: object) -> int | None:
 def _types_not_made_for_file(rows: list[_TaggingRow], parts: list[_Part]) -> frozenset[MarkerType]:
     """The types whose marker rows were made for an earlier file at this path (stale).
 
-    Plex's markers belong to the metadata item, so they outlive a file replacement (production, 2026-09-24: Bones'
-    markers were detected 2025-06-17 against the old Blu-ray files, which Sonarr replaced with 25 fps files on
-    2026-09-23, leaving intros 9-17 s late and credits past the end). A type counts only when both hold — the rule
+    Plex's markers belong to the metadata item, so they outlive a file replacement (a show's markers detected against old Blu-ray
+    files stayed after Sonarr replaced them with 25 fps files, leaving intros 9-17 s late and credits past the end). A type counts only when both hold — the rule
     validated against Sonarr's imports, with no false positive among 5,493 re-detected files:
 
     * no live part carries Plex's own detection record of the rows (its ``pv:intros`` / ``pv:credits`` holding
@@ -1241,7 +1240,7 @@ class LocalPlexDb(PlexDatabase):
             with contextlib.suppress(OSError):
                 owner = str(os.stat(db).st_uid)
             # The facts as well as the sentence: with an agent this ran on Plex's machine, and ``capability()``
-            # rebuilds the sentence around the agent rather than around this app (spec §6.3).
+            # rebuilds the sentence around the agent rather than around this app.
             details.update({"unwritable": list(unwritable), "writer_uid": str(os.geteuid()), "db_owner_uid": owner})
             return CapabilityReport(
                 Capability.MISCONFIGURED,
@@ -1443,7 +1442,7 @@ class LocalPlexDb(PlexDatabase):
         limits: FileLimits | None = None,
     ) -> _Plan:
         rows = self._item_rows(conn, rating_key, tag_id)
-        # A marker the user adjusted or locked wins over "Keep Plex's" (spec §5.5 rule 1, §14 2026-09-20), so a locked
+        # A marker the user adjusted or locked wins over "Keep Plex's", so a locked
         # type is written even where the setting would have left Plex's own rows in place.
         locked = frozenset(m.type for m in wanted if m.locked)
         stale = _types_not_made_for_file(rows, parts)
@@ -1695,7 +1694,7 @@ class PlexMarkerPublisher(MarkerPublisher):
                 doesn't need them.
             db_timeout_s: The longest a single check or write waits for the database locks; None uses
                 ``BUSY_TIMEOUT_S``. The Inspector's publish-now path shortens it, since a job's wait alone outlasts the
-                deadline a web request may take (ruling P-R1).
+                deadline a web request may take.
             db: Where the database work runs. The default opens the file this process can see; a server with a Plex
                 marker agent gets ``plex_remote.RemotePlexDb`` instead (``publishers.factory``).
         """
@@ -1798,7 +1797,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         ``LocalPlexDb.file_checks`` runs wherever the database is, but its wording is written from this app's
         side ("The app must run on the same machine as Plex", "This app (user N) can't write ..."). Through an
         agent that side is the agent's container, so the untouched wording tells the user to move the app —
-        the one thing the agent exists to avoid. Spec §6.3: with an agent the path, the filesystem check and
+        the one thing the agent exists to avoid. With an agent the path, the filesystem check and
         the lock proof are the agent's.
 
         Args:
@@ -1874,7 +1873,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             try:
                 details["detection"] = self._server.get_marker_detection_prefs()
             except Exception as exc:
-                logger.debug("Plex {}: detection prefs unavailable: {}", self._config.name, exc)
+                logger.debug("Plex {}: detection prefs unavailable: {}", self._config.name, type(exc).__name__)
         # A fresh deadline: the Plex calls above don't eat into the time allowed for the database lock.
         inside = self._db.db_checks(deadline=self._db_deadline())
         details.update(inside.details)
@@ -1959,7 +1958,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         own rows of those types stay. A desired type replaces whatever rows the item has of that type, except a type
         kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``; never one whose every row of
         Plex's can't be right for the file's ``limits``) — a type the user locked is written even then, and reported in
-        ``last_replaced_own_types`` (spec §5.5 rule 1). Rows and keys that already
+        ``last_replaced_own_types``. Rows and keys that already
         serve the desired times stay, unless only their credits ``final`` flag is stale (see ``_refresh_final_types``).
 
         Returns:

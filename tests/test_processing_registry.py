@@ -1,9 +1,8 @@
 """Tests for the per-vendor processor registry.
 
-Phase A of the multi-server processing completion. Locks down the
-registry contract so Phase B's vendor modules can self-register
-predictably and the orchestrator (Phase C onwards) can call
-``get_processor_for(server.type)`` without branching.
+Locks down the registry contract so vendor modules can self-register
+predictably and the orchestrator can call ``get_processor_for(server.type)``
+without branching.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from media_preview_generator.processing.base import VendorProcessor
 from media_preview_generator.processing.registry import (
     get_processor_for,
     register_processor,
@@ -26,8 +24,7 @@ from media_preview_generator.servers.base import Library, ServerConfig, ServerTy
 class _StubProcessor:
     """Bare-minimum VendorProcessor for registry-shape tests.
 
-    Returns an empty Library list / no items. Phase B replaces this
-    with real per-vendor implementations.
+    Returns an empty Library list / no items.
     """
 
     def list_libraries(self, server_config: ServerConfig) -> list[Library]:
@@ -59,8 +56,8 @@ class _StubProcessor:
 @pytest.fixture(autouse=True)
 def _isolate_registry(monkeypatch):
     """Each test gets a fresh registry — prevents test pollution from
-    leaking processors registered by an earlier test (or by Phase B's
-    self-registration once those modules exist)."""
+    leaking processors registered by an earlier test (or by a vendor
+    module's self-registration at import)."""
     from media_preview_generator.processing import registry
 
     monkeypatch.setattr(registry, "_PROCESSORS", {})
@@ -97,18 +94,6 @@ class TestRegistryRoundTrip:
         register_processor(ServerType.PLEX, _StubProcessor())
         register_processor(ServerType.EMBY, _StubProcessor())
         assert sorted(t.value for t in registered_types()) == ["emby", "plex"]
-
-
-class TestProtocolShape:
-    def test_stub_satisfies_protocol(self):
-        # `Protocol` here is the vendor contract; structural conformance
-        # is the only assertion we need (no `runtime_checkable` overhead).
-        proc: VendorProcessor = _StubProcessor()
-        # Just exercise each method to make sure the signatures align.
-        assert proc.list_libraries(server_config=None) == []  # type: ignore[arg-type]
-        assert list(proc.list_canonical_paths(server_config=None)) == []  # type: ignore[arg-type]
-        assert list(proc.scan_recently_added(server_config=None, lookback_hours=24)) == []  # type: ignore[arg-type]
-        assert proc.resolve_canonical_path(server_config=None, item_id="x") is None  # type: ignore[arg-type]
 
 
 class TestProcessableItemShape:

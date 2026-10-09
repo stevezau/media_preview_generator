@@ -25,7 +25,6 @@ only the subprocess + filesystem boundary mocked.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import shutil
 import subprocess
@@ -751,9 +750,6 @@ def test_custom_threshold_respected(tmp_path):
 def test_dupe_detection_matches_md5_signature(tmp_path):
     """Byte-identical files must hash the same and count as a dupe; a
     one-byte difference must not."""
-    a = hashlib.md5(b"a" * 5000).digest()
-    b = hashlib.md5(b"a" * 4999 + b"b").digest()
-    assert a != b  # sanity
     payloads = [b"a" * 5000, b"a" * 5000, b"a" * 4999 + b"b"]
     _write_jpgs(tmp_path, payloads)
     # 1 dupe out of 3 = 33% — well over default threshold.

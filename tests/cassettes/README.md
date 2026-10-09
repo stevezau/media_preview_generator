@@ -15,17 +15,16 @@ that strays from the recorded shape fails fast.
 
 ## Layout
 
+One directory per test module, one file per test, named `Class.test_name.yaml`
+(parametrized tests add `[param]`):
+
 ```
 tests/cassettes/
-├── README.md                          # this file
-├── test_servers_plex_vcr/             # one dir per test module
-│   ├── test_resolve_one_path_movie.yaml
-│   ├── test_resolve_one_path_episode.yaml
-│   └── test_get_bundle_metadata.yaml
+├── test_servers_plex_vcr/
 ├── test_servers_emby_vcr/
-│   └── …
-└── test_servers_jellyfin_vcr/
-    └── …
+├── test_servers_jellyfin_vcr/
+├── test_servers_markers_vcr/          # Plex marker read, Jellyfin bridge markers
+└── test_servers_emby_markers_vcr/     # Emby bridge markers, versions, Premiere
 ```
 
 ## Running
@@ -67,109 +66,40 @@ A leaked token in a committed cassette is a credentials disclosure.
 - User-identifying paths if they reveal real media organisation. (Mostly
   fine for media metadata; concern is more around server identifiers.)
 
-## Markers (lab)
+## Markers and lab-recorded cassettes
 
-`tests/test_servers_markers_vcr.py` pins Plex's marker read
-(`includeMarkers=1`) and the Media Preview Bridge markers routes plus
-Jellyfin's core `/MediaSegments`, recorded against the storage lab
-(`mlab-plex`, `mlab-jellyfin`) rather than the Docker-Compose test stack.
+`test_servers_markers_vcr`, `test_servers_emby_markers_vcr` and a few `test_servers_jellyfin_vcr` classes
+(`TestJellyfinItemMissingContract`, `TestJellyfinTrickplayRegistrationContract`) are recorded against throwaway lab
+servers (see `docs/design/lab-servers.md`), not the Docker-Compose test stack. They need:
 
-Needs the phase-1 lab state in place first: plugins installed and the
-synth chapters show published to both servers (see
-`docs/design/intro-credits/evidence/lab/phase1-results.md`, run 2) —
-`/media/synth-chapters/Synth Chapters (2021)/Season 01/Synth Chapters
-(2021) - S01E01.webm` must be indexed on both.
+- the Media Preview Bridge plugins installed on the Emby and Jellyfin lab servers;
+- a synthetic "Synth Chapters (2021)" show (S01E01, S01E01 - Extended, S01E02) indexed on every server, with nothing
+  stored on those episodes (the tests remove what they post);
+- Jellyfin 12.0 for `test_an_alternate_version_is_not_missing` (12.0's API-key `/Items?Ids=` leaves owned alternate
+  versions out while `/MediaSegments/<id>` answers) and an Emby without the plugin for `TestEmbyWithoutTheBridgeContract`
+  (Ping 404, markers route 404).
 
-Re-record:
-
-```bash
-cd /home/data/workspace/plex_generate_vid_previews
-set -a; . docs/design/intro-credits/evidence/lab/env; set +a
-PLEX_URL=http://127.0.0.1:32402 JELLYFIN_URL=http://127.0.0.1:18097 JELLYFIN_TOKEN="$JF_TOKEN" \
-  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_markers_vcr.py --record-mode=once
-grep -rlE "$PLEX_TOKEN|$JF_TOKEN" tests/cassettes/test_servers_markers_vcr/ && echo "TOKEN LEAK — delete and fix scrubbing" || echo "clean"
-```
-
-Expected: `4 passed`, `clean`.
-
-`tests/test_servers_emby_markers_vcr.py` pins the Media Preview Bridge for Emby routes (Ping, the admin probe,
-GET/POST/DELETE markers with `ReplaceOwn`), Emby's per-user item read (`Chapters`; the recorded `Fields=MediaSources`
-read is no longer asked on replay and goes at the next re-record) and the read of a
-grouped item's versions (`Chapters,MediaSources,AlternateMediaSources`, with an API key and per user; Emby groups
-S01E01 with its "- Extended" cut) and the Emby Premiere read (`/Registrations/dvr`, no key on the lab Emby), recorded
-against `mlab-emby` (Emby 4.10) with the plugin installed and nothing stored on Synth Chapters S01E01, S01E01 - Extended
-and S01E02 (the test removes what it posts):
+Record with the server URLs and credentials exported (`PLEX_URL`/`PLEX_TOKEN`, `JELLYFIN_URL`/`JELLYFIN_TOKEN`,
+`EMBY_URL`/`EMBY_USER_ID`), for example:
 
 ```bash
-cd /home/data/workspace/plex_generate_vid_previews
-set -a; . docs/design/intro-credits/evidence/lab/env; set +a
-EMBY_URL=http://127.0.0.1:18096 EMBY_USER_ID="$EMBY_UID" \
-  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_emby_markers_vcr.py --record-mode=once
-grep -rlF -e "$EMBY_TOKEN" -e "$EMBY_UID" tests/cassettes/test_servers_emby_markers_vcr/ && echo "LEAK" || echo "clean"
+JELLYFIN_URL=http://<lab-jellyfin>:8096 JELLYFIN_TOKEN=<token> \
+  python -m pytest --no-cov -n 0 tests/test_servers_jellyfin_vcr.py -k 'ItemMissing' --record-mode=once
+grep -rlF -e "<token>" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
 ```
 
-Expected: `14 passed`, `clean`. The user id is recorded as `/Users/FAKE_USER_ID/` (`_scrub_request_uri`), which is what
-the test sends on replay; the per-user route answers a single item, so the `Items`-list collapse above doesn't apply.
-`TestEmbyItemMissingContract` pins how Emby answers an item id it doesn't have (per user: 404; API key: an empty
-`Items` list), which Check servers uses to tell a deleted item from a failed read.
+Always run the leak grep for every token and user id you used. `EMBY_USER_ID` must be exported for Emby runs: the
+cassette scrubber reads it to replace the recording user's id with `FAKE_USER_ID` (recorded as `/Users/FAKE_USER_ID/`).
 
-`TestEmbyWithoutTheBridgeContract` pins what an Emby **without** the plugin answers — the Ping (404, so
-`installed: False`) and the markers route (404) — which is how the reader tells "no plugin, so nothing there is ours"
-from "the store can't be read". It is recorded against the lab's Emby 4.9 (`mlab-emby49`, port 18099) with the
-plugin's DLL moved aside; Synth Chapters S01E02 must be indexed there and still carry the marker rows the plugin wrote
-before (the recording has an intro at 17-47 s and credits at 100 s):
+Contracts worth knowing:
 
-```bash
-cd /home/data/workspace/plex_generate_vid_previews
-set -a; . docs/design/intro-credits/evidence/lab/env; set +a
-docker exec mlab-emby49 mv /config/plugins/MediaPreviewBridge.Emby.dll /config/MediaPreviewBridge.Emby.dll.aside
-docker restart mlab-emby49   # wait for /emby/System/Info/Public to answer
-EMBY49_URL=http://127.0.0.1:18099 EMBY49_USER_ID="$EMBY49_UID" EMBY_USER_ID="$EMBY49_UID" \
-  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_emby_markers_vcr.py \
-  -k WithoutTheBridge --record-mode=once
-grep -rlF -e "$EMBY49_TOKEN" -e "$EMBY49_UID" tests/cassettes/test_servers_emby_markers_vcr/ && echo "LEAK" || echo "clean"
-docker exec mlab-emby49 mv /config/MediaPreviewBridge.Emby.dll.aside /config/plugins/MediaPreviewBridge.Emby.dll
-docker restart mlab-emby49   # put the plugin back: curl /emby/MediaPreviewBridge/Ping must answer again
-```
-
-`EMBY_USER_ID` has to be exported as well: the cassette scrubber reads that one when it replaces the recording user's
-id with `FAKE_USER_ID`.
-
-`tests/test_servers_jellyfin_vcr.py::TestJellyfinItemMissingContract` is recorded against the storage lab's Jellyfin
-10.11 (`mlab-jellyfin`), not the Docker-Compose stack; it asks for an item id Jellyfin doesn't have, and for Synth
-Chapters S01E02, which must be indexed there:
-
-```bash
-cd /home/data/workspace/plex_generate_vid_previews
-set -a; . docs/design/intro-credits/evidence/lab/env; set +a
-JELLYFIN_URL=http://127.0.0.1:18097 JELLYFIN_TOKEN="$JF_TOKEN" \
-  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_jellyfin_vcr.py -k 'ItemMissing and not alternate' --record-mode=once
-grep -rlF -e "$JF_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
-```
-
-Expected: `2 passed`, `clean` (the Jellyfin 12.0 test below is recorded separately).
-
-`test_an_alternate_version_is_not_missing` is recorded against the lab's Jellyfin **12.0** (`mlab-jf12`, port
-18098), where the Synth Movie (2023) 720p file is an owned alternate version: 12.0's API-key `/Items?Ids=` leaves it
-out while `/MediaSegments/<id>` answers, which is the case `item_missing` asks again for:
-
-```bash
-JELLYFIN_URL=http://127.0.0.1:18098 JELLYFIN_TOKEN="$JF12_TOKEN" \
-  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_jellyfin_vcr.py \
-  -k test_an_alternate_version_is_not_missing --record-mode=once
-grep -rlF -e "$JF12_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
-```
-
-An empty `/Items?Ids=<id>` answer is asked again by id (`/MediaSegments/<id>`: Jellyfin
-12 leaves alternate versions out of item queries), so the unknown-id cassette holds that 404 twice: the test's own
-segments read, then `item_missing`'s check. In
-`TestJellyfinItemMissingContract.test_an_id_jellyfin_doesnt_have_is_missing.yaml` the third entry is a hand copy of the
-first (same `traceId` and `Date`, Jellyfin 10.11 lab), added when that check came in without a lab to re-record on; the
-answer is deterministic (a 404 for an id no item has). A re-record above replaces it with a real second answer. Jellyfin answers `/Items?Ids=<id>` without `Path` or `MediaSources`, so the scrubber
-can't tell it's synthetic; for exactly that request it keeps each item's `Id` and `Type` only, instead of emptying the
-list (which would replay "the server has it" as "it's gone").
-The API-key read answers an `Items` list whose item has no `Path` (it asks for other fields): the scrubber keeps it
-when every one of its `MediaSources` paths is synthetic.
+- `TestEmbyItemMissingContract` pins how Emby answers an item id it doesn't have (per user: 404; API key: an empty
+  `Items` list), which Check servers uses to tell a deleted item from a failed read.
+- An empty `/Items?Ids=<id>` answer is asked again by id (`/MediaSegments/<id>`), so
+  `TestJellyfinItemMissingContract.test_an_id_jellyfin_doesnt_have_is_missing.yaml` holds that 404 twice. Its third
+  entry is a hand copy of the first; a re-record replaces it with a real answer.
+- Jellyfin answers `/Items?Ids=<id>` without `Path` or `MediaSources`, so for exactly that request the scrubber keeps
+  each item's `Id` and `Type` only instead of emptying the list.
 
 **Known gotcha — `PLEX_URL`/`PLEX_TOKEN` don't reach the test under pytest.**
 `tests/conftest.py`'s session-scoped `_isolate_dotenv_from_tests` fixture

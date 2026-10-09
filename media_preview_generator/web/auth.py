@@ -152,8 +152,13 @@ def regenerate_token() -> str:
 
 
 def validate_token(token: str) -> bool:
-    """Validate the provided token against the stored token."""
-    return secrets.compare_digest(token, get_auth_token())
+    """Validate the provided token against the stored token.
+
+    Compares bytes: ``compare_digest`` raises TypeError for non-ASCII ``str``, which would turn a bad token into a 500.
+    """
+    if not isinstance(token, str):
+        return False
+    return secrets.compare_digest(token.encode(), get_auth_token().encode())
 
 
 def is_token_env_controlled() -> bool:

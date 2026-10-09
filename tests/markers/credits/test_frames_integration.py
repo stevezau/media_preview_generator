@@ -1,6 +1,5 @@
 """Real ffmpeg on a generated clip: keyframe rows of the tail and 1 fps rows, on the CPU and (when present) CUDA."""
 
-import glob
 import pathlib
 import shutil
 import subprocess
@@ -8,6 +7,7 @@ import subprocess
 import pytest
 
 from media_preview_generator.markers.credits import frames
+from tests.markers.credits.helpers import vaapi_node
 
 # Imported before ``tests/markers/conftest.py`` fakes it for every test: these tests read real files with it.
 readable_video_s = frames.readable_video_s
@@ -16,17 +16,6 @@ readable_video_s = frames.readable_video_s
 # uses each one: up to about 35 s under a full xdist run, past the suite's 30 s.
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(180)]
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-VAAPI_DRIVERS = {"i915": "INTEL", "xe": "INTEL", "amdgpu": "AMD", "radeon": "AMD"}
-
-
-def vaapi_node() -> tuple[str, str] | None:
-    """A render node this decode can use, with its GPU type (NVIDIA's node has no VAAPI decode)."""
-    for node in sorted(glob.glob("/dev/dri/renderD*")):
-        driver = pathlib.Path(f"/sys/class/drm/{pathlib.Path(node).name}/device/driver")
-        gpu = VAAPI_DRIVERS.get(driver.resolve().name) if driver.exists() else None
-        if gpu:
-            return node, gpu
-    return None
 
 
 @pytest.fixture(scope="module")
@@ -227,7 +216,7 @@ def test_a_recording_with_a_pcr_base_reports_file_seconds(recording):
 
 @pytest.mark.gpu
 def test_vaapi_gives_the_same_timestamps(clip):
-    # Intel and AMD only: storage has an NVIDIA render node, so this skips there and runs in the lab image.
+    # Intel and AMD only: an NVIDIA-only host skips this; it runs where an Intel or AMD render node exists.
     node = vaapi_node()
     if node is None:
         pytest.skip("no Intel or AMD render node")
@@ -283,7 +272,7 @@ def test_cuda_reads_the_frames_the_cpu_reads(request, clip_name, scale):
 @pytest.mark.parametrize("scale", [1, 2], ids=["320x180", "640x360"])
 @pytest.mark.parametrize("clip_name", ["clip", "ten_bit_clip"], ids=["8-bit", "10-bit"])
 def test_vaapi_reads_the_frames_the_cpu_reads(request, clip_name, scale):
-    # Intel and AMD only: storage has an NVIDIA render node, so this skips there and runs in the lab image.
+    # Intel and AMD only: an NVIDIA-only host skips this; it runs where an Intel or AMD render node exists.
     node = vaapi_node()
     if node is None:
         pytest.skip("no Intel or AMD render node")
@@ -413,7 +402,7 @@ def test_cuda_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
 
 @pytest.mark.gpu
 def test_vaapi_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
-    # Intel and AMD only: storage has an NVIDIA render node, so this skips there and runs in the lab image.
+    # Intel and AMD only: an NVIDIA-only host skips this; it runs where an Intel or AMD render node exists.
     node = vaapi_node()
     if node is None:
         pytest.skip("no Intel or AMD render node")

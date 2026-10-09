@@ -1,11 +1,13 @@
-"""FFmpeg ``-vf`` filter-chain builders for Dolby Vision Profile 5 paths.
+"""FFmpeg ``-vf`` filter-chain builders: the HDR10 zscale tone-map and the Dolby Vision Profile 5 paths.
 
 The SDR / HDR10 / DV Profile 7+8 chains are still assembled inline in
-:func:`media_processing.generate_images` because they depend on the
+:func:`generator.generate_images` because they depend on the
 nested ``_gpu_scale_segment`` helper's captured state.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 # Recognised DV5 filter-chain kinds.  Each maps to a specific hardware-path
 # produced by :func:`build_dv5_vf`.  Kept as plain strings (not an Enum) so
@@ -13,6 +15,25 @@ from __future__ import annotations
 DV5_PATH_INTEL_OPENCL = "opencl_dv5_intel"
 DV5_PATH_VAAPI_VULKAN = "libplacebo_vaapi"
 DV5_PATH_LIBPLACEBO = "libplacebo_dv5"
+
+
+def build_hdr10_zscale_chain(tonemap_algorithm: str, input_options: Sequence[str] = ()) -> str:
+    """Return the software tone-map chain that turns HDR10 (or a DV base layer) into SDR yuv420p.
+
+    Args:
+        tonemap_algorithm: FFmpeg ``tonemap`` algorithm (e.g. ``hable``).
+        input_options: Extra ``zscale`` input-colour options (``t=``, ``p=``, ``m=``) for streams whose
+            tags are missing; they precede the linearisation step.
+
+    Returns:
+        The filter chain, without fps or scale filters.
+    """
+    zscale_input = ":".join([*input_options, "t=linear", "npl=100"])
+    return (
+        f"zscale={zscale_input},format=gbrpf32le,"
+        f"zscale=p=bt709,tonemap={tonemap_algorithm}:desat=0,"
+        "zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+    )
 
 
 def build_dv5_vf(

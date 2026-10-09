@@ -112,7 +112,7 @@ class TestQueueLayout:
     ) -> None:
         page = dashboard(_jobs())
         expect(page.locator("#jobQueue tr.job-row").first).to_be_visible()
-        page.wait_for_timeout(500)
+        expect(page.locator("#jobQueue .progress-bar").first).to_be_visible()
         count = page.evaluate(
             "document.getAnimations().filter(a => a.effect && a.effect.getComputedTiming().iterations === Infinity).length"
         )

@@ -1,6 +1,6 @@
 """The Inspector editor's write API: save + lock + publish now, and unlock.
 
-`POST /api/markers/item/markers` and `DELETE /api/markers/item/markers` (plan ruling P-R4). The publish itself is
+`POST /api/markers/item/markers` and `DELETE /api/markers/item/markers`. The publish itself is
 covered in test_publish_now.py; here the contract is the request shape, the refusals, what reaches `publish_now`, and
 the per-server answer the editor renders.
 """
@@ -19,53 +19,19 @@ from media_preview_generator.markers.publishers.emby import CREDITS_BEFORE_END_N
 from media_preview_generator.markers.store import LOCKED_BY_USER, UNLOCKED_PENDING, get_marker_store
 from media_preview_generator.web.routes.api_markers import _EDITOR_RESULTS
 from tests.markers.conftest import api_headers as _api_headers
+from tests.markers.fakes import (
+    EDITOR_DURATION_MS,
+    EDITOR_PLEX_TOKEN,
+    editor_server,
+    publish_row,
+    save_markers,
+)
 
 T = MarkerType
-DUR = 1_320_000
-PLEX_TOKEN = "plex-token-SECRET-1234"
-
-
-@pytest.fixture
-def media(tmp_path):
-    root = tmp_path.resolve() / "media"
-    (root / "tv" / "Show").mkdir(parents=True)
-    (root / "tv" / "Show" / "S01E01.mkv").write_bytes(b"x" * 100)
-    (tmp_path / "outside.mkv").write_bytes(b"x")
-    return root
-
-
-@pytest.fixture
-def episode(media):
-    return str(media / "tv" / "Show" / "S01E01.mkv")
-
-
-def _server(sid, stype, media, *, markers=True, extra_markers=None):
-    block = {"enabled": markers, "library_ids": None, **(extra_markers or {})}
-    if stype == "plex":
-        block.setdefault("plex", {"db_write_confirmed_at": "2026-09-13T00:00:00+00:00", "on_plex_redetect": "restore"})
-    return {
-        "id": sid,
-        "type": stype,
-        "name": sid.upper(),
-        "enabled": True,
-        "url": "http://127.0.0.1:9",
-        "auth": {"token": PLEX_TOKEN} if stype == "plex" else {"api_key": "key"},
-        "libraries": [{"id": "1", "name": "TV Shows", "remote_paths": [str(media / "tv")]}],
-        "markers": block,
-    }
-
-
-@pytest.fixture
-def servers(app, media):
-    from media_preview_generator.web.settings_manager import get_settings_manager
-
-    entries = [
-        _server("plex-1", "plex", media),
-        _server("jf-1", "jellyfin", media),
-        _server("emby-1", "emby", media),
-    ]
-    get_settings_manager().set("media_servers", entries)
-    return entries
+DUR = EDITOR_DURATION_MS
+_server = editor_server
+_row = publish_row
+_save = save_markers
 
 
 @pytest.fixture
@@ -76,53 +42,6 @@ def only_plex_and_emby(servers):
     entries = [e for e in servers if e["id"] != "jf-1"]
     get_settings_manager().set("media_servers", entries)
     return entries
-
-
-@pytest.fixture
-def known(app, episode):
-    st = os.stat(episode)
-    store = get_marker_store()
-    return store.upsert_file(
-        FileIdentity(episode, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
-    )
-
-
-@pytest.fixture
-def published(monkeypatch):
-    """Captures every ``publish_now`` call and answers with the rows a test asks for."""
-
-    class Recorder:
-        def __init__(self):
-            self.calls = []
-            self.rows = []
-
-        def __call__(self, path, **kwargs):
-            self.calls.append({"path": path, **kwargs})
-            return self.rows
-
-    recorder = Recorder()
-    monkeypatch.setattr(pipeline, "publish_now", recorder)
-    return recorder
-
-
-def _row(server_id, server_type, status, message=""):
-    return {
-        "server_id": server_id,
-        "server_name": server_id.upper(),
-        "server_type": server_type,
-        "adapter_name": "markers",
-        "status": status,
-        "message": message,
-        "canonical_path": "",
-        "frame_source": "",
-        "output_paths": [],
-    }
-
-
-def _save(client, episode, markers, **extra):
-    return client.post(
-        "/api/markers/item/markers", headers=_api_headers(), json={"path": episode, "markers": markers, **extra}
-    )
 
 
 class TestSaveRefusals:
@@ -199,7 +118,7 @@ class TestSaveRefusals:
         ],
     )
     def test_the_two_bounds_a_user_marker_keeps(self, client, servers, known, episode, start, end, expected):
-        """Ruling P-R2: inside the file, and ending after it starts -- those two, and no others."""
+        """Inside the file, and ending after it starts -- those two, and no others."""
         resp = _save(client, episode, [{"type": "intro", "start_ms": start, "end_ms": end}])
         assert resp.status_code == 400
         assert expected in resp.get_json()["error"]
@@ -281,7 +200,7 @@ class TestSaveStoresAndPublishes:
     def test_the_save_is_stored_and_locked_before_any_server_is_asked(
         self, client, servers, known, episode, monkeypatch
     ):
-        """P-R1: the request that publishes must not be able to lose the edit."""
+        """The request that publishes must not be able to lose the edit."""
         seen = {}
 
         def capture(path, **kwargs):
@@ -297,7 +216,7 @@ class TestSaveStoresAndPublishes:
         assert seen["reason"] == LOCKED_BY_USER
 
     def test_adjusting_is_locking(self, client, servers, known, episode, published):
-        """P-R3: there is no adjusted-but-unlocked state."""
+        """There is no adjusted-but-unlocked state."""
         _save(client, episode, [{"type": "intro", "start_ms": 5_000, "end_ms": 35_000}])
         store = get_marker_store()
         assert store.get_markers(known.id)[T.INTRO].locked is True
@@ -394,7 +313,7 @@ class TestSaveStoresAndPublishes:
         self, client, servers, known, episode, published
     ):
         """The sentence in ``message`` is the same for one type or two, so only this list tells the editor which
-        types the lock overrode on a server set to keep its own (spec §5.5 rule 1)."""
+        types the lock overrode on a server set to keep its own."""
         row = _row("plex-1", "plex", "markers_written", "1 marker(s). Replaced Plex's own marker.")
         row["replaced_own"] = ["intro"]
         published.rows = [row]
@@ -411,7 +330,7 @@ class TestSaveStoresAndPublishes:
     def test_a_type_a_server_cannot_show_is_named_per_server(
         self, client, servers, known, episode, published, server_id, server_type, shows_it, mtype
     ):
-        """D8, first shape: recap and preview are type-level -- Plex and Emby simply don't have them."""
+        """Recap and preview are type-level -- Plex and Emby simply don't have them."""
         published.rows = [_row(server_id, server_type, "markers_written", "1 marker(s)")]
         resp = _save(client, episode, [{"type": mtype, "start_ms": 1_000, "end_ms": 20_000}])
         assert resp.get_json()["servers"][0]["cant_show"] == ([] if shows_it else [mtype])
@@ -419,7 +338,7 @@ class TestSaveStoresAndPublishes:
     def test_an_edited_credits_end_is_accepted_on_emby_with_the_note_saying_what_emby_does(
         self, client, servers, known, episode, published
     ):
-        """D8, second shape: not a refusal -- published start-only, and the editor says so per field."""
+        """Not a refusal -- published start-only, and the editor says so per field."""
         published.rows = [_row("emby-1", "emby", "markers_written", "1 marker(s)")]
         resp = _save(client, episode, [{"type": "credits", "start_ms": 1_200_000, "end_ms": 1_250_000}])
         row = resp.get_json()["servers"][0]
@@ -441,9 +360,9 @@ class TestSaveStoresAndPublishes:
         assert [r["notes"] for r in resp.get_json()["servers"]] == [[], []]
 
     def test_a_failure_message_never_carries_a_servers_credentials(self, client, servers, known, episode, published):
-        published.rows = [_row("plex-1", "plex", "failed", f"401 for http://x/?X-Plex-Token={PLEX_TOKEN}")]
+        published.rows = [_row("plex-1", "plex", "failed", f"401 for http://x/?X-Plex-Token={EDITOR_PLEX_TOKEN}")]
         resp = _save(client, episode, [{"type": "intro", "start_ms": 5_000, "end_ms": 35_000}])
-        assert PLEX_TOKEN not in resp.get_data(as_text=True)
+        assert EDITOR_PLEX_TOKEN not in resp.get_data(as_text=True)
 
 
 class TestUnlock:
@@ -512,7 +431,7 @@ class TestUnlock:
 
 
 # ---------------------------------------------------------------------------
-# Adding a marker by hand (phase 4, built 2026-09-21 to the answers relayed with the go-ahead)
+# Adding a marker by hand
 # ---------------------------------------------------------------------------
 
 # The starting times the Inspector's Adjust puts down for a marker it adds (``inspector.js`` ``addRow``), in this

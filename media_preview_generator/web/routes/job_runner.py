@@ -17,6 +17,7 @@ from loguru import logger
 from ...job_kinds import INTRO_CREDITS_FOLLOW_UP, JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS
 from ...jobs.orchestrator import SUCCESS_OUTCOME_KEYS, count_successes
 from ...jobs.parking import JobParked
+from ...processing.retry_queue import scaled_backoff_delay
 from ...scan_filters import FILTER_CONFIG_KEYS
 from ..job_gate import format_wait_message, release_slot
 from ..jobs import (
@@ -667,10 +668,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             release_slot(_slot, get_job_gate())
 
         try:
-            import os
-
-            from loguru import logger as loguru_logger
-
             from ...config import ConfigValidationError, load_config
             from ...jobs.orchestrator import run_processing
             from ...jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread
@@ -729,7 +726,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             sm = get_settings_manager()
             job_log_level = sm.get("log_level", "INFO").upper()
 
-            log_handler_id = loguru_logger.add(
+            log_handler_id = logger.add(
                 log_sink,
                 level=job_log_level,
                 format="{message}",
@@ -1141,7 +1138,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         )
                         job_manager.cancel_job(job_id)
                         return
-                    _slot["held"] = True
                     if parked_reference:
                         from ...jobs.checkpoints import read_checkpoint
 
@@ -1532,11 +1528,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                     if _server.get("status") in CHAPTER_PUBLISHER_STATUSES:
                                         chapter_waits_by_server[_name] = chapter_waits_by_server.get(_name, 0) + 1
 
-                    # Combine paths that need a Plex rescan: unresolved
-                    # (Plex doesn't know the file) + not-found-on-disk (Plex
-                    # returned a stale path).
-                    all_scan_paths = list(unresolved_paths) + not_found_on_disk
-
                     # For retries, start with unresolved webhook paths and add
                     # the webhook path of each file that wasn't found on disk
                     # (resubmitted as the webhook sent it, so it resolves again
@@ -1583,10 +1574,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         was blank because every snapshot showed
                         ``published``/``skipped_output_exists``).
                         """
-                        import os as _os
-
-                        from media_preview_generator.processing.retry_queue import scaled_backoff_delay
-
                         # Drop the legacy "Sonarr: " / "Radarr: " prefix from the
                         # parent name — the source chip on the row carries the
                         # trigger label now, so the prefix is duplicate noise.
@@ -1603,7 +1590,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         # raw-basename fallback only applies when no parent
                         # title can be recovered. Strips any existing "Retry: "
                         # to avoid stacking on a retry-of-a-retry.
-                        basenames = [_os.path.basename(p) for p in paths]
+                        basenames = [os.path.basename(p) for p in paths]
                         parent_library = (current_job.library_name or "") if current_job else ""
                         if parent_library.startswith("Retry: "):
                             parent_library = parent_library[len("Retry: ") :]
@@ -1611,7 +1598,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             parent_library = basenames[0] if len(paths) == 1 else f"{len(paths)} files"
                         retry_library_name = _retry_job_label(parent_library, paths)
                         parent_id = job_config.get("parent_job_id") or job_id
-                        # D15 — the slow backoff schedule (1m, 2m, 5m, 15m, 60m).
+                        # the slow backoff schedule (1m, 2m, 5m, 15m, 60m).
                         # The old formula `30 * 2^(n-1)` capped at 5min spaced
                         # 3 attempts inside ~3.5 minutes — far too tight for
                         # "Plex hasn't scanned the file yet", which routinely
@@ -1629,8 +1616,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         # right source pill. CONFIG.server_id is the
                         # publish-pin (worker reads it as
                         # ``server_id_filter``) and is handled separately
-                        # below — see the explicit-pin discrimination at
-                        # line ~1038.
+                        # below (the explicit-pin discrimination).
                         parent_server_id = current_job.server_id if current_job else None
                         parent_server_name = current_job.server_name if current_job else None
                         parent_server_type = current_job.server_type if current_job else None
@@ -1769,16 +1755,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         _start_job_async(rj.id, retry_async_config)
                         return rj.id
 
-                    # Per-server scan-nudges already fired from
-                    # ``multi_server.py`` for every publisher whose
-                    # SKIPPED_NOT_IN_LIBRARY branch ran (Plex's partial
-                    # scan, Emby's /Library/Media/Updated, Jellyfin's
-                    # equivalent). The job-level Plex partial-scan call
-                    # that lived here pre-unification is redundant now
-                    # that every server's adapter triggers its own
-                    # scan-nudge for unresolved paths.
-                    del all_scan_paths
-
                     spawned_retry_id = None
                     if retry_paths and not (result.get("cancelled") or status_value == "cancelled"):
                         # Single source of truth for the retry trigger
@@ -1800,8 +1776,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         if is_retry and retry_attempt < effective_max:
                             next_attempt = retry_attempt + 1
                             spawned_retry_id = _spawn_retry_job(retry_paths, next_attempt, retry_reason=retry_reason)
-                            from media_preview_generator.processing.retry_queue import scaled_backoff_delay
-
                             next_delay = scaled_backoff_delay(next_attempt, retry_delay_sec)
                             reason_parts = []
                             if unresolved_paths:
@@ -1827,8 +1801,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             )
                         elif not is_retry and effective_max > 0:
                             spawned_retry_id = _spawn_retry_job(retry_paths, 1, retry_reason=retry_reason)
-                            from media_preview_generator.processing.retry_queue import scaled_backoff_delay
-
                             first_delay = scaled_backoff_delay(1, retry_delay_sec)
                             reason_parts = []
                             if unresolved_paths:
@@ -2039,7 +2011,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             else:
                                 job_manager.complete_job(job_id, warning=error_msg)
                         else:
-                            # D25 — files that ended in skipped_not_indexed get an
+                            # files that ended in skipped_not_indexed get an
                             # amber badge, not a green "Completed". A job that
                             # queued a retry never gets here (its error_parts
                             # name the retry), so these files get no retry
@@ -2140,10 +2112,8 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             unregister_job_thread()
             if log_handler_id is not None:
                 try:
-                    from loguru import logger as loguru_logger
-
-                    loguru_logger.complete()
-                    loguru_logger.remove(log_handler_id)
+                    logger.complete()
+                    logger.remove(log_handler_id)
                 except (ValueError, TypeError):
                     logger.debug("Could not remove job log handler", exc_info=True)
 

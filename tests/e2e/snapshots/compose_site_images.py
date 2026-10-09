@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Compose the site's player 3-up and the HDR before/after pair from the lab captures.
 
-    /home/data/.venv/bin/python tests/e2e/snapshots/compose_site_images.py players
-    /home/data/.venv/bin/python tests/e2e/snapshots/compose_site_images.py hdr --video <host path> --seconds 125
+    python tests/e2e/snapshots/compose_site_images.py players
+    python tests/e2e/snapshots/compose_site_images.py hdr --video <host path> --seconds 125
 
 Both are laid out in HTML with the docs site's own tokens and rendered by Chromium at 2x, so the type
 matches the site. The HDR pair is honest by construction: the left half is a plain FFmpeg frame grab
@@ -17,6 +17,7 @@ import argparse
 import base64
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -29,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 from media_preview_generator.bif_reader import read_bif_frame, read_bif_metadata  # noqa: E402
 
-CAPTURES = Path("/home/data/mlab-openfilms/captures")
+CAPTURES = Path(os.environ.get("OPENFILMS_DIR", "openfilms")) / "captures"
 RECORD = REPO_ROOT / "docs/design/site-redesign-lab/results/captures.json"
 # docs/assets/css/main.css dark tokens, repeated because this page never loads the site stylesheet.
 STYLE = """

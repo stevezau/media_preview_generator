@@ -568,7 +568,7 @@ class TestStartupGate:
 
     def test_pause_skips_gate_entirely(self, app, monkeypatch):
         """When global processing_paused=True, jobs bail BEFORE the gate
-        (line 143 of job_runner.py). Gate's _active must stay at 0 even
+        (before acquiring a start-up slot). Gate's _active must stay at 0 even
         though a job was 'started'."""
         from media_preview_generator.web.job_gate import get_job_gate
         from media_preview_generator.web.jobs import get_job_manager
@@ -588,10 +588,17 @@ class TestStartupGate:
             get_settings_manager().processing_paused = True
             jm = get_job_manager()
             job = jm.create_job(library_name="Paused Job", config={})
+            threads_before = set(threading.enumerate())
             _start_job_async(job.id, None)
 
-            # Give the thread time to run past line 143 and exit.
-            time.sleep(0.5)
+            # Positive signal: the job's thread ran to the end (and bailed) before we check the gate.
+            def job_thread_running() -> bool:
+                return any(
+                    t.is_alive() and not isinstance(t, threading.Timer)
+                    for t in set(threading.enumerate()) - threads_before
+                )
+
+            assert _wait_for(lambda: not job_thread_running(), timeout=3.0), "paused job's thread never exited"
             assert blocker.entered() == [], (
                 f"run_processing must NOT be called while globally paused; entered={blocker.entered()}"
             )
@@ -602,7 +609,7 @@ class TestStartupGate:
 
     def test_run_processing_raises_releases_slot(self, app, monkeypatch):
         """An exception in run_processing must still release the slot.
-        The outer finally at job_runner.py:~972 handles this via the
+        The outer finally at job_runner's outer finally handles this via the
         ``if _slot_held`` guard; without it, one crashed job would
         wedge the cap forever."""
         from media_preview_generator.web.job_gate import get_job_gate
@@ -662,7 +669,7 @@ class TestStartupGate:
                 f"With 3 start-up slots, exactly 3 of the 12 flood jobs must enter run_processing; "
                 f"got {len(blocker.entered())}"
             )
-            time.sleep(1.0)
+            time.sleep(0.3)
             assert len(blocker.entered()) == 3, (
                 f"Flood must stay paced at 3 — no admissions without releases. entered={len(blocker.entered())}"
             )

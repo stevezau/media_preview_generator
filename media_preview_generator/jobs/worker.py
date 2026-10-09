@@ -7,10 +7,9 @@ multiprocessing for better simplicity and performance with FFmpeg tasks.
 import re
 import threading
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from functools import partial
 from typing import Any, Optional
 
 from loguru import logger
@@ -30,12 +29,8 @@ from ..utils import format_display_title, redact_secrets, redacted_traceback
 from .gpu_fallback import get_gpu_fallback_tracker
 from .worker_naming import friendly_device_label
 
-# Map thread_id -> job_id. The previous implementation stored a flat set
-# of "is a job thread" booleans; that broke as soon as multiple jobs ran
-# concurrently because each job's per-job log handler used the global
-# membership check and so picked up sibling jobs' worker logs (D5 — the
-# user saw a webhook job's log filled with a cancelled scan's tail). The
-# dict-with-job-id lookup gives each handler its own scoped filter.
+# Map thread_id -> job_id. Each job's log handler filters on its own id, so concurrent jobs
+# don't pick up each other's worker logs.
 _job_thread_to_job_id: dict[int, str] = {}
 _job_thread_ids_lock = threading.Lock()
 # Loguru ``extra`` key: a record bound with it stays out of a job's own log (the app log still has it) — a traceback,
@@ -140,14 +135,6 @@ def _extracted_frames(ms_result) -> bool:
     )
 
 
-# Emit cadences for ``process_items_headless``'s poll loop. Module-level so
-# tests can drive the loop deterministically: asserting "the callback fires"
-# by sleeping a stub just past a hardcoded threshold makes the test a race,
-# which is exactly how it flaked in CI while passing locally.
-WORKER_STATUS_EMIT_INTERVAL_S = 1.0
-HEADLESS_PROGRESS_EMIT_INTERVAL_S = 3.0
-
-
 class Worker:
     """Represents a worker thread for processing media items."""
 
@@ -211,7 +198,6 @@ class Worker:
         self.media_file = ""  # Actual file path being processed
         self.library_name = ""
         self.title_max_width = 20
-        self.progress_task_id = None
         self.ffmpeg_started = False  # Track if FFmpeg has started outputting progress
         self.task_start_time = 0  # Track when task started
         # Free-form sub-phase string emitted by the multi-server
@@ -229,11 +215,6 @@ class Worker:
         self.time_str = "00:00:00.00"
         self.bitrate = 0
 
-        # Track last update to avoid unnecessary updates
-        self.last_progress_percent = -1
-        self.last_speed = ""
-        self.last_update_time = 0
-
         # Track verbose logging
         self.last_verbose_log_time = 0
 
@@ -249,13 +230,13 @@ class Worker:
         self.completed = 0
         self.failed = 0
         self.outcome_counts = {r.value: 0 for r in ProcessingResult}
-        # D7 — most recent task's publisher list (one entry per (server,
+        # Most recent task's publisher list (one entry per (server,
         # adapter) the file fanned out to). Captured each task; consumed by
         # the dispatcher's _merge_worker_outcome on completion. Reset every
         # task so a stale value from the previous item never bleeds into
         # the next job's publisher chip set.
         self.last_publishers: list[dict] = []
-        # D8 — aggregate MultiServerResult message (set on FAILED /
+        # Aggregate MultiServerResult message (set on FAILED /
         # NO_FRAMES when no publisher even ran). Used as a fallback
         # reason in record_file_result so the Files panel never shows
         # an empty Details cell on a failed file.
@@ -331,13 +312,6 @@ class Worker:
 
         # Fallback: truncate to 8 characters
         return self.gpu_name[:8].ljust(10)[:10]
-
-    def _format_idle_description(self) -> str:
-        """Format idle description for display."""
-        if self.worker_type == "GPU":
-            gpu_display = self._format_gpu_name_for_display()
-            return f"[{gpu_display}]: Idle - Waiting for task..."
-        return "[CPU      ]: Idle - Waiting for task..."
 
     def assign_task(
         self,
@@ -438,9 +412,6 @@ class Worker:
         self.time_str = "00:00:00.00"
         self.bitrate = 0
 
-        self.last_progress_percent = -1
-        self.last_speed = ""
-        self.last_update_time = 0
         self.last_verbose_log_time = 0
 
         self.current_thread = threading.Thread(
@@ -483,7 +454,7 @@ class Worker:
 
         # Register THIS worker thread under THIS job's id so the per-job
         # log handler captures only its own messages — not a sibling job
-        # running concurrently (D5).
+        # running concurrently.
         with job_thread(self.current_job_id), failure_scope(self.current_job_id):
             display_name = self.media_file or self.media_title or item.canonical_path
 
@@ -514,7 +485,7 @@ class Worker:
             # the single source both this generation path and the dispatcher's
             # checking stage share so they agree on who publishes. A Plex-pinned
             # webhook fanning out would silently write Emby/Jellyfin previews too
-            # (audit P1 / D34-shape regression) — see resolve_per_item_pin.
+            # — see resolve_per_item_pin.
             per_item_pin: str | None = resolve_per_item_pin(config, item, registry)
 
             # ``webhook_source`` lives on Config when this dispatch came
@@ -532,7 +503,6 @@ class Worker:
                     registry=registry,
                     config=config,
                     item_id_by_server=item.item_id_by_server or None,
-                    bundle_metadata_by_server=item.bundle_metadata_by_server or None,
                     gpu=gpu,
                     gpu_device_path=gpu_device,
                     # This GPU's own thread cap; Config.ffmpeg_threads is the max across GPUs.
@@ -568,7 +538,7 @@ class Worker:
             # callback so the Jobs UI can show a per-file row (Files panel
             # under each job). Caller-side cap protects 100k-item scans
             # from bloating the JSONL — see web/jobs.record_file_result.
-            # Passes the per-publisher attribution (D9) so each file row
+            # Passes the per-publisher attribution so each file row
             # can show which server(s) it landed on. ``last_ms_message``
             # captures the aggregate MultiServerResult.message — used as
             # a fallback reason when there are no publishers (FFmpeg
@@ -602,7 +572,7 @@ class Worker:
                     )
 
             # Capture this task's publisher fan-out for the dispatcher to
-            # merge into JobTracker.publishers_by_server (D7). Each entry
+            # merge into JobTracker.publishers_by_server. Each entry
             # is a flat dict — not the dataclass — so the dispatcher
             # doesn't need to import processing.multi_server. server_type
             # is looked up from the registry by id so the Files-panel
@@ -1002,24 +972,6 @@ class Worker:
                     self.display_name,
                 )
 
-    @staticmethod
-    def find_available(workers: list["Worker"]) -> Optional["Worker"]:
-        """Find the first available worker.
-
-        GPU workers are prioritized (they come first in the array).
-
-        Args:
-            workers: List of Worker instances
-
-        Returns:
-            Worker: First available worker, or None if all are busy
-
-        """
-        for worker in workers:
-            if worker.is_available():
-                return worker
-        return None
-
 
 class WorkerPool:
     """Manages a pool of workers for processing media items."""
@@ -1070,11 +1022,6 @@ class WorkerPool:
         """Check if any workers are currently busy."""
         with self._workers_lock:
             return any(worker.is_busy for worker in self.workers)
-
-    def has_available_workers(self) -> bool:
-        """Check if any workers are available for new tasks."""
-        with self._workers_lock:
-            return any(worker.is_available() for worker in self.workers)
 
     def _snapshot_workers(self) -> list["Worker"]:
         """Return a stable snapshot of workers for safe iteration."""
@@ -1145,7 +1092,7 @@ class WorkerPool:
                     if index < desired:
                         worker._pending_removal = False
                         if worker.worker_type == "GPU":
-                            worker.ffmpeg_threads = devices[policy["device"]][2].get("ffmpeg_threads", 2)
+                            worker.ffmpeg_threads = devices[policy["device"]][2].get("ffmpeg_threads")
                     elif worker.is_busy:
                         worker._pending_removal = True
                     else:
@@ -1649,551 +1596,6 @@ class WorkerPool:
                         worker.is_busy = True
                     return worker
             return None
-
-    def _assign_main_queue_task(
-        self,
-        worker: "Worker",
-        media_queue: deque,
-        config: Config,
-        registry,
-        title_max_width: int,
-        cancel_check=None,
-        pause_check=None,
-    ) -> bool:
-        """Pop the next :class:`ProcessableItem` and assign it to ``worker``.
-
-        Returns:
-            True if a task was assigned, False if the queue was empty.
-        """
-        if not media_queue:
-            return False
-
-        item = media_queue.popleft()
-        progress_callback = partial(self._update_worker_progress, worker)
-
-        worker.assign_task(
-            item,
-            config,
-            registry,
-            progress_callback=progress_callback,
-            title_max_width=title_max_width,
-            library_name="",
-            cancel_check=cancel_check,
-            pause_check=pause_check,
-        )
-        logger.debug(
-            "Dispatch: assigned canonical item to {} (path={!r})",
-            worker.display_name,
-            item.canonical_path,
-        )
-        return True
-
-    def process_items(
-        self,
-        media_items: list,
-        config: Config,
-        registry,
-        worker_progress,
-        main_progress,
-        main_task_id=None,
-        title_max_width: int = 20,
-        library_name: str = "",
-    ) -> dict:
-        """Process :class:`ProcessableItem`s using available workers with Rich progress display.
-
-        Uses dynamic task assignment — workers pull tasks as they become available.
-
-        Args:
-            media_items: List of :class:`ProcessableItem` instances to process.
-            config: Configuration object.
-            registry: Live :class:`ServerRegistry` — publishers fan out via this.
-            worker_progress: Rich Progress object for displaying worker progress.
-            main_progress: Rich Progress object for main progress bar.
-            main_task_id: ID of the main progress task to update.
-            title_max_width: Maximum width for title display.
-            library_name: Name of the library section being processed.
-        """
-        # Create progress tasks for each worker in the worker progress instance
-        for worker in self._snapshot_workers():
-            worker.progress_task_id = worker_progress.add_task(
-                worker._format_idle_description(),
-                total=100,
-                completed=0,
-                speed="0.0x",
-                style="cyan",
-            )
-
-        def on_task_complete(completed_tasks: int, total_items: int) -> None:
-            """Update main progress bar on task completion."""
-            if main_task_id is not None:
-                main_progress.update(main_task_id, completed=completed_tasks)
-
-        def on_poll(completed_tasks: int, total_items: int) -> None:
-            """Update Rich worker progress display each poll cycle."""
-            for worker in self._snapshot_workers():
-                current_time = time.time()
-                with self._progress_lock:
-                    progress_data = worker.get_progress_data()
-                    is_busy = worker.is_busy
-                    ffmpeg_started = worker.ffmpeg_started
-
-                if is_busy:
-                    should_update = (
-                        progress_data["progress_percent"] != worker.last_progress_percent
-                        or progress_data["speed"] != worker.last_speed
-                        or not ffmpeg_started
-                    ) and (current_time - worker.last_update_time > 0.05)
-                    if should_update:
-                        worker_progress.update(
-                            worker.progress_task_id,
-                            description=worker.task_title,
-                            completed=progress_data["progress_percent"],
-                            speed=progress_data["speed"],
-                            remaining_time=progress_data["remaining_time"],
-                            frame=progress_data["frame"],
-                            fps=progress_data["fps"],
-                            q=progress_data["q"],
-                            size=progress_data["size"],
-                            time_str=progress_data["time_str"],
-                            bitrate=progress_data["bitrate"],
-                        )
-                        worker.last_progress_percent = progress_data["progress_percent"]
-                        worker.last_speed = progress_data["speed"]
-                        worker.last_update_time = current_time
-                else:
-                    if worker.last_progress_percent != -1:
-                        worker_progress.update(
-                            worker.progress_task_id,
-                            description=worker._format_idle_description(),
-                            completed=0,
-                            speed="0.0x",
-                        )
-                        worker.last_progress_percent = -1
-                        worker.last_speed = ""
-
-        def on_finish(total_completed: int, total_failed: int, total_items: int) -> None:
-            """Clean up Rich progress tasks."""
-            for worker in self._snapshot_workers():
-                if hasattr(worker, "progress_task_id") and worker.progress_task_id is not None:
-                    worker_progress.remove_task(worker.progress_task_id)
-                    worker.progress_task_id = None
-
-        return self._process_items_loop(
-            media_items=media_items,
-            config=config,
-            registry=registry,
-            title_max_width=title_max_width,
-            library_name=library_name,
-            on_task_complete=on_task_complete,
-            on_poll=on_poll,
-            on_finish=on_finish,
-            on_item_complete=None,
-        )
-
-    def process_items_headless(
-        self,
-        media_items: list,
-        config: Config,
-        registry,
-        title_max_width: int = 20,
-        library_name: str = "",
-        progress_callback=None,
-        worker_callback=None,
-        on_item_complete=None,
-        cancel_check=None,
-        pause_check=None,
-    ) -> dict:
-        """Process :class:`ProcessableItem`s using available workers in headless mode.
-
-        Used for web/background execution where Rich console is not available.
-
-        Args:
-            media_items: List of :class:`ProcessableItem` instances to process.
-            config: Configuration object.
-            registry: Live :class:`ServerRegistry` — publishers fan out via this.
-            title_max_width: Maximum width for title display.
-            library_name: Name of the library section being processed.
-            progress_callback: Optional ``(current, total, message)`` callback.
-            worker_callback: Optional ``(workers_list)`` callback for worker status.
-            on_item_complete: Optional ``(display_name, title, success)`` per-item callback.
-            cancel_check: Optional callable returning True when processing should stop.
-            pause_check: Optional callable returning True when dispatch should pause.
-        """
-        last_worker_update = time.time()
-        last_progress_update = time.time()
-        library_prefix = f"[{library_name}] " if library_name else ""
-
-        def on_task_complete(completed_tasks: int, total_items: int) -> None:
-            """Call progress callback on task completion (throttled to avoid SocketIO flood).
-
-            Always fires for the final item so callers see 100% completion.
-            """
-            nonlocal last_progress_update
-            if progress_callback:
-                now = time.time()
-                is_final = completed_tasks >= total_items
-                if is_final or now - last_progress_update >= 0.5:
-                    progress_callback(
-                        completed_tasks,
-                        total_items,
-                        f"{library_prefix}{completed_tasks}/{total_items} completed",
-                    )
-                    last_progress_update = now
-
-        def on_poll(completed_tasks: int, total_items: int) -> None:
-            """Emit worker status and progress updates periodically."""
-            nonlocal last_worker_update, last_progress_update
-            current_time = time.time()
-
-            # Emit progress/ETA updates every 3 seconds so the ETA stays
-            # fresh even during long FFmpeg runs between task completions.
-            if progress_callback and current_time - last_progress_update >= HEADLESS_PROGRESS_EMIT_INTERVAL_S:
-                progress_callback(
-                    completed_tasks,
-                    total_items,
-                    f"{library_prefix}{completed_tasks}/{total_items} completed",
-                )
-                last_progress_update = current_time
-
-            if worker_callback and current_time - last_worker_update >= WORKER_STATUS_EMIT_INTERVAL_S:
-                worker_statuses = []
-                all_workers = self._snapshot_workers()
-
-                # Build per-type 1-based indices for display names
-                type_counters: dict[str, int] = {}
-                worker_type_index: dict[int, int] = {}
-                for w in all_workers:
-                    type_counters[w.worker_type] = type_counters.get(w.worker_type, 0) + 1
-                    worker_type_index[w.worker_id] = type_counters[w.worker_type]
-
-                for worker in all_workers:
-                    with self._progress_lock:
-                        progress_data = worker.get_progress_data()
-                        is_busy = worker.is_busy
-
-                    idx = worker_type_index[worker.worker_id]
-                    # Shared label helper — see jobs/worker_naming.py.
-                    from .worker_naming import (
-                        cpu_worker_label,
-                        friendly_device_label,
-                        gpu_worker_label,
-                    )
-
-                    if worker.worker_type == "GPU":
-                        device_label = friendly_device_label(
-                            {"name": worker.gpu_name or ""},
-                            worker.gpu_device,
-                            worker.worker_type,
-                        )
-                        display_name = gpu_worker_label(idx, device_label)
-                    else:
-                        display_name = cpu_worker_label(idx)
-
-                    # ``ffmpeg_started`` flips True the first time the
-                    # FFmpeg progress parser fires. Without surfacing it,
-                    # the UI can't tell pre-FFmpeg work (item-id lookups,
-                    # cross-server BIF unpack, publishing) from
-                    # actually-running-FFmpeg-at-0% — both look like
-                    # "0.0% / 0.0x" and the user thinks the worker is
-                    # stuck. Surfacing it lets the UI show a "Working…"
-                    # spinner during pre-FFmpeg work and only switch to
-                    # the progress bar once FFmpeg is actually reporting.
-                    worker_statuses.append(
-                        {
-                            "worker_id": worker.worker_id,
-                            "worker_type": worker.worker_type,
-                            "worker_name": display_name,
-                            "status": "processing" if is_busy else "idle",
-                            "current_title": worker.media_title if is_busy else "",
-                            "library_name": worker.library_name if is_busy else "",
-                            "progress_percent": progress_data["progress_percent"] if is_busy else 0,
-                            "speed": progress_data["speed"] if is_busy else "0.0x",
-                            "remaining_time": progress_data["remaining_time"] if is_busy else 0.0,
-                            "fallback_active": bool(getattr(worker, "fallback_active", False)),
-                            "fallback_reason": getattr(worker, "fallback_reason", None),
-                            "ffmpeg_started": bool(getattr(worker, "ffmpeg_started", False)) if is_busy else False,
-                            "current_phase": (getattr(worker, "current_phase", "") or "") if is_busy else "",
-                            "chapter_progress": progress_data.get("chapter_progress") if is_busy else None,
-                        }
-                    )
-                worker_callback(worker_statuses)
-                last_worker_update = current_time
-
-        def on_finish(total_completed: int, total_failed: int, total_items: int) -> None:
-            """Final progress callback."""
-            if progress_callback:
-                progress_callback(
-                    total_completed,
-                    total_items,
-                    f"{library_prefix}Complete: {total_completed} successful, {total_failed} failed",
-                )
-
-        return self._process_items_loop(
-            media_items=media_items,
-            config=config,
-            registry=registry,
-            title_max_width=title_max_width,
-            library_name=library_name,
-            on_task_complete=on_task_complete,
-            on_poll=on_poll,
-            on_finish=on_finish,
-            on_item_complete=on_item_complete,
-            cancel_check=cancel_check,
-            pause_check=pause_check,
-        )
-
-    def _process_items_loop(
-        self,
-        media_items: list,
-        config: Config,
-        registry,
-        title_max_width: int,
-        library_name: str,
-        on_task_complete: Any | None = None,
-        on_poll: Any | None = None,
-        on_finish: Any | None = None,
-        on_item_complete: Any | None = None,
-        cancel_check: Any | None = None,
-        pause_check: Any | None = None,
-    ) -> dict:
-        """Core processing loop shared by ``process_items`` and ``process_items_headless``.
-
-        Handles queue management, task assignment, exit-condition checking, and
-        adaptive sleeping. Progress reporting is delegated to the caller via
-        callbacks.
-
-        Args:
-            media_items: List of :class:`ProcessableItem` instances to process.
-            config: Configuration object.
-            registry: Live :class:`ServerRegistry`.
-            title_max_width: Maximum width for title display.
-            library_name: Name of the library section being processed.
-            on_task_complete: ``(completed_tasks, total_items)`` callback after each task.
-            on_poll: ``(completed_tasks, total_items)`` callback every poll cycle.
-            on_finish: ``(total_completed, total_failed, total_items)`` end-of-run callback.
-            on_item_complete: Optional ``(display_name, title, success)`` per-item callback.
-            cancel_check: Optional callable returning True when processing should stop.
-        """
-        media_queue = deque(media_items)  # O(1) popleft
-        completed_tasks = 0
-        total_items = len(media_items)
-        last_overall_progress_log = time.time()
-        run_successful = 0
-        run_failed = 0
-        failed_paths: list[str] = []
-        cancellation_requested = False
-        per_worker_totals = {}
-
-        library_prefix = f"[{library_name}] " if library_name else ""
-
-        logger.info("Processing {} items with {} workers", total_items, len(self._snapshot_workers()))
-
-        def _record_worker_delta(worker: "Worker") -> None:
-            """Track per-worker success/failure deltas for this run."""
-            nonlocal run_successful, run_failed
-            prev_completed, prev_failed = per_worker_totals.get(worker.worker_id, (0, 0))
-            completed_delta = max(0, worker.completed - prev_completed)
-            failed_delta = max(0, worker.failed - prev_failed)
-            if completed_delta or failed_delta:
-                run_successful += completed_delta
-                run_failed += failed_delta
-                per_worker_totals[worker.worker_id] = (worker.completed, worker.failed)
-
-        def _handle_completions(workers: list["Worker"]) -> None:
-            """Check completions, update counters, and retire deferred workers."""
-            nonlocal completed_tasks
-            for worker in workers:
-                # Read before check_completion frees the worker: once it's idle another assignment can replace it.
-                canonical_path = worker.media_file
-                if not worker.check_completion():
-                    continue
-                title = worker.media_title or "(unknown)"
-                prev_completed, prev_failed = per_worker_totals.get(worker.worker_id, (0, 0))
-                completed_delta = max(0, worker.completed - prev_completed)
-                failed_delta = max(0, worker.failed - prev_failed)
-                _record_worker_delta(worker)
-                if failed_delta and canonical_path:
-                    failed_paths.append(canonical_path)
-                completed_tasks += 1
-                if on_task_complete:
-                    on_task_complete(completed_tasks, total_items)
-                if on_item_complete:
-                    success = completed_delta == 1 and failed_delta == 0
-                    on_item_complete(
-                        worker.display_name,
-                        title,
-                        success,
-                    )
-                self._retire_idle_worker_if_scheduled(worker)
-
-        # Initialize per-worker accounting baseline.
-        for worker in self._snapshot_workers():
-            per_worker_totals[worker.worker_id] = (worker.completed, worker.failed)
-
-        paused_gate_logged = False  # Log pause entry/exit once per pause period
-        # Main processing loop
-        while True:
-            # Check cancellation before doing more work
-            if cancel_check and cancel_check():
-                logger.info("{}Cancellation requested — stopping", library_prefix)
-                cancellation_requested = True
-                break
-
-            # Check for completed tasks and apply deferred retirements.
-            _handle_completions(self._snapshot_workers())
-
-            # Delegate UI/progress updates to caller
-            if on_poll:
-                on_poll(completed_tasks, total_items)
-
-            # Pause between dispatch cycles without interrupting active tasks.
-            while pause_check and pause_check():
-                if not paused_gate_logged:
-                    workers_snap = self._snapshot_workers()
-                    busy = sum(1 for w in workers_snap if w.is_busy)
-                    logger.info(
-                        "{}Pause gate entered; queue_length={}, busy_workers={}, idle_workers={}",
-                        library_prefix,
-                        len(media_queue),
-                        busy,
-                        len(workers_snap) - busy,
-                    )
-                    paused_gate_logged = True
-                if cancel_check and cancel_check():
-                    logger.info("{}Cancellation requested while paused", library_prefix)
-                    cancellation_requested = True
-                    break
-                _handle_completions(self._snapshot_workers())
-                if on_poll:
-                    on_poll(completed_tasks, total_items)
-                time.sleep(0.2)
-            if paused_gate_logged:
-                workers_snap = self._snapshot_workers()
-                busy = sum(1 for w in workers_snap if w.is_busy)
-                logger.info(
-                    "{}Pause gate exited; queue_length={}, busy_workers={}, idle_workers={}",
-                    library_prefix,
-                    len(media_queue),
-                    busy,
-                    len(workers_snap) - busy,
-                )
-                paused_gate_logged = False
-            if cancellation_requested:
-                break
-
-            # Log overall progress every 5 seconds
-            current_time = time.time()
-            if current_time - last_overall_progress_log >= 5.0:
-                progress_percent = int((completed_tasks / total_items) * 100) if total_items > 0 else 0
-                logger.info(
-                    "Processing progress {}{}/{} ({}%) completed",
-                    library_prefix,
-                    completed_tasks,
-                    total_items,
-                    progress_percent,
-                )
-                last_overall_progress_log = current_time
-
-            # Assign new tasks to available workers
-            while True:
-                self._apply_deferred_removals()
-                if not media_queue:
-                    logger.debug(
-                        "{}Dispatch: nothing to assign (queue empty)",
-                        library_prefix,
-                    )
-                    break
-                # Atomic claim closes the race vs. JobDispatcher's own
-                # _assign_tasks consumer thread — both used to find the
-                # same idle worker and the loser tripped "already busy".
-                available_worker = self._find_available_worker(claim=True)
-                if not available_worker:
-                    logger.debug(
-                        "{}Dispatch: no idle workers right now (queue={})",
-                        library_prefix,
-                        len(media_queue),
-                    )
-                    break
-
-                if not self._assign_main_queue_task(
-                    available_worker,
-                    media_queue,
-                    config,
-                    registry,
-                    title_max_width,
-                    cancel_check=cancel_check,
-                    pause_check=pause_check,
-                ):
-                    # Race lost (queue drained between check and pop) —
-                    # release the pre-claim so the worker stays available.
-                    available_worker.is_busy = False
-                    break
-
-            # Check exit condition
-            if not media_queue:
-                _handle_completions(self._snapshot_workers())
-                self._apply_deferred_removals()
-
-                actual_completed = run_successful
-                actual_failed = run_failed
-                actual_processed = actual_completed + actual_failed
-
-                if actual_processed >= total_items:
-                    # Drain in-flight workers before declaring the run
-                    # complete. The original cap (20 × 1ms = 20ms total)
-                    # was too tight for even sub-second cache-hit tasks
-                    # — the last-task-assigned-on-empty-tick boundary
-                    # could under-report by the in-flight tasks. Bump
-                    # to 2s of polling at 5ms intervals (400 iterations)
-                    # which is still fast on cache hits and actually
-                    # gives FFmpeg-heavy tasks time to finish.
-                    busy_retries = 0
-                    max_busy_retries = 400
-                    while self.has_busy_workers() and busy_retries < max_busy_retries:
-                        time.sleep(0.005)
-                        _handle_completions(self._snapshot_workers())
-                        self._apply_deferred_removals()
-                        busy_retries += 1
-
-                    actual_completed = run_successful
-                    actual_failed = run_failed
-                    actual_processed = actual_completed + actual_failed
-
-                    if not self.has_busy_workers() and actual_processed >= total_items:
-                        logger.debug("All items processed ({}/{}), exiting", actual_processed, total_items)
-                        break
-
-            # Adaptive sleep
-            if self.has_busy_workers():
-                time.sleep(0.005)
-            elif not media_queue:
-                time.sleep(0.001)
-
-        # Final statistics from run-local accounting (robust to dynamic worker removal).
-        total_completed = run_successful
-        total_failed = run_failed
-
-        # Aggregate fine-grained outcome counts across all workers.
-        outcome = {r.value: 0 for r in ProcessingResult}
-        for worker in self._snapshot_workers():
-            for key, count in worker.outcome_counts.items():
-                # Shared-pool workers may also carry non-preview kinds' outcome keys.
-                if key in outcome:
-                    outcome[key] += count
-
-        if on_finish:
-            on_finish(total_completed, total_failed, total_items)
-
-        logger.info("Processing complete: {} successful, {} failed", total_completed, total_failed)
-
-        return {
-            "completed": total_completed,
-            "failed": total_failed,
-            "failed_paths": failed_paths,
-            "total": total_items,
-            "cancelled": cancellation_requested,
-            "outcome": outcome,
-        }
 
     def _update_worker_progress(
         self,

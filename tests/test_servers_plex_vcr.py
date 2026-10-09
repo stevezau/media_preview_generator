@@ -226,25 +226,6 @@ class TestListLibrariesContract:
         assert movies[0].remote_paths, "library.remote_paths must be populated from Location entries"
 
 
-class TestTriggerPathRefreshContract:
-    """Contract pin for ``PlexServer._trigger_path_refresh``.
-
-    Plex's targeted-scan endpoint accepts a folder path within a
-    library section via ``GET /library/sections/{id}/refresh?path=``.
-    A regression that misnames the param (e.g. ``folder=`` or
-    ``directory=``) silently no-ops because Plex returns 200 OK
-    regardless. Cassette pins the recorded URL so a param-rename
-    regression fails on replay.
-    """
-
-    def test_partial_scan_uses_refresh_endpoint_with_path_param(self, plex_server_under_test):
-        # A single _trigger_path_refresh call should fire one POST/GET
-        # against /library/sections/<id>/refresh with the path
-        # query-encoded. Cassette captures the exact request.
-        # We pass the parent dir of the test movie (Plex's scan
-        # endpoint takes a folder, not a file).
-        plex_server_under_test._trigger_path_refresh(f"{_HIT_LIBRARY_REMOTE_PATH}/Test Movie H264 (2024)")
-        # No assertion on return value (helper returns None) — the
-        # cassette interaction itself is the assertion. A future
-        # regression that renames the param mismatches the recorded
-        # URL on replay.
+# The ``/library/sections/{id}/refresh?path=`` request is pinned without a cassette in
+# tests/test_plex_client.py: the cassette scrubber collapses the sections listing on replay,
+# so a replayed scan never finds a library to refresh.

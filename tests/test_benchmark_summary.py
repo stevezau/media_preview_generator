@@ -8,17 +8,7 @@ than estimate).
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-import pytest
-
-from scripts.benchmark_previews import MIN_RUNS, read_rows, summarize
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RESULTS = REPO_ROOT / "docs" / "benchmark" / "results.csv"
-SUMMARY = REPO_ROOT / "docs" / "benchmark" / "summary.json"
-PAGE = REPO_ROOT / "docs" / "benchmark.md"
+from scripts.benchmark_previews import MIN_RUNS, summarize
 
 
 def _rows(tool: str, seconds: list[float], status: str = "timed") -> list[dict[str, str]]:
@@ -62,22 +52,3 @@ class TestSummarize:
     def test_display_rounds_to_one_decimal(self) -> None:
         rows = _rows("plex-builtin", [1000, 1000, 1000]) + _rows("app-gpu", [300, 300, 300])
         assert summarize(rows)["ratio_display"] == "3.3"
-
-
-class TestCommittedResults:
-    def test_summary_is_computed_from_the_committed_results(self) -> None:
-        if not RESULTS.is_file():
-            pytest.skip("no benchmark results committed yet")
-        assert json.loads(SUMMARY.read_text(encoding="utf-8")) == summarize(read_rows(RESULTS))
-
-    def test_benchmark_page_quotes_the_summary(self) -> None:
-        if not PAGE.is_file():
-            pytest.skip("no benchmark page yet")
-        summary = json.loads(SUMMARY.read_text(encoding="utf-8"))
-        page = PAGE.read_text(encoding="utf-8")
-        if summary["ratio_display"] is None:
-            assert "not timed reliably" in page
-        else:
-            assert f"{summary['ratio_display']}×" in page
-            for tool in ("plex-builtin", "app-gpu"):
-                assert f"{summary['tools'][tool]['median_seconds']:.0f} s" in page

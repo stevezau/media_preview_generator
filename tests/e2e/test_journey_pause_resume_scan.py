@@ -108,14 +108,8 @@ class TestPauseResumeScan:
         """When paused, a newly-POSTed job should NOT immediately go to RUNNING.
 
         This catches the bug where pause toggles the UI label but the
-        worker pool keeps picking up new items. We POST a job while
-        paused; the orchestrator may complete it (no servers configured)
-        but it should NOT be running mid-flight when we check.
-
-        Exact-state assertion is timing-fragile, so the contract we test:
-        a job POSTed while paused either ends up completed/failed (raced
-        through dispatcher despite pause — acceptable for empty-server
-        case) or stays pending. It must NEVER end up "running" indefinitely.
+        worker pool keeps picking up new items. We POST a job while paused and
+        watch it for a few seconds: it must stay "pending" throughout.
         """
         app_url, _ = backend_real_app
 
@@ -125,49 +119,40 @@ class TestPauseResumeScan:
             headers=_AUTH_HEADERS,
             timeout=_API_TIMEOUT,
         )
+        try:
+            # POST a real job.
+            post_resp = requests.post(
+                f"{app_url}/api/jobs/manual",
+                headers=_AUTH_JSON_HEADERS,
+                data='{"file_paths": ["/tmp/paused_job_target.mkv"]}',
+                timeout=_API_TIMEOUT,
+            )
+            assert post_resp.ok
+            job_id = post_resp.json()["id"]
 
-        # POST a real job.
-        post_resp = requests.post(
-            f"{app_url}/api/jobs/manual",
-            headers=_AUTH_JSON_HEADERS,
-            data='{"file_paths": ["/tmp/paused_job_target.mkv"]}',
-            timeout=_API_TIMEOUT,
-        )
-        assert post_resp.ok
-        job_id = post_resp.json()["id"]
-
-        # Wait briefly for terminal — with no servers configured the
-        # orchestrator will eventually mark it terminal even paused.
-        deadline = time.monotonic() + 10
-        last_status = None
-        while time.monotonic() < deadline:
-            r = requests.get(
-                f"{app_url}/api/jobs/{job_id}",
+            # Watch the job for a window: while paused it must never start running. An ignored
+            # pause shows up as "running" (or a terminal status reached without being resumed).
+            statuses: set[str | None] = set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                r = requests.get(
+                    f"{app_url}/api/jobs/{job_id}",
+                    headers=_AUTH_HEADERS,
+                    timeout=_API_TIMEOUT,
+                )
+                if r.ok:
+                    statuses.add(r.json().get("status"))
+                time.sleep(0.2)
+        finally:
+            requests.post(
+                f"{app_url}/api/processing/resume",
                 headers=_AUTH_HEADERS,
                 timeout=_API_TIMEOUT,
             )
-            if r.ok:
-                last_status = r.json().get("status")
-                if last_status in ("completed", "failed", "cancelled", "pending"):
-                    break
-            time.sleep(0.2)
 
-        # The killer assertion: the job must NOT be stuck in RUNNING.
-        # Either pending (queued behind the pause) or terminal (raced
-        # through with no work to do) is acceptable. Stuck-running means
-        # pause was ignored AND the worker hung.
-        assert last_status != "running", (
-            f"Job {job_id} POSTed while paused is stuck in 'running' state. "
-            f"Pause did not stop the dispatcher AND the worker never finished. "
+        assert statuses == {"pending"}, (
+            f"Job {job_id} POSTed while paused should stay 'pending' the whole time; saw {sorted(map(str, statuses))}. "
             "This is the bug class where the pause toggle is purely cosmetic."
-        )
-
-        # Cleanup: resume so we don't leak the paused state into other tests
-        # (which use function-scoped subprocesses anyway, but defensive).
-        requests.post(
-            f"{app_url}/api/processing/resume",
-            headers=_AUTH_HEADERS,
-            timeout=_API_TIMEOUT,
         )
 
     def test_pause_resume_emits_socketio_state_change(

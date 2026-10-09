@@ -20,6 +20,9 @@ import pytest
 
 from media_preview_generator.markers import freeze as freeze_mod
 from media_preview_generator.markers.freeze import Freeze
+from tests.markers.fakes import poll_until as _wait_for
+from tests.markers.fakes import process_state as _state
+from tests.markers.fakes import read_count as _count
 
 
 def _counter(path: pathlib.Path, *, new_session: bool = True) -> subprocess.Popen:
@@ -33,24 +36,6 @@ def _counter(path: pathlib.Path, *, new_session: bool = True) -> subprocess.Pope
             time.sleep(0.02)
     """)
     return subprocess.Popen([sys.executable, "-c", script], start_new_session=new_session)
-
-
-def _state(pid: int) -> str:
-    return pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split(" ", 1)[0]
-
-
-def _wait_for(condition, *, within_s: float = 5.0) -> bool:
-    deadline = time.monotonic() + within_s
-    while not condition() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    return condition()
-
-
-def _count(path: pathlib.Path) -> int:
-    try:
-        return int(path.read_text() or 0)
-    except (FileNotFoundError, ValueError):
-        return 0
 
 
 @pytest.fixture

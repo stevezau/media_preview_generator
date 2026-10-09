@@ -247,7 +247,7 @@ class TestTriggerPlexPartialScan:
         sections_response.json.return_value = {
             "MediaContainer": {
                 "Directory": [
-                    {"key": "9", "Location": [{"path": "/data_16tb/tv"}]},
+                    {"key": "9", "Location": [{"path": "/data_disk/tv"}]},
                 ]
             }
         }
@@ -260,7 +260,7 @@ class TestTriggerPlexPartialScan:
             unresolved_paths=["/data/tv/Example Show/Season 01/S01E01.mkv"],
             path_mappings=[
                 {
-                    "plex_prefix": "/data_16tb",
+                    "plex_prefix": "/data_disk",
                     "local_prefix": "/mnt/media",
                     "webhook_prefixes": ["/data"],
                 }
@@ -272,7 +272,7 @@ class TestTriggerPlexPartialScan:
         assert mock_get.call_args_list[0].kwargs["verify"] is False
         assert mock_get.call_args_list[1] == call(
             "https://plex.example:32400/library/sections/9/refresh",
-            params={"path": "/data_16tb/tv/Example Show"},
+            params={"path": "/data_disk/tv/Example Show"},
             headers={"X-Plex-Token": "token"},
             timeout=10,
             verify=False,
@@ -864,16 +864,16 @@ class TestPathMappingProduction:
     def test_expand_path_mapping_candidates_webhook_alias(self):
         """Webhook prefix should expand into the local-prefix equivalent.
 
-        Row: webhook ``/data`` aliases the on-disk ``/data_16tb`` mount. A
-        webhook payload of ``/data/x.mkv`` must produce a ``/data_16tb/x.mkv``
+        Row: webhook ``/data`` aliases the on-disk ``/data_disk`` mount. A
+        webhook payload of ``/data/x.mkv`` must produce a ``/data_disk/x.mkv``
         candidate so we can match it against the actual file.
         """
         mappings = [
-            self._row("/plex_data", "/data_16tb", webhook_prefixes=["/data"]),
+            self._row("/plex_data", "/data_disk", webhook_prefixes=["/data"]),
         ]
         candidates = expand_path_mapping_candidates("/data/x.mkv", mappings)
         assert candidates[0] == "/data/x.mkv"
-        assert "/data_16tb/x.mkv" in candidates
+        assert "/data_disk/x.mkv" in candidates
         # Webhook -> Plex form also fans out (used for cross-matching against
         # Plex-reported locations).
         assert "/plex_data/x.mkv" in candidates
@@ -1325,8 +1325,8 @@ class TestGetMediaItemsByPaths:
         """File-path search finds upgraded files (Plex keeps old addedAt; file= filter does not depend on it)."""
         mock_config.path_mappings = [
             {
-                "plex_prefix": "/data_16tb",
-                "local_prefix": "/data_16tb",
+                "plex_prefix": "/data_disk",
+                "local_prefix": "/data_disk",
                 "webhook_prefixes": ["/data"],
             }
         ]
@@ -1342,7 +1342,7 @@ class TestGetMediaItemsByPaths:
         mock_episode.grandparentTitle = "The Mind, Explained"
         mock_episode.seasonEpisode = "s02e02"
         mock_episode.locations = [
-            "/data_16tb/TV Shows/The Mind, Explained/Season 02/"
+            "/data_disk/TV Shows/The Mind, Explained/Season 02/"
             "The Mind, Explained (2019) - S02E02 - Teenage Brain [NF WEBDL-1080p].mkv"
         ]
 
@@ -1501,11 +1501,11 @@ class TestGetMediaItemsByPaths:
         )
 
     def test_get_media_items_by_paths_webhook_path_matches_plex_via_mapping(self, mock_config):
-        """Webhook sends /data/...; Plex item at /data_16tb1/...; mapping links them."""
+        """Webhook sends /data/...; Plex item at /data_disk1/...; mapping links them."""
         mock_config.path_mappings = [
             {
-                "plex_prefix": "/data_16tb1",
-                "local_prefix": "/data_16tb1",
+                "plex_prefix": "/data_disk1",
+                "local_prefix": "/data_disk1",
                 "webhook_prefixes": ["/data"],
             }
         ]
@@ -1519,7 +1519,7 @@ class TestGetMediaItemsByPaths:
         mock_movie.ratingKey = 100
         mock_movie.key = "/library/metadata/100"
         mock_movie.title = "Test Movie"
-        mock_movie.locations = ["/data_16tb1/movies/Test Movie (2024)/Test Movie.mkv"]
+        mock_movie.locations = ["/data_disk1/movies/Test Movie (2024)/Test Movie.mkv"]
 
         mock_plex.library.sections.return_value = [mock_section]
         mock_plex.fetchItems.return_value = [mock_movie]
@@ -1534,10 +1534,10 @@ class TestGetMediaItemsByPaths:
         assert result.items[0][2] == "movie"
 
     def test_get_media_items_by_paths_plex_form_path_matches_with_mapping(self, mock_config):
-        """Webhook path in Plex form (/data_16tb1/...) canonicalized and matched."""
+        """Webhook path in Plex form (/data_disk1/...) canonicalized and matched."""
         mock_config.path_mappings = [
             {
-                "plex_prefix": "/data_16tb1",
+                "plex_prefix": "/data_disk1",
                 "local_prefix": "/data",
                 "webhook_prefixes": ["/data"],
             }
@@ -1552,7 +1552,7 @@ class TestGetMediaItemsByPaths:
         mock_movie.ratingKey = 101
         mock_movie.key = "/library/metadata/101"
         mock_movie.title = "Other Movie"
-        mock_movie.locations = ["/data_16tb1/Movies/Other Movie.mkv"]
+        mock_movie.locations = ["/data_disk1/Movies/Other Movie.mkv"]
 
         mock_plex.library.sections.return_value = [mock_section]
         mock_plex.fetchItems.return_value = [mock_movie]
@@ -1560,7 +1560,7 @@ class TestGetMediaItemsByPaths:
         result = get_media_items_by_paths(
             mock_plex,
             mock_config,
-            ["/data_16tb1/Movies/Other Movie.mkv"],
+            ["/data_disk1/Movies/Other Movie.mkv"],
         )
         assert len(result.items) == 1
         assert result.items[0][0] == "101"  # D31 — bare ratingKey, not URL
@@ -1629,12 +1629,12 @@ class TestGetMediaItemsByPaths:
         """Webhook /data path should fan out to multiple Plex roots and match first hit."""
         mock_config.path_mappings = [
             {
-                "plex_prefix": "/data_16tb1",
+                "plex_prefix": "/data_disk1",
                 "local_prefix": "/data",
                 "webhook_prefixes": [],
             },
             {
-                "plex_prefix": "/data_16tb2",
+                "plex_prefix": "/data_disk2",
                 "local_prefix": "/data",
                 "webhook_prefixes": [],
             },
@@ -1650,7 +1650,7 @@ class TestGetMediaItemsByPaths:
         mock_episode.key = "/library/metadata/300"
         mock_episode.grandparentTitle = "Test Show"
         mock_episode.seasonEpisode = "s01e03"
-        mock_episode.locations = ["/data_16tb2/tv/Test Show/Season 01/S01E03.mkv"]
+        mock_episode.locations = ["/data_disk2/tv/Test Show/Season 01/S01E03.mkv"]
 
         mock_plex.library.sections.return_value = [mock_section]
         mock_plex.fetchItems.return_value = [mock_episode]
@@ -1880,7 +1880,7 @@ class TestExpandDirectoryToMediaFiles:
 
     def test_mapped_directory_expanded_via_path_mappings(self, tmp_path):
         """Directory that only exists under a mapped prefix is expanded."""
-        local_root = tmp_path / "data_16tb" / "TV Shows" / "Show (2024)"
+        local_root = tmp_path / "data_disk" / "TV Shows" / "Show (2024)"
         s01 = local_root / "Season 01"
         s01.mkdir(parents=True)
         (s01 / "S01E01.mkv").write_text("")
@@ -1889,7 +1889,7 @@ class TestExpandDirectoryToMediaFiles:
         mappings = [
             {
                 "plex_prefix": "/data",
-                "local_prefix": str(tmp_path / "data_16tb"),
+                "local_prefix": str(tmp_path / "data_disk"),
                 "webhook_prefixes": [],
             }
         ]
@@ -1901,7 +1901,7 @@ class TestExpandDirectoryToMediaFiles:
         basenames = [os.path.basename(p) for p in result]
         assert "S01E01.mkv" in basenames
         assert "S01E02.mkv" in basenames
-        assert all(str(tmp_path / "data_16tb") in p for p in result)
+        assert all(str(tmp_path / "data_disk") in p for p in result)
 
     def test_unmapped_nonexistent_directory_passes_through(self):
         """Path that doesn't exist even after mapping passes through unchanged."""

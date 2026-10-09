@@ -61,9 +61,18 @@ def test_quiet_end_retains_manual_hold_and_does_not_drain(tmp_path):
     manager.assert_not_called()
 
 
-def test_migrated_monday_overnight_cron_edges_match_effective_windows(tmp_path):
-    from zoneinfo import ZoneInfo
+def test_migrated_monday_overnight_edges_match_effective_windows():
+    legacy = {"enabled": True, "windows": [{"start": "23:00", "end": "07:00", "days": ["mon"]}]}
+    # Legacy "mon" means Monday 00:00-07:00 plus Monday 23:00-24:00: no latched week-long pause.
+    assert is_now_in_any_quiet_window(legacy, datetime(2026, 10, 5, 6, 59))
+    assert not is_now_in_any_quiet_window(legacy, datetime(2026, 10, 5, 7, 0))
+    assert not is_now_in_any_quiet_window(legacy, datetime(2026, 10, 5, 22, 59))
+    assert is_now_in_any_quiet_window(legacy, datetime(2026, 10, 5, 23, 1))
+    assert is_now_in_any_quiet_window(legacy, datetime(2026, 10, 5, 23, 59))
+    assert not is_now_in_any_quiet_window(legacy, datetime(2026, 10, 6, 0, 0))
 
+
+def test_apply_quiet_hours_registers_only_the_per_minute_recheck(tmp_path):
     from media_preview_generator.web.scheduler import ScheduleManager
 
     manager = ScheduleManager(str(tmp_path))
@@ -72,13 +81,8 @@ def test_migrated_monday_overnight_cron_edges_match_effective_windows(tmp_path):
             manager.apply_quiet_hours(
                 {"enabled": True, "windows": [{"start": "23:00", "end": "07:00", "days": ["mon"]}]}
             )
-        tz = ZoneInfo("Australia/Sydney")
-        monday = datetime(2026, 10, 5, 23, 1, tzinfo=tz)
-        jobs = {job.id: job for job in manager.scheduler.get_jobs()}
-        # The evening's migrated segment ends at Tuesday midnight; the morning
-        # segment ended Monday07. There is no unintended week-long latched pause.
-        end = jobs["__qh_resume_1"].trigger.get_next_fire_time(None, monday)
-        assert (end.weekday(), end.hour, end.minute) == (1, 0, 0)
-        assert "__qh_recheck" in jobs
+        ids = {job.id for job in manager.scheduler.get_jobs()}
+        assert "__qh_recheck" in ids
+        assert not any(i.startswith(("__qh_pause_", "__qh_resume_")) for i in ids)
     finally:
         manager.stop()

@@ -169,8 +169,6 @@ html {
 .automation-page .sched-table .next { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-text); font-size: 12px; font-weight: 600; }
 .automation-page .sched-table .next.off { color: var(--faint); }
 .automation-page .racts { display: flex; gap: 2px; justify-content: flex-end; }
-.automation-page .sched-group-label { margin: 4px 0 10px; padding-top: 4px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
-.automation-page .sched-group-label:not(:first-child) { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
 
 @media (max-width: 991.98px) {
     html { scroll-padding-top: 10rem; }

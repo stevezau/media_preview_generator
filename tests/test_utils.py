@@ -8,13 +8,11 @@ and working directory setup.
 import os
 import tempfile
 import time
-from collections import namedtuple
 from unittest.mock import patch
 
 import pytest
 
 from media_preview_generator.utils import (
-    calculate_title_width,
     format_display_title,
     is_docker_environment,
     is_windows,
@@ -108,58 +106,6 @@ class TestRedactSecrets:
             text = redacted_traceback(exc)
         assert text.startswith("Traceback (most recent call last):")
         assert "in fetch" in text and "X-Plex-Token=****" in text and "abc123" not in text
-
-
-class TestCalculateTitleWidth:
-    """Test terminal width calculation for title display."""
-
-    @patch("shutil.get_terminal_size")
-    def test_calculate_title_width(self, mock_terminal_size):
-        """Test basic title width calculation.
-
-        Pin the exact formula output (utils.py:41-65):
-            reserved = 7 + 6 + 8 + 12 + 8 + 20 = 61
-            available = cols - reserved
-            return max(min(available, 50), 20)
-
-        For cols=120: available = 120 - 61 = 59, capped at 50.
-        A range-based assert (``20 <= width <= 50``) would still pass
-        if a refactor flipped to ``min(available, 40)`` — pin the value.
-        """
-        TerminalSize = namedtuple("TerminalSize", ["columns", "lines"])
-        mock_terminal_size.return_value = TerminalSize(columns=120, lines=30)
-
-        width = calculate_title_width()
-
-        assert width == 50, f"cols=120 -> available=59, ceil at 50; got {width}"
-
-    @patch("shutil.get_terminal_size")
-    def test_calculate_title_width_small_terminal(self, mock_terminal_size):
-        """Test minimum width is enforced.
-
-        Pin the exact value at the small-terminal floor:
-            cols=50 -> available = 50 - 61 = -11 -> floored to 20.
-        """
-        TerminalSize = namedtuple("TerminalSize", ["columns", "lines"])
-        mock_terminal_size.return_value = TerminalSize(columns=50, lines=24)
-
-        width = calculate_title_width()
-
-        assert width == 20, f"cols=50 -> negative available, must clamp to 20 floor; got {width}"
-
-    @patch("shutil.get_terminal_size")
-    def test_calculate_title_width_large_terminal(self, mock_terminal_size):
-        """Test maximum width is capped.
-
-        Pin the exact value at the large-terminal ceiling:
-            cols=300 -> available = 300 - 61 = 239 -> capped at 50.
-        """
-        TerminalSize = namedtuple("TerminalSize", ["columns", "lines"])
-        mock_terminal_size.return_value = TerminalSize(columns=300, lines=60)
-
-        width = calculate_title_width()
-
-        assert width == 50, f"cols=300 -> available=239, must clamp to 50 ceiling; got {width}"
 
 
 class TestFormatDisplayTitle:
@@ -348,33 +294,26 @@ class TestSafeResolveWithin:
         result = _safe_resolve_within(str(tmp_path), str(tmp_path))
         assert result == os.path.realpath(str(tmp_path)), f"exact root match must return realpath(root); got {result!r}"
 
-    def test_root_equals_filesystem_root_allows_anything(self):
+    def test_root_equals_filesystem_root_allows_anything(self, tmp_path):
         """When ``allowed_root='/'`` the guard is a no-op (intentional —
         operators who want unconstrained file access set MEDIA_ROOT='/')."""
         from media_preview_generator.web.routes._helpers import _safe_resolve_within
 
-        # /etc/passwd must resolve when root is '/' — that's the documented behaviour.
-        result = _safe_resolve_within("/etc/passwd", "/")
-        # Either resolves to a path or None depending on whether /etc/passwd
-        # exists; the contract is "doesn't reject solely because of /". We
-        # accept either return as long as it didn't raise.
-        assert result is None or result.startswith("/")
+        target = tmp_path / "x.mkv"
+        target.touch()
+        assert _safe_resolve_within(str(target), "/") == os.path.realpath(str(target))
 
-    def test_relative_path_normalised_before_check(self, tmp_path):
-        """Relative paths get normpath'd then realpath'd — the result still
-        has to land inside allowed_root."""
+    def test_relative_path_is_resolved_against_cwd_before_the_check(self, tmp_path, monkeypatch):
+        """A relative path is normalised and anchored at the CWD; a ``..`` that stays inside the root is fine."""
         from media_preview_generator.web.routes._helpers import _safe_resolve_within
 
         sub = tmp_path / "sub"
         sub.mkdir()
         (sub / "x.mkv").touch()
+        monkeypatch.chdir(tmp_path)
 
-        # Relative path: normpath collapses ".." inside the string but
-        # realpath then anchors against CWD, so unless the relative path
-        # *resolves* under tmp_path, reject. Easier to assert behaviour
-        # with a path crafted to escape: tmp_path/sub/../sub/x.mkv → tmp_path/sub/x.mkv (in)
-        result = _safe_resolve_within(str(tmp_path / "sub" / ".." / "sub" / "x.mkv"), str(tmp_path))
-        assert result is not None, "in-root path with redundant '..' segment must be allowed after normalisation"
+        assert _safe_resolve_within("sub/../sub/x.mkv", str(tmp_path)) == os.path.realpath(str(sub / "x.mkv"))
+        assert _safe_resolve_within("../outside.mkv", str(tmp_path)) is None
 
     def test_prefix_confusion_with_sibling_path_rejected(self, tmp_path):
         """A path that shares the allowed_root's name as a PREFIX but is in

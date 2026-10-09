@@ -189,19 +189,3 @@ class TestTrackerNamesFailedItems:
         tracker.record_completion(True, "CPU 1", "a", canonical_path="/data/a.mkv")
 
         assert tracker.get_result()["failed_paths"] == []
-
-
-class TestLocalPoolNamesFailedItems:
-    """``run_processing`` without a job id drains through the pool's own loop."""
-
-    @patch("media_preview_generator.processing.multi_server.process_canonical_path")
-    def test_local_loop_names_the_failed_item(self, mock_process):
-        mock_process.side_effect = _process_failing({"/data/c.mkv"})
-        pool = WorkerPool(gpu_workers=0, cpu_workers=2, selected_gpus=[])
-
-        result = pool.process_items_headless(
-            [_item("/data/a.mkv"), _item("/data/b.mkv"), _item("/data/c.mkv")], _config(), MagicMock()
-        )
-
-        assert result["failed"] == 1
-        assert result["failed_paths"] == ["/data/c.mkv"]

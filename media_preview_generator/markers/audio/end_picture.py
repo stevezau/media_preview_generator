@@ -1,4 +1,4 @@
-"""Season audio's end-picture check (spec §5.3): whether a repeated stretch near the start of an episode ends on the
+"""Season audio's end-picture check: whether a repeated stretch near the start of an episode ends on the
 same picture in the episodes it repeats in.
 
 A theme tune ends on the show's title card, the same picture in every episode. A network ident, or music under a cold
@@ -35,10 +35,10 @@ from .matcher import Hit
 # answers carry it too (``season.SEASON_AUDIO_ANSWER_VERSION``), so the answers resting on the shares are due again.
 # 2: one nearest-pixel scaler on every vendor (was scale_cuda, scale_vaapi, or swscale's bicubic on the CPU).
 # 3: the end card (the last 1.5 s matching on pictures that aren't flat passes the stretch).
-# 4: a flat frame beside one that isn't is compared by correlation (was: never alike), 2026-09-28.
+# 4: a flat frame beside one that isn't is compared by correlation (was: never alike).
 CHECK_VERSION = 4
 # Idents and music beds under a cold open start near the file's start; a candidate starting at or before this is
-# checked, a later one is taken as it is (the window the owner's rule was measured with).
+# checked, a later one is taken as it is (the window the rule was measured with).
 EARLY_START_S = 30.0
 TAIL_S = 3.0
 FPS = 2
@@ -79,7 +79,7 @@ class CheckUnavailableError(Exception):
 
 
 class GpuAttemptFailedError(frames.FrameDecodeError):
-    """The worker's GPU decode failed in a way that isn't decoded again on the CPU on the spot (a timeout, T-R7), so
+    """The worker's GPU decode failed in a way that isn't decoded again on the CPU on the spot (a timeout), so
     the CPU hasn't tried the file."""
 
 

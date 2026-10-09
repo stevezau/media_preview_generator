@@ -522,7 +522,7 @@ class TestPlexOnlySkipsFolderListing:
         _touch(tmp_path / "Movie.mkv")
         registry = _make_registry_with_servers(["plex"])
         listed = MagicMock(return_value=[])
-        monkeypatch.setattr("media_preview_generator.processing.multi_server._list_video_files", listed)
+        monkeypatch.setattr("media_preview_generator.processing.multi_server._list_media_files", listed)
 
         removed = cleanup_orphaned_outputs(
             str(tmp_path / "Movie.mkv"), deleted_paths=[], registry=registry, config=mock_config
@@ -535,7 +535,7 @@ class TestPlexOnlySkipsFolderListing:
         _touch(tmp_path / "Movie.mkv")
         registry = _make_registry_with_servers(["plex", "emby"])
         listed = MagicMock(return_value=[tmp_path / "Movie.mkv"])
-        monkeypatch.setattr("media_preview_generator.processing.multi_server._list_video_files", listed)
+        monkeypatch.setattr("media_preview_generator.processing.multi_server._list_media_files", listed)
 
         cleanup_orphaned_outputs(str(tmp_path / "Movie.mkv"), deleted_paths=[], registry=registry, config=mock_config)
 

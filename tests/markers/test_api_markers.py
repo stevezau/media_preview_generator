@@ -171,12 +171,6 @@ def test_status_real_payload_for_a_turned_off_server(client, servers):
     assert body["libraries"] == [{"id": "x", "name": "Other", "kind": None, "default_selected": True}]
 
 
-def test_the_duplicate_install_plugin_route_is_gone(client, servers):
-    # The UI installs the Jellyfin plugin through POST /api/servers/<id>/install-plugin.
-    resp = client.post("/api/markers/servers/jf-1/install-plugin", headers=_api_headers())
-    assert resp.status_code in (404, 405)
-
-
 # --------------------------------------------------------------------------- source usage
 
 
@@ -570,19 +564,6 @@ def test_one_failing_server_still_returns_the_other_rows(client, servers, media,
 # --------------------------------------------------------------------------- redetect
 
 
-@pytest.fixture
-def created(monkeypatch):
-    from media_preview_generator.markers import triggers
-
-    calls = []
-
-    class _Job:
-        id = "job-123"
-
-    monkeypatch.setattr(triggers, "create_intro_credits_job", lambda **kw: calls.append(kw) or _Job())
-    return calls
-
-
 def test_redetect_creates_a_forced_high_priority_single_file_job(client, servers, media, created):
     episode = str(media / "tv" / "Show" / "S01E01.mkv")
     resp = client.post("/api/markers/item/redetect", json={"path": episode}, headers=_api_headers())
@@ -831,13 +812,15 @@ def test_local_sources_keeps_the_other_row_when_one_check_raises(client, servers
         ("get", "/api/markers/sources/usage"),
         ("get", "/api/markers/item?path=/x"),
         ("post", "/api/markers/item/redetect"),
+        ("post", "/api/markers/item/markers"),
+        ("delete", "/api/markers/item/markers"),
         ("get", "/api/markers/season?path=/x"),
         ("post", "/api/markers/season/publish"),
         ("get", "/api/markers/sources/local"),
     ],
 )
 def test_every_route_needs_authentication(app, servers, created, method, url):
-    resp = getattr(app.test_client(), method)(url, json={"path": "/x"} if method == "post" else None)
+    resp = getattr(app.test_client(), method)(url, json={"path": "/x"} if method in ("post", "delete") else None)
     assert resp.status_code == 401
     assert created == []
 

@@ -125,24 +125,6 @@ def _plex_only_registry(plex_credentials, legacy_config, media_root):
     return ServerRegistry.from_settings(raw_servers, legacy_config=legacy_config)
 
 
-def _jelly_only_registry(jellyfin_credentials, legacy_config, media_root):
-    raw_servers = [
-        {
-            "id": "jf-int-1",
-            "type": "jellyfin",
-            "name": "Test Jellyfin",
-            "enabled": True,
-            "url": jellyfin_credentials["JELLYFIN_URL"],
-            "auth": {"method": "api_key", "api_key": jellyfin_credentials["JELLYFIN_ACCESS_TOKEN"]},
-            "server_identity": jellyfin_credentials["JELLYFIN_SERVER_ID"],
-            "libraries": [{"id": "movies", "name": "Movies", "remote_paths": ["/jf-media/Movies"], "enabled": True}],
-            "path_mappings": [{"remote_prefix": "/jf-media", "local_prefix": str(media_root)}],
-            "output": {"adapter": "jellyfin_trickplay", "width": 320, "frame_interval": 5},
-        },
-    ]
-    return ServerRegistry.from_settings(raw_servers, legacy_config=legacy_config)
-
-
 def _cleanup_outputs(canonical: str, plex_config_folder: str | None) -> None:
     """Remove BIFs/trickplay artifacts produced by a previous run."""
     parent = Path(canonical).parent

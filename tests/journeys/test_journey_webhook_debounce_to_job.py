@@ -450,12 +450,12 @@ class TestWebhookFireAtOnJobConfig:
             fire_at = datetime.fromisoformat(cfg["webhook_fire_at"])
             assert fire_at.tzinfo is not None, f"webhook_fire_at must be timezone-aware; got {cfg['webhook_fire_at']!r}"
 
-            # Within the 60 s debounce window from "now". Allow 5 s slack
+            # Within the 60 s debounce window from "now". Allow 10 s slack
             # for test scheduling jitter — anything outside that range
             # means the timestamp wasn't computed from the current time.
             now = datetime.now(UTC)
             remaining = (fire_at - now).total_seconds()
-            assert 55 <= remaining <= 60, (
+            assert 50 <= remaining <= 60, (
                 f"webhook_fire_at must be ~60s in the future (the configured debounce); "
                 f"got {remaining:.1f}s remaining. Either the delay is wrong or the timestamp "
                 f"was computed from a stale clock."

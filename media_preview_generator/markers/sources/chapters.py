@@ -1,4 +1,4 @@
-"""Chapter names → candidates (spec §5.1). Whole-title matches only: "The Opening Night" is a scene, not an intro.
+"""Chapter names → candidates. Whole-title matches only: "The Opening Night" is a scene, not an intro.
 
 A plain "Intro" chapter next to a specific opening chapter ("OP", "Opening", "Opening
 Credits/Titles", "Title Sequence", "Main Title(s)", "Theme Song") is the cold open, not the theme
@@ -11,7 +11,7 @@ U+FEFF byte-order mark (seen in some muxers' embedded titles) is stripped before
 `origin`.
 
 "Ending" is credits on an **episode** only. On anime it names the ED; in a film it names the last
-scene. Measured on the owner's library (`evidence/eval/phase4-chapters.md`): 282 of 4,346 anime
+scene. Measured on a large library: 282 of 4,346 anime
 episodes carry a bare "Ending" chapter, and so does 1 of 9,904 movies -- a documentary whose "Ending"
 is its closing scene, where taking it would skip the film's last 161 s. No chapter shape tells the two
 apart, so the kind does. Callers pass the kind the file's **path** gives (`ids_from_path`), never a
@@ -31,7 +31,7 @@ from ..probe import Chapter, MediaProbe
 
 # Bump whenever a change here -- or to `external_ids.ids_from_path`'s episode rule, which callers pass as
 # `is_episode` -- changes the candidates a file's chapters give, so files probed before are read again.
-# 2: "Ending" reads as credits on an episode (phase 4, Task 15).
+# 2: "Ending" reads as credits on an episode.
 # 3: non-English intro/credits chapter names (portability pass).
 CHAPTER_RULES_VERSION = 3
 
@@ -109,7 +109,7 @@ def _is_generic_intro(title: str) -> bool:
 
 
 def _clamped_ends(chapters: tuple[Chapter, ...]) -> list[int | None]:
-    """Each chapter's end, clamped to the first later chapter's start (spec §5.1: a chapter runs to
+    """Each chapter's end, clamped to the first later chapter's start (a chapter runs to
     the next chapter's start).
 
     Chapters that share a start (e.g. a studio-logo chapter and the real first chapter both at 0)
@@ -129,7 +129,7 @@ def _clamped_ends(chapters: tuple[Chapter, ...]) -> list[int | None]:
 def chapter_candidates(probe: MediaProbe, *, is_episode: bool = False) -> list[Candidate]:
     """Candidates for every named intro/credits/recap/preview chapter.
 
-    Ends are clamped to the next chapter's start (spec §5.1). A generic "Intro"/"Introduction"
+    Ends are clamped to the next chapter's start. A generic "Intro"/"Introduction"
     chapter is dropped when the file also has a specific opening chapter (the cold open) -- see
     module docstring.
 

@@ -8,8 +8,6 @@ on:
       - 'docs/**'
       - '*.md'
       - 'LICENSE'
-      - '.github/instructions/**'
-      - '.github/prompts/**'
       - 'unraid-templates/**'
       - 'docker-compose.example.yml'
 

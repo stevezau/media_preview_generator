@@ -7,12 +7,6 @@ from unittest.mock import patch
 
 import pytest
 
-from media_preview_generator.processing.multi_server import (
-    MultiServerResult,
-    MultiServerStatus,
-    PublisherResult,
-    PublisherStatus,
-)
 from media_preview_generator.web.settings_manager import get_settings_manager
 
 
@@ -20,7 +14,6 @@ from media_preview_generator.web.settings_manager import get_settings_manager
 def mock_auth_config(tmp_path, monkeypatch):
     auth_file = str(tmp_path / "auth.json")
     monkeypatch.setattr("media_preview_generator.web.auth.AUTH_FILE", auth_file)
-    monkeypatch.setattr("media_preview_generator.web.auth.get_config_dir", lambda: str(tmp_path))
     from media_preview_generator.web.settings_manager import reset_settings_manager
 
     reset_settings_manager()
@@ -59,24 +52,6 @@ def webhook_token():
 @pytest.fixture
 def auth_headers(webhook_token):
     return {"X-Auth-Token": webhook_token}
-
-
-def _published_result() -> MultiServerResult:
-    return MultiServerResult(
-        canonical_path="/data/movies/Foo.mkv",
-        status=MultiServerStatus.PUBLISHED,
-        publishers=[
-            PublisherResult(
-                server_id="emby-1",
-                server_name="Emby",
-                adapter_name="emby_sidecar",
-                status=PublisherStatus.PUBLISHED,
-                message="Published",
-            )
-        ],
-        frame_count=10,
-        message="1 of 1 publisher(s) succeeded",
-    )
 
 
 def _seed_servers(servers: list[dict]) -> None:
@@ -819,7 +794,7 @@ class TestPathFirstWebhook:
 
 
 class TestWebhookPrefixTranslationReachesOwnerCheck:
-    """TEST_AUDIT P0.4 — closes incident 70275e9 silent 202 drop class.
+    """Guards against a silently dropped 202 webhook.
 
     Background: the original ``no_owners`` pre-flight check ran against
     the RAW webhook payload path WITHOUT applying ``webhook_prefixes``.

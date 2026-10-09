@@ -1,4 +1,4 @@
-"""EmbyServer's Media Preview Bridge calls: URLs, bodies and answer shapes (the plugin contract of Task 4)."""
+"""EmbyServer's Media Preview Bridge calls: URLs, bodies and answer shapes."""
 
 from __future__ import annotations
 

@@ -22,7 +22,7 @@ from media_preview_generator.markers.audio.fingerprint import chromaprint_ffmpeg
 from media_preview_generator.markers.audio.season import season_pair_runs
 from media_preview_generator.markers.credits import frames
 from media_preview_generator.markers.probe import ffprobe_path_for, stream_starts
-from tests.markers.credits.test_frames_integration import vaapi_node
+from tests.markers.credits.helpers import vaapi_node
 
 # The module's clips are encoded on the CPU (libx264 and libx265 at 1280x720) in fixture setup, which pytest-timeout
 # counts: 25-40 s under a full xdist run, past the suite's 30 s.
@@ -183,7 +183,7 @@ def test_cuda_gives_the_cpus_end_picture_frames_byte_for_byte(monkeypatch, detai
 @pytest.mark.gpu
 @pytest.mark.parametrize("clip_name", ["8-bit", "10-bit"])
 def test_vaapi_gives_the_cpus_end_picture_frames_byte_for_byte(monkeypatch, detailed_clips, clip_name):
-    # Intel and AMD only: storage has an NVIDIA render node, so this skips there and runs in the lab image.
+    # Intel and AMD only: an NVIDIA-only host skips this; it runs where an Intel or AMD render node exists.
     node = vaapi_node()
     if node is None:
         pytest.skip("no Intel or AMD render node")

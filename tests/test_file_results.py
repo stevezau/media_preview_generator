@@ -314,19 +314,17 @@ class TestFileResultCallback:
 
         captured = []
         set_file_result_callback(lambda *a: captured.append(a))
-        set_file_result_callback(None)
         _notify_file_result("/a.mkv", ProcessingResult.GENERATED, "", "")
-        assert len(captured) == 0
+        assert len(captured) == 1, "the callback must fire while it is registered"
+        set_file_result_callback(None)
+        _notify_file_result("/b.mkv", ProcessingResult.GENERATED, "", "")
+        assert len(captured) == 1
 
     def test_callback_exception_does_not_propagate(self):
         """A failing callback must not crash the caller — and must have run.
 
-        Audit fix — original test only verified the call didn't raise.
-        That would have passed even if ``_notify_file_result`` short-
-        circuited and never invoked the callback at all (e.g. a global
-        kill-switch that bypassed callbacks entirely). Wrap the bad_cb
-        in a MagicMock so we can assert ``call_count == 1`` proving the
-        callback actually ran AND the exception was caught.
+        The callback is wrapped in a MagicMock so ``call_count == 1`` proves it
+        ran and its exception was caught, not that the notifier skipped it.
         """
         from unittest.mock import MagicMock
 
@@ -455,13 +453,13 @@ class TestFileResultCallbackConcurrency:
 
         start = threading.Event()
 
-        def _worker(job_id: str, file_path: str, dest: list):
+        def _worker(job_id: str, file_path: str):
             start.wait()
             with failure_scope(job_id):
                 _notify_file_result(file_path, ProcessingResult.GENERATED, "", "")
 
-        threads = [threading.Thread(target=_worker, args=("job-a", f"/a{i}.mkv", a_received)) for i in range(20)] + [
-            threading.Thread(target=_worker, args=("job-b", f"/b{i}.mkv", b_received)) for i in range(20)
+        threads = [threading.Thread(target=_worker, args=("job-a", f"/a{i}.mkv")) for i in range(20)] + [
+            threading.Thread(target=_worker, args=("job-b", f"/b{i}.mkv")) for i in range(20)
         ]
         for t in threads:
             t.start()
@@ -476,34 +474,6 @@ class TestFileResultCallbackConcurrency:
 
         assert sorted(a_received) == sorted(f"/a{i}.mkv" for i in range(20))
         assert sorted(b_received) == sorted(f"/b{i}.mkv" for i in range(20))
-
-
-class TestWorkerCallsNotifyFileResult:
-    """The Worker.assign_task path must invoke ``_notify_file_result`` for
-    every outcome — generated, skipped, failed — so the JSONL persistence
-    chain that powers the per-job Files panel actually fires.
-
-    The original D1 bug: ``_notify_file_result`` was defined and exported,
-    a callback was wired in job_runner.py, but no production code ever
-    called the function. Result: the Jobs UI showed no files for any
-    skipped-only job (webhook with file already BIF'd, or full-library
-    re-scan where every item was skipped).
-
-    The right level for this test is the worker's outcome branches —
-    that's where the regression actually was. Static-grep would catch
-    "is the function called from worker.py at all" but not "is it called
-    from every branch", so we exercise via captured callback instead.
-    """
-
-    # Audit fix — DELETED ``test_worker_imports_and_calls_notify_file_result``.
-    # The previous incarnation was a hasattr smoke test that did not
-    # exercise any runtime path (the audit doc on this test already said
-    # so). The "did the worker actually call _notify_file_result on
-    # every outcome branch (generated / skipped / failed / cancelled)"
-    # invariant is fully covered by the per-branch matrix in
-    # ``TestFileResultServerAttribution`` below, which exercises the
-    # public API end-to-end and pins the recorded file results. Keeping
-    # a hasattr smoke alongside that adds noise without coverage.
 
 
 class TestFileResultServerAttribution:

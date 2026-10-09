@@ -1,26 +1,10 @@
 """The time between a BIF's frames: header multiplier times the index's timestamp step ("0 s interval" fix)."""
 
-import struct
-
 import pytest
 
-from media_preview_generator.bif_reader import BIF_MAGIC, interval_from_index, read_bif_metadata
+from media_preview_generator.bif_reader import interval_from_index, read_bif_metadata
 from media_preview_generator.inspector.previews import interval_for
-
-
-def _write_bif(path, *, multiplier_ms: int, timestamps: list[int]) -> str:
-    """Write a BIF with the given header multiplier and index timestamps (one tiny JPEG per timestamp)."""
-    frames = [b"\xff\xd8\xff" + bytes([i % 256]) * 8 for i in range(len(timestamps))]
-    header = BIF_MAGIC + struct.pack("<III", 0, len(frames), multiplier_ms) + b"\x00" * 44
-    offset = len(header) + 8 * (len(frames) + 1)
-    index = b""
-    for ts, frame in zip(timestamps, frames, strict=True):
-        index += struct.pack("<II", ts, offset)
-        offset += len(frame)
-    index += struct.pack("<II", 0xFFFFFFFF, offset)
-    with open(path, "wb") as f:
-        f.write(header + index + b"".join(frames))
-    return str(path)
+from tests.conftest import write_bif as _write_bif
 
 
 class TestReadBifMetadataInterval:

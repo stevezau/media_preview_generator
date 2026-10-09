@@ -154,12 +154,10 @@ def collect(out_dir: Path) -> int:
             try:
                 for vp_name, vp in VIEWPORTS:
                     for theme in THEMES:
-                        ctx = browser.new_context(viewport=vp)
+                        ctx = browser.new_context(viewport=vp, color_scheme=theme)
                         ctx.add_cookies([cookie])
                         # Force theme by cookie + localStorage; the app reads both.
-                        ctx.add_init_script(
-                            f"() => {{ try {{ localStorage.setItem('theme', '{theme}'); }} catch (e) {{}} }}"
-                        )
+                        ctx.add_init_script(f"try {{ localStorage.setItem('theme', '{theme}'); }} catch (e) {{}}")
                         page = ctx.new_page()
                         for path, name in SURFACES:
                             try:

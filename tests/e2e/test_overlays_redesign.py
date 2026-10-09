@@ -113,6 +113,7 @@ class TestStartNewJob:
             "library_name": "Movies",
             "priority": 1,
             "config": {"force_generate": True, "sort_by": "newest", "added_filter": "last_days", "added_last_days": 14},
+            "libraries": [{"server_id": "plex-1", "library_id": "1"}],
             "server_id": "plex-1",
         }
 
@@ -576,6 +577,7 @@ class TestNotificationsToastsAndInfo:
 
     def test_toasts_stack_up_to_three_and_errors_stay_until_closed(self, overlay_page) -> None:
         page, _ = overlay_page
+        page.clock.install()
         page.evaluate(
             "() => { showToast('One', 'first', 'success'); showToast('Two', 'second', 'danger');"
             " showToast('Three', 'third', 'warning'); showToast('Four', 'fourth', 'info'); }"
@@ -583,7 +585,7 @@ class TestNotificationsToastsAndInfo:
         expect(page.locator(".toast-container .toast.show")).to_have_count(3)
         expect(page.locator("#toastTitle")).to_have_text("Four")
         expect(page.locator(".toast-container .toast[data-type='danger']")).to_have_count(1)
-        page.wait_for_timeout(5600)
+        page.clock.run_for(6000)
         expect(page.locator(".toast-container .toast[data-type='danger']")).to_be_visible()
         expect(page.locator("#toastNotification")).to_be_hidden()
 

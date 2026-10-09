@@ -1,4 +1,4 @@
-"""Spec §5.5 decision rules as a full matrix."""
+"""Decision rules as a full matrix."""
 
 import itertools
 import math
@@ -27,22 +27,16 @@ from media_preview_generator.markers.decide import (
     unusable_server_marker,
 )
 from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
+from tests.markers.fakes import SOURCE_ORDER
 
 T = MarkerType
 S = Source
 DUR = 1_320_000  # 22:00 episode
 SHORT_DUR = 240_000  # 4:00 episode -- big enough for a real intro, small enough that "near the end" is reachable
 MOVIE_DUR = 6_000_000  # 100:00 movie
-ORDER = (
-    "chapters",
-    "theintrodb",
-    "introdb",
-    "skipdb",
-    "season_audio",
-    "credits_text",
-    "server_markers",
-    "server_markers_imported",
-)
+# The seeded draws of TestMatchesReference reach every reason with this order; the classes below that read the previous
+# season's audio use the full SOURCE_ORDER.
+ORDER = tuple(o for o in SOURCE_ORDER if o != "season_audio_previous")
 
 
 def ctx(publish_when="high", is_movie=False, duration=DUR, types=(T.INTRO, T.CREDITS), order=ORDER):
@@ -296,7 +290,7 @@ class TestChapters:
 
     def test_season_audio_agreeing_with_the_chapter_doesnt_keep_it_against_a_contradicting_cluster(self):
         # Season audio ends where the chapter does; TheIntroDB and SkipDB agree on an intro 90 s later. An intro
-        # disagreement writes nothing (measured 2026-10-03): the chapter is proposed, not published.
+        # disagreement writes nothing: the chapter is proposed, not published.
         cands = [
             intro(S.CHAPTERS, 11_000, 37_000),
             intro(S.SEASON_AUDIO, 12_000, 38_000),
@@ -646,7 +640,7 @@ class TestAgreement:
         assert d.proposed is None
         assert d.reason == "sources agree: theintrodb, skipdb, season_audio"
 
-    # Season audio with a server's own markers alone doesn't decide (ruling G3): TestSeasonAudioSources.
+    # Season audio with a server's own markers alone doesn't decide : TestSeasonAudioSources.
     @pytest.mark.parametrize(("first", "partner"), [(S.SEASON_AUDIO, S.CREDITS_TEXT), (S.SKIPDB, S.SERVER_MARKERS)])
     def test_agreeing_pair_without_a_bridge_decides(self, first, partner):
         cands = [intro(first, 60_000, 100_000), intro(partner, 60_000, 100_000, "plex-1")]
@@ -772,8 +766,8 @@ class TestAgreement:
     )
     def test_composed_intro_marker_failing_sanity_decides_nothing_whatever_audio_read_the_file(self, source, level):
         # The audio source ranks first and wins the end (50 s); with SkipDB's later start (49 s) the composed marker
-        # is 1 s long. Season audio's own 10-50 s is sane, but an intro disagreement writes nothing (measured
-        # 2026-10-03): the winner's own marker is proposed.
+        # is 1 s long. Season audio's own 10-50 s is sane, but an intro disagreement writes nothing: the winner's own
+        # marker is proposed.
         order = (source.value, *(o for o in ORDER if o != source.value))
         own = Marker(T.INTRO, 10_000, 50_000, (source.value,))
         cands = [intro(source, 10_000, 50_000), intro(S.SKIPDB, 49_000, 52_000)]
@@ -800,7 +794,7 @@ class TestAgreement:
 
     def test_two_conflicting_clusters_decide_nothing_for_an_intro_season_audio_is_in(self):
         # Two separate clusters each internally agree, but the two clusters disagree with each other. Season audio
-        # read this file and is in the second one; an intro disagreement still writes nothing (measured 2026-10-03).
+        # read this file and is in the second one; an intro disagreement still writes nothing.
         cands = [
             intro(S.THEINTRODB, 10_000, 40_000),
             intro(S.SKIPDB, 11_000, 41_000),
@@ -1014,7 +1008,7 @@ class TestSingleSource:
     @pytest.mark.parametrize(
         ("cands", "medium", "reason"),
         [
-            # SkipDB's duration match proves the cut, not the edges (2026-09-25): an online answer like IntroDB's
+            # SkipDB's duration match proves the cut, not the edges: an online answer like IntroDB's
             (
                 [intro(S.SKIPDB, 127_000, 157_000)],
                 DecisionStatus.NO_EVIDENCE,
@@ -1026,7 +1020,7 @@ class TestSingleSource:
                 DecisionStatus.DECIDED,
                 'only on-screen text found the intro; at "high" a second source must agree',
             ),
-            # season audio decides an intro alone (owner 2026-09-24, overriding R2); the previous season's is a hint
+            # season audio decides an intro alone; the previous season's is a hint
             (
                 [intro(S.SEASON_AUDIO, 127_000, 157_000)],
                 DecisionStatus.DECIDED,
@@ -1101,12 +1095,11 @@ class TestSingleSource:
 
 
 class TestMediumContradiction:
-    """At medium a source that read this file decides alone even where another source contradicts it (owner,
-    2026-10-02); sources that don't read the file still decide nothing on their own."""
+    """At medium a source that read this file decides alone even where another source contradicts it; sources that don't read the file still decide nothing on their own."""
 
     @pytest.mark.parametrize("other", [S.THEINTRODB, S.SEASON_AUDIO, S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
     def test_a_contradicting_source_doesnt_stop_credit_text_at_medium(self, other):
-        # Credit text wins a credits disagreement (measured 2026-10-03) and decides with its own edges; the other
+        # Credit text wins a credits disagreement and decides with its own edges; the other
         # answer starts before it, so rule 7 has no later server start to shorten the skip to.
         cands = [credits(S.CREDITS_TEXT, 1_250_000), credits(other, 1_200_000, origin="plex-1")]
         d = decide(cands, ctx("medium"), {})[T.CREDITS]
@@ -1118,7 +1111,7 @@ class TestMediumContradiction:
 
     @pytest.mark.parametrize("other", [S.THEINTRODB, S.SKIPDB, S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
     def test_a_contradicting_source_stops_season_audio_at_medium(self, other):
-        # An intro disagreement writes nothing (measured 2026-10-03: both sides were wrong 6/10); the best-ranked
+        # An intro disagreement writes nothing (both sides were wrong 6/10); the best-ranked
         # answer is proposed. The other intro is 10 s longer, so it isn't read as another release's (rule 14).
         cands = [intro(S.SEASON_AUDIO, 10_000, 40_000), intro(other, 100_000, 140_000, "plex-1")]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
@@ -1237,7 +1230,7 @@ class TestMediumContradiction:
 
     def test_medium_composed_intro_marker_failing_sanity_decides_nothing(self):
         # the other answer's later start (98s) with the first's end (100s) leaves a 2s segment; season audio's own
-        # edges don't settle an intro disagreement (measured 2026-10-03)
+        # edges don't settle an intro disagreement
         cands = [
             Candidate(T.INTRO, 60_000, 100_000, S.SEASON_AUDIO),
             Candidate(T.INTRO, 98_000, 101_000, S.SEASON_AUDIO, 0.5),
@@ -1276,7 +1269,7 @@ class TestMediumContradiction:
 
 class TestMediumSkipDbWithAnotherSource:
     """Rule 6: SkipDB alone never decides (lab scale run: every lone SkipDB credits answer started early, Battlestar
-    Galactica S04E05 by 6.7 min; 2026-09-25 audit: lone intros missed their edges, ``TestALoneSkipDbAnswerNeverDecides``),
+    Galactica S04E05 by 6.7 min; lone intros missed their edges, ``TestALoneSkipDbAnswerNeverDecides``),
     but it still decides with an agreeing independent source."""
 
     def test_skipdb_credits_still_decide_with_an_agreeing_independent_source_at_medium(self):
@@ -1569,7 +1562,8 @@ class TestServerMarkersShortenTheDecidedEdge:
             assert d.marker == Marker(T.CREDITS, 1_257_000, DUR, ("theintrodb", "skipdb", "server_markers"))
 
     def test_a_shortened_marker_failing_sanity_keeps_the_unshortened_one(self, monkeypatch):
-        # Unreachable today (shortened credits keep > 10 s, sanity asks >= 3 s), so the minimum is raised to reach it.
+        # A defensive branch: with the real minimum a shortened credits marker always passes sanity (it keeps > 10 s,
+        # sanity asks >= 3 s), so the minimum is raised to reach it.
         monkeypatch.setattr("media_preview_generator.markers.decide.MIN_SEGMENT_MS", 12_000)
         chapter = credits(S.CHAPTERS, 1_250_000, 1_300_000)
         server = credits(S.SERVER_MARKERS, 1_289_000, None, "plex-1")  # 31 s to the end of the file: sane itself
@@ -1688,7 +1682,7 @@ class TestSanity:
             assert (d.proposed.start_ms, d.proposed.end_ms) == (1_295_000, 1_310_000)
 
     def test_plex_south_park_late_intro_confirms_nothing(self):
-        # Prod example (spec §3.1): Plex intro 76.5-112.7 s vs chapters 11-37 s. Chapter decides; Plex disagrees.
+        # Prod example: Plex intro 76.5-112.7 s vs chapters 11-37 s. Chapter decides; Plex disagrees.
         cands = [intro(S.CHAPTERS, 11_000, 37_000), intro(S.SERVER_MARKERS, 76_508, 112_748, "plex-1")]
         d = decide(cands, ctx(), {})[T.INTRO]
         assert (d.marker.start_ms, d.marker.end_ms) == (11_000, 37_000)
@@ -1942,7 +1936,7 @@ class TestAgreementSearch:
         assert marker.decided_by == ("credits_text", "server_markers")
 
 
-# Independent reference for TestMatchesReference, written from the spec §5.5 rules rather than from
+# Independent reference for TestMatchesReference, written from the decision rules rather than from
 # decide.py: its own sanity bounds, brute-force (every subset) search for maximal agreeing sets,
 # and no decide.py helpers.
 _REF_START_TYPES = (T.INTRO, T.RECAP)
@@ -1951,8 +1945,8 @@ _REF_SOURCES = list(S)
 # they only move the checked edge of an already decided marker toward a shorter skip.
 _REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
 # Rule 6: at "Medium" these only agree -- they don't read this file (SkipDB's duration match proves the cut, not the
-# edges: 2026-09-25 audit), or (the previous season's audio, owner 2026-09-13) are a hint. This season's audio decides
-# an intro alone (owner 2026-09-24, overriding R2).
+# edges), or (the previous season's audio) are a hint. This season's audio decides
+# an intro alone.
 _REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SKIPDB, S.SEASON_AUDIO_PREVIOUS)
 _REF_TEXT_WAITS = "chapters contradicted by skipdb; waiting for credit text to check them"
 _REF_TEXT_WINS = "credit text and agreeing sources contradict the chapters"
@@ -1961,14 +1955,14 @@ _REF_AUDIO_WAITS = "chapters contradicted by an online answer; waiting for seaso
 _REF_TEXT_MOVES = "chapters, the start moved to the credit roll the frames show"
 _REF_LONG_INTRO_CHAPTER = "Intro chapter is much longer than the rest of the season's"
 _REF_AUDIO = (S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
-# The file reads that win a disagreement with online or server answers (measured 2026-10-03): credit text decides
+# The file reads that win a disagreement with online or server answers: credit text decides
 # where the others can't settle credits, and an agreeing pair of others doesn't overrule it; season audio doesn't,
 # an intro disagreement writes nothing. Chapters are a release's labels, not a read.
 _REF_WINS_A_DISAGREEMENT = (S.CREDITS_TEXT,)
 _REF_AUDIO_WITH_SERVER = (
     "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
 )
-# A type only one source (or copies of one) answered, with nothing against it, says which and why (2026-09-24).
+# A type only one source (or copies of one) answered, with nothing against it, says which and why.
 _REF_LABEL = {
     S.CHAPTERS: "chapters",
     S.THEINTRODB: "TheIntroDB",
@@ -2009,7 +2003,7 @@ def _ref_lone_reason(mtype, sources, best, *, high_held_it):
 
 def _ref_group(c):
     # Rule 8: an importer plugin's copy on a server is the database it imports: SkipDB's is SkipDB again; any other
-    # (IntroDB/TheIntroDB, AniSkip until phase 4 measures it, or one that can't be told) is the crowd source.
+    # (IntroDB/TheIntroDB, AniSkip, whose copies aren't measured, or one that can't be told) is the crowd source.
     if c.source is S.SERVER_MARKERS_IMPORTED and c.copied_from == "skipdb":
         return "skipdb"
     # IntroDB, TheIntroDB and the other importer copies are one crowd source.
@@ -2056,7 +2050,7 @@ def _ref_times_sane(c, x):
     d, start = x.duration_ms, c.start_ms
     if d <= 0 or start < 0 or start >= d:
         return False
-    # Credits or a preview timed on another release may end up to 5 s past this file (2026-09-25); anything else 2 s.
+    # Credits or a preview timed on another release may end up to 5 s past this file; anything else 2 s.
     past = 5_000 if c.type not in _REF_START_TYPES and _ref_timed_on_any_release(c) else 2_000
     if c.end_ms is not None and (c.end_ms < start or c.end_ms > d + past):
         return False
@@ -2117,7 +2111,7 @@ def _ref_agreeing_sets(cands, x):
         s
         for s in sets
         if len({_ref_group(c) for c in s}) >= 2
-        # ruling G3: season audio and markers already on servers never agree on their own
+        # season audio and markers already on servers never agree on their own
         and any(c.source not in (*_REF_SERVER, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS) for c in s)
     ]
     return sorted(sets, key=lambda s: min(_ref_value(c, d) for c in s))
@@ -2142,7 +2136,7 @@ def _ref_compose(members, mtype, x, text_start=False):
             _ref_rank(c, x),
         ),
     )
-    # Credits: credit text starts the skip whenever the winner starts more than 5 s from it (2026-09-27).
+    # Credits: credit text starts the skip whenever the winner starts more than 5 s from it.
     texts = [c for c in suppliers if c.source is S.CREDITS_TEXT]
     if mtype is T.CREDITS and texts:
         text = min(texts, key=lambda c: _ref_rank(c, x))
@@ -2150,7 +2144,7 @@ def _ref_compose(members, mtype, x, text_start=False):
             winner = text
     if mtype in _REF_START_TYPES:
         # Season audio one other episode supports doesn't set the start when an agreeing non-server answer of another
-        # group starts more than 15 s before it: it may be only part of the opening (2026-09-27).
+        # group starts more than 15 s before it: it may be only part of the opening.
         partial = [
             c
             for c in confirmed
@@ -2266,7 +2260,7 @@ def _ref_decide_type(mtype, cands, x):
                 # One file read's own edges (the insane-composition fallback) never overrule a chapter.
                 if won is not None and len(won.decided_by) > 1:
                     result, reason, overruled = won, f"{_REF_TEXT_WINS}: " + ", ".join(won.decided_by), True
-            # Rule 3 for intros (2026-09-27): sets that each hold this season's audio and a non-server source of another
+            # Rule 3 for intros: sets that each hold this season's audio and a non-server source of another
             # group decide, as rule 4 would decide them, when the intro they compose ends inside the chapter.
             audio_paired = mtype is T.INTRO and all(
                 any(c.source is S.SEASON_AUDIO for c in members)
@@ -2300,7 +2294,7 @@ def _ref_decide_type(mtype, cands, x):
         )
         if not overruled and text_can_check and any(_ref_group(c) == "skipdb" for c in others):
             return no_evidence(result, _REF_TEXT_WAITS)
-        # An online intro ending inside the chapter has season audio read the file first (2026-09-27).
+        # An online intro ending inside the chapter has season audio read the file first.
         online = (S.INTRODB, S.THEINTRODB, S.SKIPDB, S.SERVER_MARKERS_IMPORTED)
         audio_can_check = (
             mtype is T.INTRO
@@ -2313,7 +2307,7 @@ def _ref_decide_type(mtype, cands, x):
         if audio_can_check:
             return no_evidence(result, _REF_AUDIO_WAITS)
         # Credit text read with this chapter as its hint moves its start to the roll, unless another source agrees with
-        # the chapter (2026-09-27).
+        # the chapter.
         hinted = [
             c
             for c in others
@@ -2393,7 +2387,7 @@ def _ref_decide_type(mtype, cands, x):
         proposal = next((c for c in ranked if may_decide_alone(c)), None)
         own = [c for c in sane if proposal is not None and _ref_group(c) == _ref_group(proposal)]
         rest = [c for c in sane if proposal is None or _ref_group(c) != _ref_group(proposal)]
-        # G3 with the owner's rule of 2026-09-24: servers' own markers agreeing with season audio are no second source,
+        # servers' own markers agreeing with season audio are no second source,
         # but they don't hold it back either.
         only_agreeing_servers = all(c.source in _REF_SERVER for c in rest) and all(
             _ref_agree(o, c, d) for o in rest for c in own
@@ -2403,13 +2397,13 @@ def _ref_decide_type(mtype, cands, x):
                 _ref_group(a) != _ref_group(b) and not _ref_agree(a, b, d) for a, b in itertools.combinations(sane, 2)
             )
             kinds = {c.source for c in sane}
-            # ruling G3 again: only season audio and markers already on servers, and they agree
+            # only season audio and markers already on servers, and they agree
             audio_with_server = (
                 kinds <= {*_REF_AUDIO, *_REF_SERVER} and kinds & set(_REF_AUDIO) and kinds & set(_REF_SERVER)
             )
             if disagree:
                 reason = f"sources disagree: {', '.join(groups)}"
-                # Only credit text wins a disagreement (measured 2026-10-03): an intro disagreement writes nothing.
+                # Only credit text wins a disagreement: an intro disagreement writes nothing.
                 proposal = next((c for c in ranked if c.source in _REF_WINS_A_DISAGREEMENT), None)
             elif audio_with_server:
                 reason = _REF_AUDIO_WITH_SERVER
@@ -2566,7 +2560,7 @@ def _random_candidates(rng, mtype, duration, anchor):
     if rng.random() < 0.25:
         # One source (or the IntroDB pair) only: what "medium" decides on. The sources that may decide alone come up
         # more often: credit text three times (besides chapters the only one for credits and previews), SkipDB twice
-        # (intros and recaps). Season audio (which may decide an intro alone since 2026-09-24) comes up as often as the
+        # (intros and recaps). Season audio (which may decide an intro alone) comes up as often as the
         # rest: the draws stay as they were, so every seed keeps its files.
         crowd = [S.THEINTRODB, S.INTRODB, S.SERVER_MARKERS_IMPORTED]
         alone = [*_NON_CHAPTER_SOURCES, S.CHAPTERS, S.CREDITS_TEXT, S.CREDITS_TEXT, S.SKIPDB]
@@ -2646,11 +2640,11 @@ def _random_file(rng):
                 start = rng.choice((0, 1_999, 2_000))
                 moved[id(c)] = replace(c, start_ms=start, end_ms=start + rng.choice((7_000, 9_999, 10_000, 12_000)))
         cands = [moved.get(id(c), c) for c in cands]
-    return _draws_of_2026_09_27(*_draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor))
+    return _draws_for_the_newer_rules(*_draws_for_rules_2_3_6_14(cands, x, locked, start_anchor, end_anchor))
 
 
-def _draws_of_2026_09_27(cands, x, locked):
-    """The shapes the 2026-09-27 rules need, from a generator seeded by the file itself, as the 2026-09-25 draws are.
+def _draws_for_the_newer_rules(cands, x, locked):
+    """The shapes the newer rules need, from a generator seeded by the file itself, as the other draws are.
 
     A fifth of the files with a credits chapter get credit text read with it as the hint, on both sides of the 10 s
     agreement tolerance, sometimes read with another chapter's start, sometimes beside another source agreeing with the
@@ -2658,7 +2652,7 @@ def _draws_of_2026_09_27(cands, x, locked):
     or more before its end, and half of those season audio agreeing with that answer or with the chapter (rule 3's
     season audio check).
     """
-    rng = random.Random(repr(("2026-09-27", cands, x.duration_ms, x.publish_when, x.source_order)))
+    rng = random.Random(repr(("newer-rules", cands, x.duration_ms, x.publish_when, x.source_order)))
     credits_chapters = [c for c in cands if c.type is T.CREDITS and c.source is S.CHAPTERS]
     if credits_chapters and rng.random() < 0.2:
         chosen = max(credits_chapters, key=lambda c: c.start_ms)
@@ -2694,8 +2688,8 @@ def _draws_of_2026_09_27(cands, x, locked):
     return cands, x, locked
 
 
-def _draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor):
-    """The shapes rules 2, 3, 6 and 14 of the 2026-09-25 audit need, from a generator seeded by the file itself, so the
+def _draws_for_rules_2_3_6_14(cands, x, locked, start_anchor, end_anchor):
+    """The shapes rules 2, 3, 6 and 14 need, from a generator seeded by the file itself, so the
     shared stream -- and every file the seeds drew before -- stays as it was.
 
     A fifth of the files have credits and previews ending just past the file, on both sides of the 5 s an online answer
@@ -2738,7 +2732,7 @@ def _draws_of_2026_09_25(cands, x, locked, start_anchor, end_anchor):
         pair = [Candidate(T.INTRO, start_anchor, end, S.SEASON_AUDIO, 1.0, "3/5"),
                 Candidate(T.INTRO, end - 2_000, end + 1_000, S.SEASON_AUDIO, 1.0, "2/5")]  # fmt: skip
         cands = [c for c in cands if c.type is not T.INTRO] + pair
-    # Only credit text wins a conflict between agreeing clusters (2026-10-03): a fortieth of the files have their credits
+    # Only credit text wins a conflict between agreeing clusters: a fortieth of the files have their credits
     # replaced by two clusters that conflict, credit text in one of them (in both, a fifth of the time).
     if rng.random() < 0.025:
         near, far = end_anchor, end_anchor + rng.choice((-30_000, 30_000))
@@ -2794,8 +2788,8 @@ def _unlocked_decided(decision):
 class TestProperties:
     """Properties of the finished decide() over the same dense random files as the reference (chapters, every crowd
     source, SkipDB, season audio and its hint, credit text, several servers' own markers and importer copies naming each
-    database, locks, both levels). The phase-1 deep review's fuzz checked the first three; the rest pin rulings R2, G3
-    and rules 6-7 as properties rather than cells."""
+    database, locks, both levels). The rest pin the season-audio and server-marker rules and rules 6-7 as properties
+    rather than cells."""
 
     SEEDS = (20260913, 7, 1234)
     FILES = 1000
@@ -2825,9 +2819,9 @@ class TestProperties:
 
     @pytest.mark.parametrize("seed", SEEDS)
     def test_season_audio_decides_alone_only_an_intro_and_never_with_markers_on_servers(self, seed):
-        # Owner 2026-09-24 overrides R2 for this season's audio on intros; the previous season's hint and markers
-        # already on a server still never decide on their own, and G3 still keeps season audio and a server's own apart.
-        # Since 2026-10-02 season audio also decides an intro at "medium" where another source disagrees or the other
+        # This season's audio decides an intro alone; the previous season's hint and markers already on a server still
+        # never decide on their own, and season audio and a server's own still never agree on their own.
+        # Season audio also decides an intro at "medium" where another source disagrees or the other
         # edge fails sanity; the reason then says so after "single source (season_audio)".
         only_agree = {*_REF_AUDIO, *_REF_SERVER}
         alone = 0
@@ -2871,7 +2865,7 @@ class TestProperties:
                     _checked_edge(with_servers.marker) != _checked_edge(bare.marker)
                 ):
                     continue  # a server's agreement confirmed another source's edge: another decision, not a longer one
-                # A server's marker can also change which rule decides (2026-10-02): it can make an agreeing pair
+                # A server's marker can also change which rule decides: it can make an agreeing pair
                 # contradict the chapter, or a composed marker fail sanity, after which the chapter's or the file's own
                 # read's own edges stand. Rule 7 is about the same decision with and without the servers' markers.
                 same_sources = set(with_servers.marker.decided_by) - {"server_markers"} == set(bare.marker.decided_by)
@@ -2908,19 +2902,17 @@ class TestProperties:
 
 
 class TestSeasonAudioSources:
-    """Spec §5.3/§5.5: this season's audio decides an intro alone at "medium" (owner 2026-09-24, overriding R2), the
-    previous season's hint never does, the two are one independent source, and G3 keeps season audio and markers
-    already on a server from agreeing."""
+    """This season's audio decides an intro alone at "medium", the previous season's hint never does, the two are
+    one independent source, and season audio and markers already on a server never agree on their own."""
 
     DUR = 1_321_472
-    ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous", "credits_text",
-             "server_markers", "server_markers_imported")  # fmt: skip
+    ORDER = SOURCE_ORDER
 
     def _ctx(self, publish_when):
         return DecisionContext(self.DUR, False, publish_when, frozenset({MarkerType.INTRO}), self.ORDER)
 
     def test_season_audio_alone_decides_an_intro(self):
-        # "If it doesn't exist online then use the GPU/CPU check" (owner, 2026-09-24).
+        # "If it doesn't exist online then use the GPU/CPU check".
         c = [Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "10/10")]
         d = decide(c, self._ctx("medium"), {})[MarkerType.INTRO]
         assert (d.status, d.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
@@ -2953,7 +2945,7 @@ class TestSeasonAudioSources:
         assert d.reason == f"only season audio found the {mtype.value}; matching audio needs another source to agree"
 
     def test_season_audio_disagreeing_with_an_online_answer_decides_nothing(self):
-        # Measured 2026-10-03: where season audio and an online intro disagreed, both were wrong 6 times in 10.
+        # Measured: where season audio and an online intro disagreed, both were wrong 6 times in 10.
         c = [
             Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "10/10"),
             Candidate(MarkerType.INTRO, 20_000, 60_000, S.INTRODB),
@@ -2990,8 +2982,8 @@ class TestSeasonAudioSources:
     @pytest.mark.parametrize("server", [S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
     @pytest.mark.parametrize("reverse", [False, True])
     def test_season_audio_with_an_agreeing_server_marker_decides_as_if_alone(self, server, reverse):
-        # G3: a server's own intro detection matches audio too, so it is no second source, but it doesn't hold season
-        # audio back either (2026-09-24): the intro is season audio's own, credited to it alone, and not "agreed".
+        # A server's own intro detection matches audio too, so it is no second source, but it doesn't hold season
+        # audio back either: the intro is season audio's own, credited to it alone, and not "agreed".
         c = [
             Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "9/9"),
             Candidate(MarkerType.INTRO, 130_000, 158_000, server, 1.0, "plex-1"),
@@ -3040,7 +3032,7 @@ class TestSeasonAudioSources:
         ids=["audio-and-server-high", "audio-and-importer-copy-high", "hint-and-server-high", "hint-and-server-medium"],
     )
     def test_season_audio_and_markers_on_servers_alone_decide_nothing(self, publish_when, audio, server):
-        # Ruling G3: a server's own intro detection matches audio across episodes too, so they aren't independent;
+        # a server's own intro detection matches audio across episodes too, so they aren't independent;
         # the previous season's hint never decides alone, and "high" (the harness) needs two sources.
         c = [
             Candidate(MarkerType.INTRO, 126_000, 157_000, audio, 1.0, "9/9"),
@@ -3114,7 +3106,7 @@ class TestSeasonAudioSources:
 
 
 class TestSeasonIntroChapterLimit:
-    """Finding F1 (phase-1 scale run): an intro chapter far longer than the season's other intro chapters is story, not
+    """An intro chapter far longer than the season's other intro chapters is story, not
     an intro, so it needs an agreeing source."""
 
     REASON = "Intro chapter is much longer than the rest of the season's"
@@ -3280,7 +3272,7 @@ _INTRODB_COPY_CREDITS = _agreed(
 
 
 class TestImportedCopiesJoinTheDatabaseTheyImport:
-    """Rule 8 (ruling 2026-09-16): an importer plugin's markers are in the independence group of the database it
+    """Rule 8: an importer plugin's markers are in the independence group of the database it
     imports. AniSkip's, and one whose database can't be told (""), stay with IntroDB/TheIntroDB."""
 
     @pytest.mark.parametrize(
@@ -3294,7 +3286,7 @@ class TestImportedCopiesJoinTheDatabaseTheyImport:
             (S.INTRODB, "introdb", _IDB_AND_COPY_INTRO, _IDB_AND_COPY_INTRO),
             (S.THEINTRODB, "introdb", _TIDB_AND_COPY_INTRO, _TIDB_AND_COPY_INTRO),
             (S.INTRODB, "skipdb", _INTRODB_COPY_INTRO, _INTRODB_COPY_INTRO),
-            # AniSkip copies stay with the crowd group until phase 4 measures what they copy
+            # AniSkip copies stay with the crowd group: what they copy isn't measured
             (S.INTRODB, "aniskip", _IDB_AND_COPY_INTRO, _IDB_AND_COPY_INTRO),
             (S.INTRODB, "", _IDB_AND_COPY_INTRO, _IDB_AND_COPY_INTRO),
         ],
@@ -3358,7 +3350,7 @@ class TestImportedCopiesJoinTheDatabaseTheyImport:
 
 
 # Every source alone and in every pair (an importer plugin's copy once per database it can name), for every marker type
-# at both levels: the cells rules 3, 4, 6, 7 and 8, R2 and G3 give, written out plainly rather than through decide.py.
+# at both levels: the cells rules 3, 4, 6, 7 and 8 and the season-audio and server-marker rules give, written out plainly rather than through decide.py.
 _MATRIX_KINDS = (
     (S.CHAPTERS, ""),
     (S.THEINTRODB, ""),
@@ -3399,12 +3391,12 @@ def _plain_group(kind):
     if source in (S.INTRODB, S.THEINTRODB):
         return "crowd"
     if source is S.SERVER_MARKERS_IMPORTED:
-        return "skipdb" if copied_from == "skipdb" else "crowd"  # AniSkip's and an unknown copy: crowd until phase 4
+        return "skipdb" if copied_from == "skipdb" else "crowd"  # AniSkip's and an unknown copy: crowd
     return "season_audio" if source is S.SEASON_AUDIO_PREVIOUS else source.value
 
 
 def _alone_at_medium(source, mtype):
-    """Rule 6 (and Q1, 2026-09-24, 2026-09-25): credit text alone, season audio alone for intros; SkipDB never."""
+    """Rule 6: credit text alone, season audio alone for intros; SkipDB never."""
     return source is S.CREDITS_TEXT or (source is S.SEASON_AUDIO and mtype is T.INTRO)
 
 
@@ -3441,10 +3433,10 @@ def _expected_agreeing(kinds, a, b, level):
         if level == "medium" and deciders:
             return DecisionStatus.DECIDED, _own(a), _credited(*sources), f"single source ({deciders[0].value})"
         return DecisionStatus.NO_EVIDENCE, None, None, _lone(level, a, b)
-    if sources <= _MATRIX_ONLY_AGREE:  # G3, rule 7: nothing here makes an agreeing pair
+    if sources <= _MATRIX_ONLY_AGREE:  # Season audio vs a server's own, and rule 7: nothing here makes an agreeing pair
         audio = next((c for c in (a, b) if c.source is S.SEASON_AUDIO), None)
         if level == "medium" and audio is not None and _alone_at_medium(audio.source, audio.type):
-            # A server's own marker agreeing with season audio doesn't hold it back (2026-09-24), nor is it credited.
+            # A server's own marker agreeing with season audio doesn't hold it back, nor is it credited.
             return DecisionStatus.DECIDED, _own(audio), ("season_audio",), "single source (season_audio)"
         if sources & set(_REF_SERVER) and sources - set(_REF_SERVER):
             return DecisionStatus.NO_EVIDENCE, None, None, _REF_AUDIO_WITH_SERVER
@@ -3475,7 +3467,7 @@ def _expected_disagreeing(kinds, near, far, level):
         if level == "medium" and any(_alone_at_medium(c.source, c.type) for c in (near, far)):
             return DecisionStatus.NO_EVIDENCE, None, None, "source disagrees with itself"
         return DecisionStatus.NO_EVIDENCE, None, None, _lone(level, near, far)
-    # Two groups disagree: at "medium" credit text decides with its own edges (measured 2026-10-03: only credit text
+    # Two groups disagree: at "medium" credit text decides with its own edges (measured: only credit text
     # wins a disagreement); otherwise nothing is decided.
     deciders = [c for c in (near, far) if c.source is S.CREDITS_TEXT]
     if level == "medium" and deciders:
@@ -3791,8 +3783,7 @@ class TestOnlineTimesFromAnotherSpeed:
     before decide ("made for an earlier file"), not by the file's frame rate."""
 
     DUR = 2_498_304  # Bones S07E01
-    ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous", "credits_text",
-             "server_markers", "server_markers_imported")  # fmt: skip
+    ORDER = SOURCE_ORDER
     FILM = 24000 / 1001
     FILM_ON_PAL = FILM / 25
 
@@ -4088,7 +4079,7 @@ class TestTheFilesOwnIntroEnd:
 
 
 class TestALoneSkipDbAnswerNeverDecides:
-    """Case 1 of the 2026-09-25 audit (spec §5.5 rule 6): SkipDB's duration match proves the file's cut, not the
+    """SkipDB's duration match proves the file's cut, not the
     segment's edges. Westworld S04E01/E07/E08 each had a lone SkipDB intro covering 20 s of a 97 s title sequence,
     Outlander S08 (online set) four lone SkipDB intros ending 5-11 s late, Mr. Robot S04E01 (held-out) one marking
     another 24 s. A lone SkipDB answer now waits for a check against the file, as IntroDB's does."""
@@ -4144,7 +4135,7 @@ class TestALoneSkipDbAnswerNeverDecides:
 
 
 class TestAnOnlineCreditsEndJustPastTheFile:
-    """Case 3 of the 2026-09-25 audit (spec §5.5 rule 2): IntroDB's and TheIntroDB's times come from another release,
+    """IntroDB's and TheIntroDB's times come from another release,
     so credits running to that release's end can end a few seconds past this file's. Game of Thrones S03E08/E09 and
     S05E06: IntroDB's credits agree with credit text within 1 s but end 3.5-4.7 s past the file, so the whole answer was
     dropped and a lone SkipDB answer 30-530 s early held credit text in review. Up to 5 s past the end such an answer
@@ -4225,7 +4216,7 @@ def _text_wins(names):
 
 
 class TestSkipDbAgainstACreditsChapter:
-    """Case 2 of the 2026-09-25 audit (spec §5.5 rule 3): Somebody Somewhere S03E02-E07's HMAX "Credits" chapters start
+    """Somebody Somewhere S03E02-E07's HMAX "Credits" chapters start
     40-70 s after the credits do; SkipDB (and Plex's marker, made for an earlier file) say so within 2 s. One source
     never overrides a chapter, but SkipDB's times are this file's (its duration matches), so its disagreement has credit
     text read the file's frames: until it answers nothing is decided for the credits; credit text agreeing with SkipDB (or
@@ -4316,7 +4307,7 @@ class TestSkipDbAgainstACreditsChapter:
 
 
 class TestAnotherReleasesIntroBesideSeasonAudio:
-    """Case 4 of the 2026-09-25 audit (spec §5.5 rule 14): Westworld S03E03-E08's IntroDB intros have season audio's
+    """Westworld S03E03-E08's IntroDB intros have season audio's
     length (within 5 s) but sit 50-80 s earlier: a release without the episode's recap. An IntroDB or TheIntroDB intro
     (or an importer plugin's copy of one) agreeing with no other source, with season audio's length and a start more
     than 15 s from it, both at least 30 s long, is that intro on another release's clock and is left out, so season
@@ -4485,7 +4476,7 @@ class TestKeepPublishedThroughARuleChange:
         carried = Marker(T.INTRO, 60_000, 90_000, ("carried_over",))
         assert self._keep(self.UNDECIDED, carried, [Candidate(T.INTRO, 60_000, 90_000, S.SKIPDB)]) is self.UNDECIDED
 
-    # 2026-09-27: a lone online answer was kept for installs with nothing that reads the file to check it.
+    # A lone online answer was kept for installs with nothing that reads the file to check it.
     @pytest.mark.parametrize(
         ("read_by", "candidates", "kept"),
         [
@@ -4531,7 +4522,7 @@ class TestKeepPublishedThroughARuleChange:
 
 
 class TestSeasonAudioChecksAnIntroChapter:
-    """Rule 3 since 2026-09-27 (Spring of the Blade S01E14: an "Intro" chapter 0-134 s, IntroDB 0-103 s, the opening
+    """Rule 3 (Spring of the Blade S01E14: an "Intro" chapter 0-134 s, IntroDB 0-103 s, the opening
     ending at 106 s): an online answer ending inside an intro chapter has season audio read the file, and season audio
     agreeing with it ends the intro there."""
 
@@ -4601,7 +4592,7 @@ class TestSeasonAudioChecksAnIntroChapter:
 
 
 class TestAPartialSeasonMatchDoesntSetTheStart:
-    """Rule 4 since 2026-09-27 (Game of Thrones S03E04/E09: the season split over three disks, two episodes matched
+    """Rule 4 (Game of Thrones S03E04/E09: the season split over three disks, two episodes matched
     with each other alone at 63-112 s of a 5-112 s title sequence IntroDB had right)."""
 
     @pytest.mark.parametrize(

@@ -180,7 +180,7 @@ class TestDailyBudget:
         assert lim.acquire(priority=3) is Acquire.BUDGET_EXHAUSTED
 
     def test_live_theintrodb_headers_keep_the_budget_until_the_day_rolls(self):
-        """Header set captured from TheIntroDB on 2026-09-14: usage reset is sent as "0" mid-day."""
+        """Header set captured from TheIntroDB: usage reset is sent as "0" mid-day."""
         c = FakeClock()
         lim = _limiter(c)
         lim.record(
@@ -899,7 +899,7 @@ class TestRegistry:
         assert get_limiter("skipdb") is not first
 
     def test_a_limiter_created_after_a_restart_carries_on_from_todays_stored_usage(self, tmp_path, monkeypatch):
-        # Audit B S8: before, a restart forgot the reserve (LOW allowed again) and the first response stored used=1.
+        # Before, a restart forgot the reserve (LOW allowed again) and the first response stored used=1.
         from media_preview_generator.markers.sources import ratelimit
         from media_preview_generator.markers.store import get_marker_store
 

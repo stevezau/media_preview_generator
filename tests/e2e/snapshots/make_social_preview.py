@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render docs/images/social-preview.jpg, the card shown when someone shares a docs link.
 
-    /home/data/.venv/bin/python tests/e2e/snapshots/make_social_preview.py
+    python tests/e2e/snapshots/make_social_preview.py
 
 The layout is tests/e2e/snapshots/assets/social_preview.html (edit that, not this). The player strip
 is the owner-approved 3-up from the lab, injected at render time. Rendered at exactly 1280x640 CSS px
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -24,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE = Path(__file__).resolve().parent / "assets" / "social_preview.html"
 PLAYER_STRIPS = [
     REPO_ROOT / "docs" / "images" / "players-3up.webp",
-    Path("/home/data/mlab-openfilms/captures/players-3up.webp"),
+    Path(os.environ.get("OPENFILMS_DIR", "openfilms")) / "captures" / "players-3up.webp",
 ]
 OUT = REPO_ROOT / "docs" / "images" / "social-preview.jpg"
 MAX_BYTES = 300 * 1024
@@ -33,7 +34,7 @@ MAX_BYTES = 300 * 1024
 def main() -> int:
     strip = next((path for path in PLAYER_STRIPS if path.is_file()), None)
     if strip is None:
-        print("no players-3up.webp in docs/images/ or the lab captures folder (plan Task 5)", file=sys.stderr)
+        print("no players-3up.webp in docs/images/ or in $OPENFILMS_DIR/captures", file=sys.stderr)
         return 1
     uri = "data:image/webp;base64," + base64.b64encode(strip.read_bytes()).decode()
     with sync_playwright() as playwright:

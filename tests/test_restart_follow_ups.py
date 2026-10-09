@@ -105,7 +105,7 @@ class TestFollowUpsStayWithTheirPreviewJob:
         assert set(self._resume()) == {preview_id, follow_up_id}
 
     def test_a_follow_up_older_than_its_running_preview_jobs_start_is_revived_with_it(self, tmp_path):
-        # The preview job waited 19 h for a slot and was running when the restart came: its age is its start's.
+        # The preview job queued for 19 h before it started and was running at the restart: its age is its start's.
         jm, preview_id, follow_up_id = self._restart(
             str(tmp_path / "config"),
             preview={"created_at": _ago(20), "started_at": _ago(1), "status": JobStatus.RUNNING},
@@ -357,8 +357,8 @@ class TestRunnersRecordWhenASlotWaitBegins:
     def test_a_job_waiting_longer_than_the_revival_window_behind_a_long_scan_is_revived_after_a_restart(
         self, app, monkeypatch
     ):
-        # It began waiting for a slot 13 h ago (a full scan holds every slot) and was still waiting when the app went
-        # down: its age at the restart is the downtime, not the 13 h it waited, so it's revived, not failed.
+        # It began waiting for a start-up slot 13 h ago and was still waiting when the app went down: its age at the
+        # restart is the downtime, not the 13 h it waited, so it's revived, not failed.
         import media_preview_generator.web.routes.job_runner as jr_mod
         from media_preview_generator.web import app as app_mod
 

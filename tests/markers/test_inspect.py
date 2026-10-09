@@ -637,7 +637,7 @@ def test_resolve_local_path_opens_the_version_asked_for(media, stype, asked, ver
 @pytest.mark.parametrize(
     ("stype", "asked", "version_file", "on_disk"),
     [
-        # The owner's rule (2026-09-19): never open another version in place of the one clicked; say it's not here.
+        # Never open another version in place of the one clicked; say it's not here.
         (ServerType.PLEX, "42", V1, [V2]),
         (ServerType.PLEX, "42", V2, [V1]),
         # A Plex row whose file is none of the item's versions any more: the id can't say which one was clicked.
@@ -1052,7 +1052,7 @@ def test_locked_marker_shows_as_locked_and_is_published(store, factory):
 
 
 def test_a_proposal_carries_the_sources_the_editor_would_override(store, factory):
-    """L100: the editor says what an undecided type's closest answer was based on before the user replaces it."""
+    """The editor says what an undecided type's closest answer was based on before the user replaces it."""
     rec = _known_file(store, {t: _none(t) for t in MarkerType})
     store.save_decisions(
         rec.id,
@@ -1136,7 +1136,7 @@ def test_plex_a_locked_nudge_inside_the_version_tolerance_reads_as_will_replace(
 @pytest.mark.parametrize(
     ("versions", "plan"),
     [
-        (1, "will_replace"),  # nothing to agree with: the publisher writes what was decided (§14 2026-09-25)
+        (1, "will_replace"),  # nothing to agree with: the publisher writes what was decided
         (2, "up_to_date"),  # the publisher keeps what the item shows while the versions agree within 2 s
         (None, "will_replace"),  # unknown: "will replace" where the publisher may keep is the safe way round
     ],
@@ -1328,7 +1328,7 @@ def test_emby_plan_says_emby_skips_to_the_end_of_the_file_for_credits_that_end_b
     registry.get("emby").get_chapter_markers.return_value = _emby_rows(INTRO, early)
     registry.get("jf").get_media_segments.return_value = _jf_rows(INTRO, early)
     payload = inspect.item_payload(PATH, registry=registry, store=store)
-    # Emby gets the credits start anyway (owner decision 2026-09-14) and says what its player does with it.
+    # Emby gets the credits start anyway and says what its player does with it.
     assert (_row(payload, "emby")["plan"], _row(payload, "emby")["plan_reason"]) == (
         "up_to_date",
         "Emby skips to the end of the file",
@@ -2308,7 +2308,7 @@ def test_fingerprint_change_drops_the_keys_lock():
 
 
 class TestAUiCheckIsBounded:
-    """Phase 4 Task 10 Step 8: a Servers-page or Inspector load must not wait a job's lock budget.
+    """A Servers-page or Inspector load must not wait a job's lock budget.
 
     ``capability()`` spends ``plex_db.BUSY_TIMEOUT_S`` twice (the lock probe, then the read-only checks), and a
     not-ready answer is cached only ``NOT_READY_TTL_S``, so an unhealthy Plex re-probed on nearly every load.
@@ -2462,7 +2462,7 @@ def test_failed_check_after_a_save_still_evicts_the_old_answer_and_lock():
     assert cache.get(before, "status", lambda: "fresh") == "fresh"
 
 
-# --------------------------------------------------------------------------- Plex keeps agreeing times (audit C MED-3)
+# --------------------------------------------------------------------------- Plex keeps agreeing times
 
 INTRO_KEPT = Marker(T.INTRO, 60_000, 90_000, ("chapters",))
 INTRO_DECIDED_LATER = Marker(T.INTRO, 60_000, 91_500, ("chapters", "theintrodb"))

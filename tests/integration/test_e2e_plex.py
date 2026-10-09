@@ -21,9 +21,7 @@ Run with::
 from __future__ import annotations
 
 import json
-import struct
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 import requests as _requests
@@ -34,55 +32,17 @@ from media_preview_generator.processing.multi_server import (
     process_canonical_path,
 )
 from media_preview_generator.servers import ServerRegistry
-
-_BIF_MAGIC = bytes([0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A])
-_JPEG_SOI = bytes([0xFF, 0xD8, 0xFF])
-
-
-def _decode_bif(path: Path) -> dict:
-    """Validate magic + JPEG SOI in the BIF; return basic metadata."""
-    raw = path.read_bytes()
-    assert len(raw) >= 64
-    assert raw[:8] == _BIF_MAGIC
-    image_count = struct.unpack("<I", raw[12:16])[0]
-    interval_ms = struct.unpack("<I", raw[16:20])[0]
-    assert image_count > 0
-    first_offset = struct.unpack("<I", raw[64 + 4 : 64 + 8])[0]
-    assert raw[first_offset : first_offset + 3] == _JPEG_SOI
-    return {"image_count": image_count, "interval_ms": interval_ms, "size_bytes": len(raw)}
+from tests.integration.conftest import assert_webhook_queued, decode_bif
 
 
 @pytest.fixture
-def plex_legacy_config(plex_credentials, tmp_path):
-    """Legacy Config object with Plex creds (the PlexServer wrapper still takes one)."""
-    config = MagicMock()
-    config.plex_url = plex_credentials["PLEX_URL"]
-    config.plex_token = plex_credentials["PLEX_ACCESS_TOKEN"]
-    config.plex_timeout = 60
-    config.plex_libraries = ["Movies"]
-    config.plex_config_folder = str(tmp_path / "plex_config")
-    Path(config.plex_config_folder).mkdir(parents=True, exist_ok=True)
-    config.plex_local_videos_path_mapping = ""
-    config.plex_videos_path_mapping = ""
-    config.path_mappings = []
-    config.plex_bif_frame_interval = 5
-    config.thumbnail_quality = 4
-    config.regenerate_thumbnails = False
-    config.gpu_threads = 0
-    config.cpu_threads = 2
-    config.gpu_config = []
-    config.tmp_folder = str(tmp_path / "tmp")
-    config.working_tmp_folder = str(tmp_path / "tmp")
-    Path(config.working_tmp_folder).mkdir(parents=True, exist_ok=True)
-    config.tmp_folder_created_by_us = False
-    config.ffmpeg_path = "/usr/bin/ffmpeg"
-    config.ffmpeg_threads = 2
-    config.tonemap_algorithm = "hable"
-    config.log_level = "INFO"
-    config.worker_pool_timeout = 60
-    config.plex_library_ids = None
-    config.plex_verify_ssl = True
-    return config
+def plex_legacy_config(live_config, plex_credentials, tmp_path):
+    live_config.plex_url = plex_credentials["PLEX_URL"]
+    live_config.plex_token = plex_credentials["PLEX_ACCESS_TOKEN"]
+    live_config.plex_libraries = ["Movies"]
+    live_config.plex_config_folder = str(tmp_path / "plex_config")
+    Path(live_config.plex_config_folder).mkdir(parents=True, exist_ok=True)
+    return live_config
 
 
 @pytest.fixture
@@ -168,7 +128,7 @@ class TestLivePlexBundleBif:
         assert ".bundle" in str(bif_path)
         # And the bytes are a real BIF.
         try:
-            decoded = _decode_bif(bif_path)
+            decoded = decode_bif(bif_path)
             assert decoded["interval_ms"] == 5000
             assert decoded["image_count"] >= 4
         finally:
@@ -194,7 +154,7 @@ class TestPlexNativeMultipartWebhook:
         monkeypatch,
         plex_legacy_config,
     ):
-        """A real Plex-shape multipart webhook drives the full pipeline."""
+        """A real Plex-shape multipart webhook resolves to the file and is queued as a Job."""
         from media_preview_generator.web.app import create_app
         from media_preview_generator.web.settings_manager import (
             get_settings_manager,
@@ -242,15 +202,9 @@ class TestPlexNativeMultipartWebhook:
         )
         settings.complete_setup()
 
-        # Patch the webhook router's config loader (used by the dispatch
-        # path) AND the source load_config (used by _get_registry to
-        # build the legacy Plex client). Both must point at our test
-        # Plex container, otherwise .env leakage takes us to a real
-        # Plex on the dev machine.
-        monkeypatch.setattr(
-            "media_preview_generator.web.webhook_router._load_config_or_minimal",
-            lambda: plex_legacy_config,
-        )
+        # Patch load_config (used by _get_registry to build the legacy Plex
+        # client) to point at our test Plex container, otherwise .env
+        # leakage takes us to a real Plex on the dev machine.
         monkeypatch.setattr(
             "media_preview_generator.config.load_config",
             lambda *a, **kw: plex_legacy_config,
@@ -295,14 +249,8 @@ class TestPlexNativeMultipartWebhook:
             content_type="multipart/form-data",
         )
 
-        assert response.status_code == 200, (
-            f"expected 200, got {response.status_code}: {response.get_data(as_text=True)}"
+        assert_webhook_queued(
+            response,
+            "plex",
+            str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv"),
         )
-        body = response.get_json()
-        assert body["kind"] == "plex", body
-        # The dispatch ran — either a publish or a "skipped" (output already
-        # exists from a prior run); either way the canonical path resolved.
-        assert body.get("status") in ("published", "skipped"), body
-        assert body.get("canonical_path") == str(
-            media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv"
-        ), body

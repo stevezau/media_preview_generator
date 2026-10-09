@@ -9,6 +9,7 @@ re-routed through this class.
 
 from __future__ import annotations
 
+import html
 import json
 import threading
 from collections.abc import Collection, Iterator
@@ -21,6 +22,7 @@ from loguru import logger
 
 from ..config import resolve_frame_interval
 from ..scan_filters import metadata_id, metadata_integer, parse_added_at
+from ..utils import redact_secrets
 from .base import (
     ConnectionResult,
     FlagTarget,
@@ -216,6 +218,39 @@ class PlexServer(MediaServer):
                 self._plex = _build_plex(self._config)
         return self._plex
 
+    def _has_credentials(self) -> bool:
+        return bool((self._config.plex_url or "").strip() and self._config.plex_token)
+
+    def _plex_http(self, method: str, path: str, *, params: dict[str, str] | None = None) -> requests.Response:
+        """Send one authenticated request to Plex's HTTP API and raise on an error status.
+
+        Args:
+            method: ``"get"`` (asks for JSON) or ``"put"``.
+            path: Path under the server URL, e.g. ``"/:/prefs"``.
+            params: Query parameters.
+
+        Raises:
+            requests.RequestException: Transport failure or an error status.
+        """
+        url = (self._config.plex_url or "").rstrip("/")
+        verify_ssl = bool(getattr(self._config, "plex_verify_ssl", True))
+        timeout = int(getattr(self._config, "plex_timeout", 10) or 10)
+        headers = {"X-Plex-Token": self._config.plex_token or ""}
+        if method == "get":
+            headers["Accept"] = "application/json"
+        if not verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout, "verify": verify_ssl}
+        if params:
+            kwargs["params"] = params
+        response = (requests.get if method == "get" else requests.put)(f"{url}{path}", **kwargs)
+        response.raise_for_status()
+        return response
+
+    def _fetch_prefs(self) -> list[dict[str, Any]]:
+        """Return the server-wide preference entries from ``GET /:/prefs``."""
+        return self._plex_http("get", "/:/prefs").json().get("MediaContainer", {}).get("Setting", [])
+
     def test_connection(self) -> ConnectionResult:
         """Probe the Plex server identity via ``GET /``.
 
@@ -223,25 +258,13 @@ class PlexServer(MediaServer):
         but returns a structured :class:`ConnectionResult`. Never raises on
         transport errors; failures are reported via ``ok=False``.
         """
+        if not self._has_credentials():
+            return ConnectionResult(ok=False, message="Plex URL and token are required")
         url = (self._config.plex_url or "").rstrip("/")
-        token = self._config.plex_token or ""
-        verify_ssl = bool(getattr(self._config, "plex_verify_ssl", True))
         timeout = int(getattr(self._config, "plex_timeout", 10) or 10)
 
-        if not url or not token:
-            return ConnectionResult(ok=False, message="Plex URL and token are required")
-
-        if not verify_ssl:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
         try:
-            response = requests.get(
-                f"{url}/",
-                headers={"X-Plex-Token": token, "Accept": "application/json"},
-                timeout=timeout,
-                verify=verify_ssl,
-            )
-            response.raise_for_status()
+            response = self._plex_http("get", "/")
             container = response.json().get("MediaContainer", {})
             return ConnectionResult(
                 ok=True,
@@ -642,7 +665,7 @@ class PlexServer(MediaServer):
             True,
             "recommended",
             "Belt-and-braces in case a filesystem event is missed (network mounts and "
-            "container-restart edge cases). Keep on; the default 12 h interval is fine.",
+            "container-restart edge cases). Keep on; Plex's default interval is fine.",
         ),
     )
 
@@ -654,25 +677,11 @@ class PlexServer(MediaServer):
         ``library_id=None`` / ``library_name=""`` — the UI groups
         these as "Server settings" rather than under any one library.
         """
-        url = (self._config.plex_url or "").rstrip("/")
-        token = self._config.plex_token or ""
-        verify_ssl = bool(getattr(self._config, "plex_verify_ssl", True))
-        timeout = int(getattr(self._config, "plex_timeout", 10) or 10)
-        if not url or not token:
+        if not self._has_credentials():
             return []
 
-        if not verify_ssl:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
         try:
-            response = requests.get(
-                f"{url}/:/prefs",
-                headers={"X-Plex-Token": token, "Accept": "application/json"},
-                timeout=timeout,
-                verify=verify_ssl,
-            )
-            response.raise_for_status()
-            settings = response.json().get("MediaContainer", {}).get("Setting", [])
+            settings = self._fetch_prefs()
         except Exception as exc:
             logger.warning(
                 "Could not load Plex preferences for health check on {!r}: {}. "
@@ -715,31 +724,17 @@ class PlexServer(MediaServer):
         prefs) so the UI's per-row display matches the
         :class:`HealthCheckIssue` row keys.
         """
-        url = (self._config.plex_url or "").rstrip("/")
-        token = self._config.plex_token or ""
-        verify_ssl = bool(getattr(self._config, "plex_verify_ssl", True))
-        timeout = int(getattr(self._config, "plex_timeout", 10) or 10)
-        if not url or not token:
+        if not self._has_credentials():
             return {"_global": "Plex URL and token required"}
-
-        if not verify_ssl:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         # Re-read current values so the apply path doesn't blindly POST
         # to flags that were already correct (Plex returns 200 either
         # way; this saves the user a confusing "applied 3" message when
         # in reality only 1 actually changed).
         try:
-            response = requests.get(
-                f"{url}/:/prefs",
-                headers={"X-Plex-Token": token, "Accept": "application/json"},
-                timeout=timeout,
-                verify=verify_ssl,
-            )
-            response.raise_for_status()
-            settings = response.json().get("MediaContainer", {}).get("Setting", [])
+            settings = self._fetch_prefs()
         except Exception as exc:
-            return {"_global": f"failed to fetch preferences: {exc}"}
+            return {"_global": f"failed to fetch preferences: {redact_secrets(str(exc))}"}
 
         current_by_id = {str(s.get("id") or ""): s.get("value") for s in settings if isinstance(s, dict)}
 
@@ -757,14 +752,7 @@ class PlexServer(MediaServer):
             # bad/unknown id.
             value_str = "true" if recommended is True else ("false" if recommended is False else str(recommended))
             try:
-                put = requests.put(
-                    f"{url}/:/prefs",
-                    params={pref_id: value_str},
-                    headers={"X-Plex-Token": token},
-                    timeout=timeout,
-                    verify=verify_ssl,
-                )
-                put.raise_for_status()
+                self._plex_http("put", "/:/prefs", params={pref_id: value_str})
                 results[f":{pref_id}"] = "ok"
             except Exception as exc:
                 logger.warning(
@@ -773,7 +761,7 @@ class PlexServer(MediaServer):
                     self.name,
                     exc,
                 )
-                results[f":{pref_id}"] = f"error: {exc}"
+                results[f":{pref_id}"] = f"error: {redact_secrets(str(exc))}"
 
         return results
 
@@ -843,7 +831,7 @@ class PlexServer(MediaServer):
             "tooltip": "Periodic library scan safety net",
             "explanation": (
                 "<p><strong>What it does:</strong> Plex runs a scheduled library scan at a "
-                "fixed interval (default: every hour) regardless of filesystem events.</p>"
+                "fixed interval regardless of filesystem events.</p>"
                 "<p><strong>Why we recommend on:</strong> a belt-and-braces safety net for "
                 "cases where FSEvents can miss changes — network mounts (SMB/NFS don't always "
                 "propagate inotify), container restarts, or Plex bugs. Even with real-time "
@@ -910,15 +898,8 @@ class PlexServer(MediaServer):
         if not targets:
             return {}
 
-        url = (self._config.plex_url or "").rstrip("/")
-        token = self._config.plex_token or ""
-        verify_ssl = bool(getattr(self._config, "plex_verify_ssl", True))
-        timeout = int(getattr(self._config, "plex_timeout", 10) or 10)
-        if not url or not token:
+        if not self._has_credentials():
             return {"_global": "Plex URL and token required"}
-
-        if not verify_ssl:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         results: dict[str, str] = {}
         for target in targets:
@@ -933,14 +914,7 @@ class PlexServer(MediaServer):
             else:
                 value_str = str(want)
             try:
-                put = requests.put(
-                    f"{url}/:/prefs",
-                    params={pref_id: value_str},
-                    headers={"X-Plex-Token": token},
-                    timeout=timeout,
-                    verify=verify_ssl,
-                )
-                put.raise_for_status()
+                self._plex_http("put", "/:/prefs", params={pref_id: value_str})
                 results[f":{pref_id}"] = "ok"
             except Exception as exc:
                 logger.warning(
@@ -949,7 +923,7 @@ class PlexServer(MediaServer):
                     self.name,
                     exc,
                 )
-                results[f":{pref_id}"] = f"error: {exc}"
+                results[f":{pref_id}"] = f"error: {redact_secrets(str(exc))}"
         return results
 
     def previews_readiness(self) -> dict[str, Any]:
@@ -1065,23 +1039,10 @@ class PlexServer(MediaServer):
         library_section_ok = True
         library_severity = "info"
 
-        url = (self._config.plex_url or "").rstrip("/")
-        token = self._config.plex_token or ""
-        verify_ssl = bool(getattr(self._config, "plex_verify_ssl", True))
-        timeout = int(getattr(self._config, "plex_timeout", 10) or 10)
         current_by_id: dict[str, Any] = {}
-        if url and token:
-            if not verify_ssl:
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        if self._has_credentials():
             try:
-                response = requests.get(
-                    f"{url}/:/prefs",
-                    headers={"X-Plex-Token": token, "Accept": "application/json"},
-                    timeout=timeout,
-                    verify=verify_ssl,
-                )
-                response.raise_for_status()
-                settings = response.json().get("MediaContainer", {}).get("Setting", [])
+                settings = self._fetch_prefs()
                 current_by_id = {str(s.get("id") or ""): s.get("value") for s in settings if isinstance(s, dict)}
             except Exception as exc:
                 logger.debug("Plex prefs probe failed for {!r}: {}", self.name, exc)
@@ -1280,6 +1241,7 @@ class PlexServer(MediaServer):
             for lib in auditable:
                 section_key = str(lib.get("key") or "")
                 section_name = str(lib.get("name") or section_key or "library")
+                escaped_name = html.escape(section_name)
                 extracting = lib.get("state") == "extracting"
                 vendor_checks.append(
                     {
@@ -1304,12 +1266,11 @@ class PlexServer(MediaServer):
                                 "confirm": {
                                     "kind": "button",
                                     "phrase": "",
-                                    # PLAIN TEXT — the frontend renders this via
-                                    # textContent (servers.js:_openConfirmModal),
-                                    # so HTML tags would appear as literal markup.
+                                    # The frontend renders this body with innerHTML,
+                                    # so server-supplied names must be escaped.
                                     "body": (
                                         f"Stops Plex generating its own BIF previews on "
-                                        f"{section_name}. Recommended when this app owns "
+                                        f"{escaped_name}. Recommended when this app owns "
                                         "preview generation. Non-destructive — existing "
                                         "bundles stay on disk."
                                     ),
@@ -1325,7 +1286,7 @@ class PlexServer(MediaServer):
                                     "phrase": "",
                                     "body": (
                                         f"Re-enables Plex's own BIF generation on "
-                                        f"{section_name}. Plex will generate its own "
+                                        f"{escaped_name}. Plex will generate its own "
                                         "previews in parallel to this app — whichever "
                                         "writes last wins, so app-published previews may "
                                         "get overwritten."
@@ -2404,9 +2365,12 @@ class PlexServer(MediaServer):
             plex.query(url, method=plex._session.put)
         except Exception as exc:
             logger.warning(
-                "Could not turn on the marker settings of Plex library {} on {!r}: {}", library_id, self.name, exc
+                "Could not turn on the marker settings of Plex library {} on {!r}: {}",
+                library_id,
+                self.name,
+                redact_secrets(str(exc)),
             )
-            return str(exc)
+            return redact_secrets(str(exc))
         logger.info("Turned on {} for Plex library {} on {!r}", ", ".join(names), library_id, self.name)
         return None
 
@@ -2435,14 +2399,14 @@ class PlexServer(MediaServer):
             plex = self._connect()
             plex.query(f"/:/prefs?{urlencode(prefs)}", method=plex._session.put)
         except Exception as exc:
-            logger.warning("Could not set Plex's own marker detection to Never on {!r}: {}", self.name, exc)
-            return str(exc)
+            error = redact_secrets(str(exc))
+            logger.warning("Could not set Plex's own marker detection to Never on {!r}: {}", self.name, error)
+            return error
         logger.info("Set {} to never on {!r}", ", ".join(prefs), self.name)
         return None
 
     def set_loudness_analysis_never(self) -> str | None:
         """Set Plex's server-wide loudness analysis to Never (``PUT /:/prefs``); None on success, else why not."""
-        from ..utils import redact_secrets
         from .loudness_readiness import PLEX_LOUDNESS_PREF
 
         try:

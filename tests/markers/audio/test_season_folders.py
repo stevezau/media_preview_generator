@@ -1,8 +1,7 @@
-"""A season kept on several disks of one library (spec §5.3): the season group is the same show's season folders under
+"""A season kept on several disks of one library: the season group is the same show's season folders under
 every folder of each enabled server's library that holds the file. The same show is told by the ids its folder name
-carries ({tvdb-…}), or, with none in common, by its name. sflix's TV library spans four disks and 8,058 of its seasons
-are split across them; Lioness S02E08, alone on one disk, matched nothing until its folders were merged (with them:
-63.3-122.7 s, which all 7 other episodes agree with, as IntroDB does)."""
+carries ({tvdb-…}), or, with none in common, by its name. A TV library spanning several disks splits many seasons across them; an episode alone on one disk matched
+nothing until the folders were merged."""
 
 from __future__ import annotations
 
@@ -15,14 +14,12 @@ import numpy as np
 import pytest
 
 from media_preview_generator.markers.audio import POINT_S, season
-from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
-from media_preview_generator.markers.models import FileIdentity, MarkerType, Source
+from media_preview_generator.markers.models import FileIdentity, Source
 from media_preview_generator.markers.pipeline import DetectorUnavailableError
-from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import Library, ServerType
-from tests.markers.audio.test_season import DUR, INTRO, N_POINTS, SEASON_RAW, _Audio, _spec
+from tests.markers.audio.helpers import DUR, INTRO, N_POINTS, SEASON_RAW, Audio, season_spec
 from tests.markers.fakes import FakeRegistry, ready_publisher, server_config
-from tests.markers.test_pipeline import _ctx, _run
+from tests.markers.pipeline_helpers import _ctx, _run
 
 SHOW = "Lioness (2023) {tvdb-1}"
 OFFSETS = {e: at for e, at in zip(range(1, 9), (510, 300, 720, 95, 610, 410, 880, 160), strict=True)}
@@ -41,13 +38,6 @@ def _episodes(root, season_no: int, *episodes: int, show: str = SHOW, season_fol
         path.write_bytes(b"x" * (100 + e))
         paths.append(str(path))
     return paths
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
 
 
 @pytest.fixture
@@ -261,15 +251,6 @@ class TestSeasonFolders:
 
 
 class TestSeasonGroupAcrossDisks:
-    def test_the_group_and_its_size_take_every_disks_episodes_sorted(self, disks):
-        (e8,) = _episodes(disks[0], 2, 8)
-        others = _episodes(disks[1], 2, 1, 2, 3)
-        configs = [_library(str(disks[0]), str(disks[1]))]
-        videos = season.season_videos(e8, configs)
-        assert season.season_group(e8, videos) == season.SeasonGroup(os.path.dirname(e8), tuple(sorted([e8, *others])))
-        assert season.season_size(e8, videos) == 4
-        assert season.groups_holding(e8, videos) == tuple(sorted(others))
-
     def test_the_previous_season_is_read_from_every_disk_by_episode_number(self, disks):
         (s2e1,) = _episodes(disks[0], 2, 1)
         near = _episodes(disks[0], 1, 3, 6)
@@ -302,12 +283,12 @@ class TestSeasonAudioAcrossDisks:
         (e8,) = _episodes(disks[0], 2, 8)
         others = _episodes(disks[1], 2, *range(1, 8))
         registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
-        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
+        ctx = _ctx(store, registry, detectors=(season_spec(),), settings_raw=SEASON_RAW)
         return e8, others, ctx
 
     def test_the_episode_alone_on_its_disk_matches_the_other_disks_episodes(self, lioness, store):
         e8, others, ctx = lioness
-        with _Audio(points=_points) as audio:
+        with Audio(points=_points) as audio:
             _run(ctx, e8, {"plex-1": ready_publisher()}, stage="process")
         assert sorted(audio.computed) == sorted([e8, *others])
         (cand,) = [c for c in store.get_evidence(store.get_file(e8).id) if c.source is Source.SEASON_AUDIO]
@@ -319,70 +300,15 @@ class TestSeasonAudioAcrossDisks:
 
     def test_an_episode_on_the_other_disk_counts_the_lone_one_too(self, lioness, store):
         e8, others, ctx = lioness
-        with _Audio(points=_points):
+        with Audio(points=_points):
             _run(ctx, others[0], {"plex-1": ready_publisher()}, stage="process")
         (cand,) = [c for c in store.get_evidence(store.get_file(others[0]).id) if c.source is Source.SEASON_AUDIO]
         assert cand.origin == "7/7"
         assert store.get_file(e8) is not None and store.get_fingerprint(store.get_file(e8).id, "intro") is not None
 
-    def test_an_answer_made_before_the_other_disks_episode_arrived_is_asked_again(self, disks, store):
-        others = _episodes(disks[1], 2, *range(1, 8))
-        registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
-        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
-        with _Audio(points=_points):
-            _run(ctx, others[0], {"plex-1": ready_publisher()}, stage="process")
-            assert ctx.take_followups() == []
-            (e8,) = _episodes(disks[0], 2, 8)
-            _run(ctx, e8, {"plex-1": ready_publisher()}, stage="process")
-        assert ctx.take_followups() == [others[0]]
-
-    def test_a_run_asks_again_for_a_sibling_on_the_other_disk_but_not_for_the_previous_season(self, disks, store):
-        (e8,) = _episodes(disks[0], 2, 8)
-        (e1,) = _episodes(disks[1], 2, 1)
-        (s1e1,) = _episodes(disks[1], 1, 1)
-        registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
-        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
-        recs = {}
-        for path in (e8, e1, s1e1):
-            st = os.stat(path)
-            recs[path] = store.upsert_file(
-                FileIdentity(path, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
-            )
-            store.set_detector_run(recs[path].id, Source.SEASON_AUDIO, "older")
-            undecided = TypeDecision(MarkerType.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "sources disagree")
-            store.save_decisions(recs[path].id, {MarkerType.INTRO: undecided}, settings_fingerprint="x")
-        configs = registry.configs()
-        videos = season.season_videos(e8, configs)
-        group = season.season_group(e8, videos)
-        assert group.episodes == tuple(sorted([e8, e1]))
-
-        season._request_redecide(
-            ctx,
-            recs[e8],
-            {e1: recs[e1], s1e1: recs[s1e1]},
-            "newer",
-            matched={},
-            group=group,
-            videos=videos,
-            configs=configs,
-        )
-
-        assert ctx.take_followups() == [e1]
-
-    def test_the_stored_signature_names_every_disks_episodes(self, lioness, store):
-        e8, others, ctx = lioness
-        with _Audio(points=_points):
-            _run(ctx, e8, {"plex-1": ready_publisher()}, stage="process")
-            answer = store.get_detector_run(store.get_file(e8).id, Source.SEASON_AUDIO)
-            group = season.SeasonGroup(os.path.dirname(e8), tuple(sorted([e8, *others])))
-            assert answer == season._signature(ctx, season._signature_paths(e8, group, ctx.registry.configs()))
-            assert season.season_audio_answer_outdated(ctx, e8) is False
-            os.utime(others[3], ns=(1, 1))  # a sibling on the other disk changed
-            assert season.season_audio_answer_outdated(ctx, e8) is True
-
     def test_compared_counts_a_fingerprinted_episode_on_the_other_disk(self, lioness, store):
         e8, others, ctx = lioness
-        with _Audio(points=_points):
+        with Audio(points=_points):
             _run(ctx, others[0], {"plex-1": ready_publisher()}, stage="process")
         rec = store.upsert_file(
             FileIdentity(e8, *(lambda st: (st.st_size, st.st_mtime_ns))(os.stat(e8))),
@@ -391,33 +317,6 @@ class TestSeasonAudioAcrossDisks:
             is_movie=False,
         )
         assert season.season_audio_compared(rec, ctx) is True
-
-
-class TestLibrariesOnDifferentDisks:
-    def test_runs_on_every_disk_agree_on_the_season_and_ask_nothing_again(self, disks, store, tmp_path):
-        # Plex holds disks 1 and 2, Jellyfin disks 1 and 3: each episode's run must build the same group, or each run's
-        # signatures of its siblings differ from their stored answers and it asks for them again, every run.
-        third = tmp_path / "media" / "disk3" / "TV Shows"
-        paths = [*_episodes(disks[0], 2, 1, 2, 3), *_episodes(disks[1], 2, 4, 5), *_episodes(third, 2, 6, 7, 8)]
-        registry = FakeRegistry(
-            {
-                "plex-1": _library(str(disks[0]), str(disks[1])),
-                "jf-1": _library(str(disks[0]), str(third), sid="jf-1", stype=ServerType.JELLYFIN),
-            }
-        )
-        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
-        publishers = {"plex-1": ready_publisher(), "jf-1": ready_publisher()}
-        with _Audio(points=_points):
-            for path in paths:
-                _run(ctx, path, publishers, stage="process")
-            ctx.take_followups()
-            for path in (paths[3], paths[5]):  # one on each disk only one library holds
-                _run(ctx, path, publishers, stage="process")
-                assert ctx.take_followups() == []
-        origins = {
-            c.origin for p in paths for c in store.get_evidence(store.get_file(p).id) if c.source is Source.SEASON_AUDIO
-        }
-        assert origins == {"7/7"}
 
 
 def _record(store, path: str):
@@ -432,8 +331,8 @@ class TestUnreadableDisk:
         (e8,) = _episodes(disks[0], 2, 8)
         _episodes(disks[1], 2, *range(1, 8))
         registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
-        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
-        with _Audio(points=_points):
+        ctx = _ctx(store, registry, detectors=(season_spec(),), settings_raw=SEASON_RAW)
+        with Audio(points=_points):
             _run(ctx, e8, {"plex-1": ready_publisher()}, stage="process")
             rec = store.get_file(e8)
             answer = store.get_detector_run(rec.id, Source.SEASON_AUDIO)
@@ -454,8 +353,6 @@ class TestUnreadableDisk:
                 broken.setattr(season.os, "scandir", stale(real_scandir))
                 assert season.season_audio_due(rec, ctx) is False
                 assert season.season_audio_needs_worker(rec, ctx) is False
-                assert season.season_audio_followups(rec, ctx) == []
-                assert season.season_audio_answer_outdated(ctx, e8) is False
                 assert season.season_audio_compared(rec, ctx) is False
                 with pytest.raises(DetectorUnavailableError, match="can't be read") as unreadable:
                     season.detect_season_audio(rec, ctx=ctx)
@@ -469,7 +366,7 @@ class TestUnreadableDisk:
         (e8,) = _episodes(disks[0], 2, 8)
         _episodes(disks[1], 2, *range(1, 8))
         registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
-        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
+        ctx = _ctx(store, registry, detectors=(season_spec(),), settings_raw=SEASON_RAW)
         rec = _record(store, e8)
         if stored is not None:
             store.set_intro_chapter_limit(rec.id, stored)
@@ -481,13 +378,13 @@ class TestUnreadableDisk:
             return real_listdir(folder)
 
         monkeypatch.setattr(season.os, "listdir", stale)
-        assert season.season_intro_chapter_limits(ctx, e8) == (stored, {})
+        assert season.season_intro_chapter_limit(ctx, e8) == stored
 
     def test_the_wait_is_logged_once_however_often_it_is_asked(self, disks, store, monkeypatch, loguru_caplog):
         (e8,) = _episodes(disks[0], 2, 8)
         _episodes(disks[1], 2, *range(1, 8))
         registry = FakeRegistry({"plex-1": _library(str(disks[0]), str(disks[1]))})
-        ctx = _ctx(store, registry, detectors=(_spec(),), settings_raw=SEASON_RAW)
+        ctx = _ctx(store, registry, detectors=(season_spec(),), settings_raw=SEASON_RAW)
         rec = _record(store, e8)
         real_listdir = os.listdir
 

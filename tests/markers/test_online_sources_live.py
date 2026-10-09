@@ -38,8 +38,7 @@ def test_rick_and_morty_s01e01_has_an_intro_near_2m07(client_cls, tmp_path, monk
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))  # usage persistence goes to a throwaway markers.db
     spy = _HeaderSpySession()
     result = client_cls(session=spy).lookup(RM, duration_ms=1_321_472, priority=1)
-    print(f"\n{client_cls.__name__}: {spy.seen} -> {result}")
-    assert len(spy.seen) == 1
-    assert result.status == "ok", result.detail
+    assert len(spy.seen) == 1, spy.seen
+    assert result.status == "ok", (client_cls.__name__, spy.seen, result)
     intro = next(c for c in result.candidates if c.type is MarkerType.INTRO)
     assert 120_000 <= intro.start_ms <= 135_000 and 150_000 <= intro.end_ms <= 165_000

@@ -173,7 +173,6 @@ html[data-bs-theme="dark"] .settings-page .settings-header { background: var(--p
 .sr-control > .input-group-sm, .sr-control > .input-group { margin: 0; }
 .sr-control-pair .form-select { max-width: 160px; }
 .setting-row-wide { grid-column: 1 / -1; margin: 0.25rem 0 0; }
-.lead-note { margin: 0.75rem 0 0.5rem; font-size: 0.8125rem; color: var(--muted); }
 .settings-page .alert { border-radius: var(--radius-ctl); }
 
 /* Controls */
@@ -289,7 +288,6 @@ html[data-bs-theme="dark"] .settings-page .settings-header { background: var(--p
 }
 .wg-ico { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; background: var(--inset); color: var(--muted); font-size: 1.25rem; }
 #workerGroupSettings .worker-group-description strong.wg-name { margin: 0; font-size: 1rem; font-weight: 600; line-height: 1.3; }
-.wg-hw { font-size: 0.75rem; color: var(--faint); overflow-wrap: anywhere; }
 .wg-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.625rem; margin-top: 0.375rem; font-size: 0.8125rem; color: var(--muted); }
 .wg-meta .cap { width: 22px; height: 22px; font-size: 0.75rem; border-radius: var(--radius-xs); }
 .wg-meta .caps { gap: 3px; }
@@ -317,22 +315,6 @@ html[data-bs-theme="dark"] .settings-page .settings-header { background: var(--p
 .ed-head h4 { margin: 0; font-size: 0.9375rem; font-weight: 600; }
 .ed-head .bi-pencil { color: var(--faint); }
 .ed-name { color: var(--faint); font-weight: 500; font-size: 0.8125rem; overflow-wrap: anywhere; }
-.job-fieldset { padding: 0.75rem 0; border-top: 1px solid var(--line); }
-.job-fieldset legend { float: none; width: 100%; margin-bottom: 0.5rem; font-size: 0.9375rem; }
-.job-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.5rem; }
-.job-tile { position: relative; display: flex; align-items: center; gap: 0.5rem; min-width: 0; padding: 0.625rem; border: 1px solid var(--line); border-radius: 10px; background: var(--inset); color: var(--faint); font-weight: 600; cursor: pointer; }
-.job-tile input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
-.job-tile .cap { opacity: 1; background: var(--inset); color: var(--faint); }
-.job-tile:has(input:checked) { color: var(--bs-body-color); }
-.job-tile.previews:has(input:checked) { border-color: var(--t-previews); }
-.job-tile.intro:has(input:checked) { border-color: var(--t-intro); }
-.job-tile.loud:has(input:checked) { border-color: var(--t-loud); }
-.job-tile:has(input:checked) .cap.previews { background: var(--t-previews-soft); color: var(--t-previews); }
-.job-tile:has(input:checked) .cap.intro { background: var(--t-intro-soft); color: var(--t-intro); }
-.job-tile:has(input:checked) .cap.loud { background: var(--t-loud-soft); color: var(--t-loud); }
-.job-tile:has(input:focus-visible) { outline: 2px solid var(--accent); }
-.job-tile.is-disabled { opacity: 0.45; cursor: not-allowed; }
-.job-tile.is-disabled input { cursor: not-allowed; }
 #workerGroupWindows[hidden] { display: none !important; }
 .week-window { margin: 0.625rem 0 0; padding: 0.75rem; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); min-width: 0; }
 .week-window-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.5rem; }
@@ -521,7 +503,7 @@ html[data-bs-theme="dark"] .settings-page .settings-header { background: var(--p
 @media (max-width: 767.98px) {
     .setting-row { grid-template-columns: minmax(0, 1fr); }
     .sr-control { justify-content: flex-start; }
-    .job-tiles, .detect-strip { grid-template-columns: minmax(0, 1fr); }
+    .detect-strip { grid-template-columns: minmax(0, 1fr); }
     .markers-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #workerGroupSettings .worker-group-row { grid-template-columns: 40px minmax(0, 1fr); }
     #workerGroupSettings .worker-group-actions { grid-column: 1 / -1; justify-content: space-between; }

@@ -22,14 +22,10 @@ A file with no worker (everything decided on the checking thread) opens with its
 "Reading … on the GPU/CPU…" line when it starts and its result as its own line when it finishes; a fallback, a retry
 or an error is logged live too, with the reason.
 
-Every file gets the same lines, whatever it did: an unchanged file, a Season job's unchanged episode, a decide-again
-job's unchanged file and a weekly online re-check's file with nothing new all log every source's check too -- a
-source's own answer this job didn't ask for again shows the stored answer with "saved <date>" it was last stored
-(``_saved_note``), and a source not read or not asked always says why. A Season job (and a TheIntroDB recheck)
-additionally counts its episodes into one line per season after every episode's lines (``season_line``), a job
-deciding files again after the update into one line (``decide_again_line``), the weekly online re-check into one
-line (``online_recheck_line``); every job starts with ``start_line`` and ends with a totals line (``totals_line``),
-after every file's lines and summary line.
+Every file gets the same lines, whatever it did: an unchanged file logs every source's check too -- a source's own
+answer this job didn't ask for again shows the stored answer with "saved <date>" it was last stored (``_saved_note``),
+and a source not read or not asked always says why. Every job starts with ``start_line`` and ends with a totals line
+(``totals_line``), after every file's lines and summary line.
 """
 
 from __future__ import annotations
@@ -122,7 +118,6 @@ ASKED_NOW = "asked now"
 # "asked now".
 DROPPED_NOW = "dropped now"
 _SEP = " · "
-_DOT = " · "
 # The decision reason of a type a chapter decides alone (``decide._chapter_decision``).
 _CHAPTER_RULE = "chapters"
 # Release tags and ids in a folder or file name ("{tvdb-275274}", "[imdbid-tt0944947]", "[1080p]").
@@ -141,10 +136,6 @@ _SEPARATOR_RUN_RE = re.compile(r"\s*-(?:\s*-)+\s*")
 _YEAR_RE = re.compile(r"\(((?:19|20)\d\d)\)")
 # A worker's display name without its device ("GPU Worker 2 (Intel UHD 770)" → "GPU Worker 2").
 _DEVICE_RE = re.compile(r"\s*\(([^()]*)\)$")
-# How a job that logs one line per season names itself there: a Season job, or the job that checks files TheIntroDB's
-# used-up daily budget refused again after the reset.
-SEASON_RECHECK_LABEL = "Season re-check"
-BUDGET_RECHECK_LABEL = "TheIntroDB recheck"
 # A marker carried over from a replaced file names no source (``carry_over.CARRIED_OVER``; web/static/js/app.js too).
 CARRIED_OVER_LABEL = "the file it replaced"
 
@@ -256,17 +247,6 @@ def write_line(text: str, level: str = "INFO") -> None:
     logger.log(level, "{}", text)
 
 
-def write_lines(lines: Iterable[str], level: str = "INFO") -> None:
-    """Log each of several lines as its own record, in order.
-
-    Args:
-        lines: The lines, in order.
-        level: Their level.
-    """
-    for line in lines:
-        write_line(line, level)
-
-
 def titled(title: str, text: str) -> str:
     """A line after a file's first, named so it can be told apart from another file's or worker's line interleaved
     with it in the log.
@@ -278,7 +258,7 @@ def titled(title: str, text: str) -> str:
     Returns:
         E.g. ``Accused S04E05 · Checking chapters… none``.
     """
-    return f"{title}{_DOT}{text}"
+    return f"{title}{_SEP}{text}"
 
 
 def clock(ms: int) -> str:
@@ -1117,88 +1097,8 @@ def start_line(job_id: str, files: int, trigger: str) -> str:
     return f"Intro & Credits job {job_id[:8]} started: {_files(files)}" + (f", {trigger}" if trigger else "")
 
 
-@dataclass(frozen=True)
-class SeasonEpisode:
-    """One episode a Season job checked: its short name and whether its decisions changed."""
-
-    episode: str
-    changed: bool
-
-
-def _joined(names: list[str]) -> str:
-    return "/".join(names)
-
-
-def season_line(season: str, episodes: list[SeasonEpisode], label: str = SEASON_RECHECK_LABEL) -> str:
-    """A Season job's one line for one season.
-
-    Args:
-        season: The season's name (``season_of``).
-        episodes: The episodes of that season the job checked.
-        label: What the job is (``SEASON_RECHECK_LABEL``, or ``BUDGET_RECHECK_LABEL`` for a TheIntroDB recheck).
-
-    Returns:
-        E.g. ``Season re-check, Rick and Morty (2013) S01 (3 episodes): E02 changed (logged above); no change for
-        E01/E03``.
-    """
-    ordered = sorted(episodes, key=lambda e: e.episode)
-    changed = [e.episode for e in ordered if e.changed]
-    same = [e for e in ordered if not e.changed]
-    parts = []
-    if changed:
-        parts.append(f"{_joined(changed)} changed (logged above)")
-    if same:
-        parts.append("no change" if not changed else f"no change for {_joined([e.episode for e in same])}")
-    count = len(ordered)
-    return f"{label}, {season} ({count} episode{'' if count == 1 else 's'}): {'; '.join(parts)}"
-
-
 def _files(count: int) -> str:
     return f"{count} file" if count == 1 else f"{count} files"
-
-
-def decide_again_line(files: Iterable[tuple[bool, bool]]) -> str:
-    """The one line of the job deciding files again after the upgrade that removed "Publish when",
-    for the files whose decisions didn't change; the ones that did were logged file by file.
-
-    Args:
-        files: Per file it ran: whether its decisions changed, and whether it still has no marker at all.
-
-    Returns:
-        E.g. ``Decided again after the update (3 files): 2 changed (logged above); 1 unchanged, still nothing found``.
-    """
-    results = list(files)
-    changed = sum(1 for was_changed, _ in results if was_changed)
-    same = len(results) - changed
-    undecided = sum(1 for was_changed, is_undecided in results if not was_changed and is_undecided)
-    parts = [f"{changed} changed (logged above)"] if changed else []
-    if same:
-        text = f"{same} unchanged"
-        if undecided:
-            text += ", still nothing found" if undecided == same else f", {undecided} still nothing found"
-        parts.append(text)
-    return f"Decided again after the update ({_files(len(results))}): {'; '.join(parts) or 'nothing to decide'}"
-
-
-def online_recheck_line(files: Iterable[tuple[bool, bool]]) -> str:
-    """The one line of the weekly job asking the online databases again about files they had no entry for; the files
-    newly found or whose decisions changed were logged file by file.
-
-    Args:
-        files: Per file it ran: whether an online database it asked now has an entry for it, and whether its decisions
-            changed.
-
-    Returns:
-        E.g. ``Weekly online re-check (5 files): 2 newly found online, 3 unchanged``.
-    """
-    results = list(files)
-    found = sum(1 for newly_found, _ in results if newly_found)
-    changed = sum(1 for newly_found, was_changed in results if was_changed and not newly_found)
-    parts = [f"{found} newly found online"]
-    if changed:
-        parts.append(f"{changed} changed otherwise")
-    parts.append(f"{len(results) - found - changed} unchanged")
-    return f"Weekly online re-check ({_files(len(results))}): {', '.join(parts)}"
 
 
 # File outcomes the totals line names only when some file had them, in this order.

@@ -417,7 +417,7 @@ def test_synthetic_frames_are_deterministic_and_mixed():
 @pytest.mark.parametrize(
     "argv",
     [
-        ["extract", "--out", "/data_16tb2/bench"],
+        ["extract", "--out", "/data/bench"],
         ["counts", "--impl", "vendored", "--model", "m.onnx", "--frames", "f.npy", "--out", "/data/counts.json"],
     ],
 )

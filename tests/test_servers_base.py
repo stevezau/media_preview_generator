@@ -1,4 +1,4 @@
-"""Tests for the MediaServer / OutputAdapter abstractions (Phase 1 scaffold).
+"""Tests for the MediaServer / OutputAdapter abstractions.
 
 These tests pin the dataclass shapes and ABC contract so that future
 refactors which break the interface fail loudly. Concrete vendor
@@ -7,7 +7,6 @@ implementations are added in later phases and tested separately.
 
 import dataclasses
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -159,13 +158,6 @@ class TestMediaServerABC:
         assert s.id == "fake-id"
         assert s.name == "Fake"
         assert s.type is ServerType.PLEX
-        assert s.test_connection().ok
-        libs = s.list_libraries()
-        assert len(libs) == 1 and libs[0].name == "Movies"
-        assert list(s.list_items("1"))[0].id == "42"
-        assert s.resolve_item_to_remote_path("42") == "/m/foo.mkv"
-        assert s.resolve_item_to_remote_path("nope") is None
-        s.trigger_refresh(item_id=None, remote_path="/m/foo.mkv")  # no-op
 
     def test_get_external_ids_default_is_none(self):
         # Unsupported by default — vendors override; a server with no
@@ -225,21 +217,6 @@ class TestSearchItemsDefault:
         assert len(s.search_items("matrix")) == 1
 
 
-class _FakeAdapter(OutputAdapter):
-    @property
-    def name(self) -> str:
-        return "fake"
-
-    def needs_server_metadata(self) -> bool:
-        return False
-
-    def compute_output_paths(self, bundle: BifBundle, server: MediaServer, item_id: str | None) -> list[Path]:
-        return [Path(bundle.canonical_path).with_suffix(".bif")]
-
-    def publish(self, bundle: BifBundle, output_paths: list[Path]) -> None:
-        return None
-
-
 class TestOutputAdapterABC:
     def test_cannot_instantiate_without_implementing_abstract_methods(self):
         with pytest.raises(TypeError):
@@ -262,24 +239,8 @@ class TestOutputAdapterABC:
         assert b.width == 320
         assert b.height == 180
         assert b.frame_count == 540
-        # Defaults for vendor-pre-fetched metadata and the display-name hint.
-        assert b.prefetched_bundle_metadata == ()
+        # Default for the display-name hint.
         assert b.server_display_name is None
-
-    def test_concrete_adapter_works(self, tmp_path):
-        adapter = _FakeAdapter()
-        bundle = BifBundle(
-            canonical_path="/m/foo.mkv",
-            frame_dir=tmp_path,
-            bif_path=None,
-            frame_interval=10,
-            width=320,
-            height=180,
-            frame_count=10,
-        )
-        paths = adapter.compute_output_paths(bundle, _FakeServer(), item_id=None)
-        assert paths == [Path("/m/foo.bif")]
-        assert not adapter.needs_server_metadata()
 
 
 class TestLibraryNotYetIndexedError:

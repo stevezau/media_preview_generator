@@ -76,29 +76,18 @@ def _reset_logging_state():
 class TestLoggingConfig:
     """Test logging configuration."""
 
+    @pytest.mark.parametrize("level", ["INFO", "DEBUG"])
     @patch("media_preview_generator.logging_config.os.makedirs")
     @patch("media_preview_generator.logging_config.logger")
-    def test_setup_logging_default(self, mock_logger, mock_makedirs):
-        """Default level: stderr handler at INFO + JSONL app.log handler."""
-        setup_logging()
+    def test_setup_logging_level_reaches_the_stderr_handler(self, mock_logger, mock_makedirs, level):
+        """The level goes to the stderr handler; the app.log handler keeps rotation/retention at any level."""
+        setup_logging(level)
 
         mock_logger.remove.assert_called_once()
-        # Expect stderr + app.log handlers (2 add calls minimum).
+        # stderr + app.log handlers.
         assert mock_logger.add.call_count == 2
         stderr_call = mock_logger.add.call_args_list[0]
-        assert stderr_call.kwargs.get("level") == "INFO"
-
-    @patch("media_preview_generator.logging_config.os.makedirs")
-    @patch("media_preview_generator.logging_config.logger")
-    def test_setup_logging_debug(self, mock_logger, mock_makedirs):
-        """DEBUG level propagates to the stderr handler config."""
-        setup_logging("DEBUG")
-
-        mock_logger.remove.assert_called_once()
-        assert mock_logger.add.call_count == 2
-        stderr_call = mock_logger.add.call_args_list[0]
-        assert stderr_call.kwargs.get("level") == "DEBUG"
-        # The app.log handler must keep rotation/retention even at DEBUG.
+        assert stderr_call.kwargs.get("level") == level
         app_log_call = mock_logger.add.call_args_list[1]
         assert app_log_call.kwargs.get("rotation") == "10 MB"
         assert app_log_call.kwargs.get("retention") == 5
@@ -111,7 +100,7 @@ class TestLoggingConfig:
         Strengthened: prove the sink actually routes to ``console.print``
         instead of just trusting that the level + handler-count checks
         imply correct wiring. Production wraps the console in a
-        ``lambda msg: console.print(msg, end="")`` (logging_config.py:181) —
+        ``lambda msg: console.print(msg, end="")`` —
         invoke the bound sink and verify console.print was called.
         """
         mock_console = MagicMock()
@@ -131,6 +120,22 @@ class TestLoggingConfig:
         assert callable(sink), f"first add() arg must be a callable sink, got {type(sink).__name__}"
         sink("test log message\n")
         mock_console.print.assert_called_once_with("test log message\n", end="")
+
+    def test_console_does_not_parse_brackets_as_markup(self):
+        """A log line with ``[/dev/dri]`` reaches the console intact instead of raising MarkupError."""
+        from io import StringIO
+
+        from rich.console import Console
+
+        console = Console(file=StringIO(), force_terminal=False, width=200)
+        mock_logger = MagicMock()
+        with patch("media_preview_generator.logging_config.logger", mock_logger):
+            setup_logging("INFO", console=console)
+        sink = mock_logger.add.call_args_list[0].args[0]
+
+        sink("opened [/dev/dri] and [in#0 @ 0x1]\n")
+
+        assert "opened [/dev/dri] and [in#0 @ 0x1]" in console.file.getvalue()
 
     @patch("media_preview_generator.logging_config.os.makedirs")
     @patch("media_preview_generator.logging_config.logger")
@@ -246,22 +251,6 @@ class TestLoggingConfig:
         assert "Traceback" in app_log and '"msg": "fetch failed"' in app_log and "api_key=****" in app_log
         if console_kind != "json":  # the JSON line carries the exception's repr, not its traceback
             assert "Traceback" in console_text and "api_key=****" in console_text
-
-    def test_setup_logging_creates_error_log(self, tmp_path):
-        """Test that setup_logging creates the error log file on disk."""
-        from loguru import logger
-
-        with patch.dict(os.environ, {"CONFIG_DIR": str(tmp_path)}):
-            # Reset logger state
-            logger.remove()
-            setup_logging()
-
-        # Log directory should have been created
-        log_dir = str(tmp_path / "logs")
-        assert os.path.isdir(log_dir)
-
-        # Clean up handlers we added
-        logger.remove()
 
 
 class TestStdlibLogging:

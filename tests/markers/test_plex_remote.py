@@ -1,10 +1,11 @@
-"""The Plex marker agent's wire protocol and the app's side of it (plan phase 4 Task 10).
+"""The Plex marker agent's wire protocol and the app's side of it.
 
 The agent's own side lives in ``tests/test_plex_marker_agent.py``, including the two containers' round trip.
 """
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,6 +43,10 @@ URL = "http://plex-host.lan:9494"
 INTRO = Marker(T.INTRO, 11_000, 37_000, ("chapters",))
 CREDITS = Marker(T.CREDITS, 1_299_000, 1_320_000, ("chapters", "user"), locked=True)
 PART = _Part(1, 1, "/plexmedia/tv/S01E01.mkv", '{"pv:intros":"x","url":"y"}', None)
+
+
+def _deadline(seconds: float = 8.0) -> float:
+    return time.monotonic() + seconds
 
 
 class FakeResponse:
@@ -295,12 +300,6 @@ class TestVersionSkew:
         report = remote.file_checks(deadline=_deadline())
         assert report.state is Capability.AGENT_UNAVAILABLE
         assert report.details["agent"]["state"] == "incompatible"
-
-
-def _deadline(seconds: float = 8.0) -> float:
-    import time
-
-    return time.monotonic() + seconds
 
 
 class TestFailuresLookLikeTodays:
@@ -702,7 +701,7 @@ class TestTheAgentMustBeNextToThisPlex:
 
 
 class TestARefusalNamesTheContainerItIsAbout:
-    """Spec §6.3: with an agent the path, the filesystem check and the lock proof are the AGENT's.
+    """With an agent the path, the filesystem check and the lock proof are the AGENT's.
 
     ``LocalPlexDb.file_checks`` runs on whichever side holds the database but words its refusals from this app's
     side, so through an agent they told the user to move the app — the one thing the agent exists to avoid.

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from media_preview_generator.markers import job_runner, missing, pipeline
+from media_preview_generator.markers import missing, pipeline
 from media_preview_generator.markers.audio import fingerprint as fpmod
 from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.locks import FILE_RUN_LOCKS
@@ -83,13 +83,6 @@ def _known(store: MarkerStore, path: str, status: DecisionStatus | str = Decisio
 
 
 @pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "config" / "markers.db"))
-    yield s
-    s.close()
-
-
-@pytest.fixture
 def library(tmp_path, store):
     """A TV library mapped from Plex's /data/tv to <tmp>/mnt/tv: one show kept, one Sonarr deleted whole; every
     file still stored under the old Needs review status, as an install from before 2026-10-02 is."""
@@ -157,7 +150,6 @@ class TestSweep:
         assert missing.sweep_missing_files(store, library.configs) == 4
 
         assert _marked(store, [library.kept, *library.deleted]) == [False, True, True, True, True]
-        assert store.files_with_legacy_review_decisions() == [library.kept]
         assert MISSING_4 in loguru_caplog.text
         for path, rec in before.items():  # the rows, their decisions and the user's lock all stay
             assert store.get_file(path).id == rec.id and store.get_decisions(rec.id)
@@ -224,7 +216,7 @@ class TestSweep:
 
     @pytest.mark.parametrize("dangling", ["file", "series-folder"])
     def test_a_symlink_whose_remote_target_dropped_is_not_missing(self, store, tmp_path, dangling):
-        # Reviewer's repro: a Real-Debrid/zurg-style library of symlinks into an rclone mount; the rclone mount drops.
+        # A Real-Debrid/zurg-style library of symlinks into an rclone mount; the rclone mount drops.
         remote = tmp_path / "rclone" / "__all__"
         lib = tmp_path / "mnt" / "tv"
         (lib / "Other Show").mkdir(parents=True)
@@ -263,7 +255,6 @@ class TestSweep:
         assert missing.sweep_missing_files(store, library.configs) == 0
 
         assert _marked(store, library.deleted) == [False, True, True, True]
-        assert store.files_with_legacy_review_decisions() == sorted([library.kept, library.deleted[0]])
 
     def test_a_symlink_back_at_a_missing_files_path_clears_it(self, store, library, tmp_path):
         # Whatever is at the path, a dangling link included, isn't missing (a remote mount behind it may come back).
@@ -353,13 +344,12 @@ class TestAJobFindsTheFileMissing:
     def test_an_in_place_upgrade_gap_is_marked_then_cleared_when_the_file_lands_with_its_locks(
         self, store, library, monkeypatch
     ):
-        # Reviewer's repro: Sonarr or Tdarr remove the old file and move the new one in under the same name.
+        # Sonarr or Tdarr remove the old file and move the new one in under the same name.
         path = library.deleted[0]
         rec = store.get_file(path)
         os.remove(path)  # the gap
         ctx, out = self._run(store, library.configs, path)
         assert out.outcome_key == FileOutcome.FILE_NOT_FOUND.value and _marked(store, [path]) == [True]
-        assert library.deleted[0] not in store.files_with_legacy_review_decisions()
         with open(path, "wb") as fh:
             fh.write(b"y" * 20)  # the upgrade lands
         monkeypatch.setattr(pipeline, "probe_media", MagicMock(side_effect=ProbeError("still being written")))
@@ -368,7 +358,6 @@ class TestAJobFindsTheFileMissing:
 
         assert _marked(store, [path]) == [False]
         assert store.get_locked(rec.id) == {MarkerType.CREDITS: LOCK}
-        assert path in store.files_with_legacy_review_decisions()
 
     def test_the_same_identity_stored_again_clears_the_mark(self, store, library):
         rec = store.get_file(library.kept)
@@ -390,21 +379,9 @@ class TestAJobFindsTheFileMissing:
         assert store.get_locked(new.id) == {MarkerType.CREDITS: LOCK}
 
 
-class TestDecideAgain:
-    def test_the_list_skips_and_marks_a_series_deleted_since(self, store, library, loguru_caplog):
-        _delete_series(library)
-        items = job_runner._items_to_decide_again(store, library.configs)
-        assert [item.canonical_path for item in items] == [library.kept]
-        assert all(_marked(store, library.deleted))
-        assert MISSING_4 in loguru_caplog.text
-
-    def test_without_the_servers_configs_nothing_is_marked(self, store, library):
-        _delete_series(library)
-        assert len(job_runner._items_to_decide_again(store)) == 5
-        assert not any(_marked(store, library.deleted))
-
+class TestAFileStoredAgainWhileChecked:
     def test_a_file_stored_again_while_it_was_checked_is_not_marked(self, store, library, monkeypatch):
-        # Reviewer's repro: the row is read before the (up to 60 s) check; an upgrade landing meanwhile wins.
+        # The row is read before the (up to 60 s) check; an upgrade landing meanwhile wins.
         path = library.deleted[0]
         os.remove(path)
         real = missing._missing
@@ -461,7 +438,7 @@ class TestStore:
         assert store.mark_missing(rec) is False
         assert store.get_file(library.kept).missing_since is None
 
-    def test_clear_missing(self, store, library):
+    def test_clear_missing_says_whether_a_mark_was_cleared(self, store, library):
         rec = store.get_file(library.kept)
         assert store.clear_missing(rec.id) is False
         store.mark_missing(rec)
@@ -469,18 +446,22 @@ class TestStore:
 
     def test_what_lists_files_to_work_on_skips_marked_files(self, store, library):
         rec = store.get_file(library.deleted[0])
-        store.set_publish_state(rec.id, "plex-1", item_id="7", markers=None, status="waiting",
-                                message="Waiting for this item's other versions to agree on: intro")  # fmt: skip
+        store.set_publish_state(
+            rec.id,
+            "plex-1",
+            item_id="7",
+            markers=None,
+            status="waiting",
+            message="Waiting for this item's other versions to agree on: intro",
+        )
         store.set_publish_state(rec.id, "plex-2", item_id="8", markers=None, status="failed", message="x")
         season = os.path.dirname(library.deleted[0])
-        assert library.deleted[0] in store.files_with_legacy_review_decisions()
         assert store.files_waiting_for_other_versions() == [library.deleted[0]]
         assert store.files_with_undelivered_locks(["plex-2"]) == [(library.deleted[0], "plex-2")]
         assert [r.canonical_path for r in store.files_in_season(season)] == library.deleted[:2]
 
         store.mark_missing(rec)
 
-        assert library.deleted[0] not in store.files_with_legacy_review_decisions()
         assert store.files_waiting_for_other_versions() == []
         assert store.files_with_undelivered_locks(["plex-2"]) == []
         assert [r.canonical_path for r in store.files_in_season(season)] == library.deleted[1:2]

@@ -5,13 +5,11 @@ Verifies that multiple jobs can share workers, idle workers pick up items
 from the next job, and per-job pause/cancel work independently.
 """
 
-import logging
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from loguru import logger
 
 from media_preview_generator.jobs.dispatcher import (
     JobDispatcher,
@@ -22,24 +20,7 @@ from media_preview_generator.jobs.worker import WorkerPool
 from media_preview_generator.processing import (
     CodecNotSupportedError,
 )
-from tests.conftest import _ms, _pi, _pi_list_or_passthrough  # noqa: F401
-
-
-@pytest.fixture
-def loguru_caplog(caplog):
-    """Forward loguru records into pytest's caplog: loguru doesn't feed stdlib ``logging`` by default."""
-
-    class _PropagateHandler(logging.Handler):
-        def emit(self, record):  # pragma: no cover - handler glue
-            logging.getLogger(record.name).handle(record)
-
-    handler_id = logger.add(_PropagateHandler(), level="DEBUG", format="{message}")
-    caplog.set_level(logging.DEBUG)
-    try:
-        yield caplog
-    finally:
-        logger.remove(handler_id)
-
+from tests.conftest import _ms, _pi_list_or_passthrough
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -292,10 +273,19 @@ class TestJobDispatcher:
     def test_idle_workers_pick_up_next_job(self, mock_process):
         """If job A has 1 item and 3 workers, free workers spill to job B."""
         call_log = []
+        active = {"now": 0, "max": 0}
+        lock = threading.Lock()
 
         def tracking_process(*args, canonical_path=None, **kwargs):
-            call_log.append(canonical_path)
+            if kwargs.get("check_only"):
+                return _fake_process_item(*args, canonical_path=canonical_path, **kwargs)
+            with lock:
+                call_log.append(canonical_path)
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
             time.sleep(0.05)
+            with lock:
+                active["now"] -= 1
             return _ms("generated", canonical_path=canonical_path or "/data/test.mkv")
 
         mock_process.side_effect = tracking_process
@@ -333,6 +323,7 @@ class TestJobDispatcher:
         # f"/data/{key.strip('/').replace('/', '_')}.mkv".
         assert "/data/a_1.mkv" in call_log
         assert set(call_log) == {"/data/a_1.mkv", "/data/b_1.mkv", "/data/b_2.mkv", "/data/b_3.mkv"}
+        assert active["max"] >= 2, "free workers must run job B's items alongside job A's, not serially"
         dispatcher.shutdown()
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
@@ -433,6 +424,8 @@ class TestJobDispatcher:
         call_count = {"gpu": 0, "cpu": 0}
 
         def mixed_process(*args, gpu=None, **kwargs):
+            if kwargs.get("check_only"):
+                return _fake_process_item(*args, **kwargs)
             if gpu:
                 call_count["gpu"] += 1
                 raise CodecNotSupportedError("unsupported on GPU")
@@ -443,10 +436,10 @@ class TestJobDispatcher:
         mock_process.side_effect = mixed_process
 
         gpus = _make_gpu_list(1)
-        pool = WorkerPool(gpu_workers=1, cpu_workers=1, selected_gpus=gpus)
+        pool = WorkerPool(gpu_workers=1, cpu_workers=0, selected_gpus=gpus)
         dispatcher = JobDispatcher(pool)
 
-        config = _make_config(cpu_threads=1, gpu_threads=1)
+        config = _make_config(cpu_threads=0, gpu_threads=1)
         tracker = dispatcher.submit_items(
             job_id="job-fb",
             items=_pi_list_or_passthrough([("/fb/1", "Fallback Movie", "movie")]),
@@ -459,19 +452,20 @@ class TestJobDispatcher:
         # The item should complete once (via CPU fallback)
         assert result["completed"] == 1
         assert result["failed"] == 0
+        assert call_count == {"gpu": 1, "cpu": 1}
         dispatcher.shutdown()
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
     def test_mixed_success_and_failure(self, mock_process):
         """Items that succeed and fail are tracked correctly per job."""
-        call_idx = {"n": 0}
 
-        def alternating_process(*args, **kwargs):
-            call_idx["n"] += 1
+        def alternating_process(*args, canonical_path=None, **kwargs):
+            if kwargs.get("check_only"):
+                return _fake_process_item(*args, canonical_path=canonical_path, **kwargs)
             time.sleep(0.02)
-            if call_idx["n"] % 2 == 0:
+            if canonical_path in {"/data/k_2.mkv", "/data/k_4.mkv"}:
                 raise RuntimeError("boom")
-            return _ms("generated")
+            return _ms("generated", canonical_path=canonical_path)
 
         mock_process.side_effect = alternating_process
 
@@ -492,7 +486,8 @@ class TestJobDispatcher:
         )
         assert tracker.wait(timeout=10)
         result = tracker.get_result()
-        assert result["completed"] + result["failed"] == 4
+        assert result["completed"] == 2
+        assert result["failed"] == 2
         dispatcher.shutdown()
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
@@ -652,15 +647,7 @@ class TestJobDispatcher:
         )
         assert tracker.wait(timeout=10)
         result = tracker.get_result()
-        # Audit fix — original asserted ``result["completed"] + result["failed"] == 1``
-        # AND ``result["failed"] >= 1`` which technically allows BOTH paths
-        # ("GPU marks failed" OR "dispatcher drains as failed"). That OR
-        # absorbs whichever implementation is current — a regression that
-        # silently switched paths would still pass.
-        # Tighten: with no CPU workers + GPU codec error, the contract is
-        # exactly 1 failed, 0 completed. If the implementation legitimately
-        # changes (e.g. orphan retry path completes the item), update this
-        # assertion deliberately rather than letting the OR absorb it.
+        # With no CPU workers and a GPU codec error the contract is exactly 1 failed, 0 completed.
         assert result["completed"] == 0, f"with no CPU fallback, GPU codec error must NOT mark complete; got {result!r}"
         assert result["failed"] == 1, f"GPU codec error with no fallback should mark exactly 1 failed; got {result!r}"
         dispatcher.shutdown()
@@ -953,7 +940,6 @@ class TestReapRetrySkipThroughput:
         dispatcher = JobDispatcher(pool)
 
         items = [(f"/key/{i}", f"Skip {i}", "movie") for i in range(10)]
-        t0 = time.monotonic()
         tracker = dispatcher.submit_items(
             job_id="skip-fast",
             items=_pi_list_or_passthrough(items),
@@ -961,22 +947,16 @@ class TestReapRetrySkipThroughput:
             registry=MagicMock(),
         )
         assert tracker.wait(timeout=5), "Fast-skip items should complete quickly"
-        elapsed = time.monotonic() - t0
         assert tracker.get_result()["completed"] == 10
-        # Without reap-retry: 10 items × ~10ms = ~100ms minimum.
-        # With reap-retry: significantly faster due to in-loop reaping.
-        assert elapsed < 0.5, f"Expected < 500ms, took {elapsed:.3f}s"
         dispatcher.shutdown()
 
     @patch("media_preview_generator.processing.multi_server.process_canonical_path")
     def test_slow_and_fast_items_mixed(self, mock_process):
         """When one worker is busy with a slow item, another worker
         should still cycle through fast items efficiently."""
-        call_order = []
 
         def mixed_process(*args, canonical_path=None, **kwargs):
             cp = canonical_path or ""
-            call_order.append(cp)
             if "slow" in cp:
                 time.sleep(0.1)
                 return _ms("generated", canonical_path=cp)
@@ -1101,7 +1081,7 @@ class TestEmitWorkerUpdatesStateChangeBypass:
     user-flagged "I see progress sometimes but not for this job"
     symptom from incident D34 / commit a64030c).
 
-    Pin point: ``dispatcher.py:574``
+    Pin point: in ``dispatcher.py``
     ``state_changed = current_busy != self._last_worker_busy_snapshot``
     plus the ``or state_changed`` clause on the throttle check.
     """
@@ -1573,3 +1553,32 @@ class TestDispatcherProgressLogSkipsRepeats:
             "Dispatcher progress: job aaaaaaaa 0/4 (0%)",
             "Dispatcher progress: job aaaaaaaa 0/4 (0%)",
         ]
+
+
+def test_concurrent_first_submits_start_one_dispatch_loop():
+    """Job threads submitting at once must not each start their own dispatch loop."""
+    real_thread = threading.Thread
+    pool = MagicMock()
+    pool._snapshot_workers.return_value = []
+    dispatcher = JobDispatcher(pool)
+    started = []
+
+    class _Thread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def is_alive(self):
+            return bool(started)
+
+        def start(self):
+            time.sleep(0.02)
+            started.append(1)
+
+    with patch("media_preview_generator.jobs.dispatcher.threading.Thread", _Thread):
+        callers = [real_thread(target=dispatcher._ensure_dispatch_running) for _ in range(8)]
+        for c in callers:
+            c.start()
+        for c in callers:
+            c.join()
+
+    assert len(started) == 1

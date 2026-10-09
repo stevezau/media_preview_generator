@@ -73,10 +73,11 @@ class TestJellyfinTrickplayRegistrationContract:
     the plugin accepts.
     """
 
-    def test_plugin_call_uses_adapter_width_and_interval(self, jellyfin_under_test):
-        # Use a fake item_id; plugin returns 404 (no such item) but
-        # the cassette captures the URL shape.
+    def test_plugin_call_uses_adapter_width_and_interval(self, jellyfin_under_test, vcr):
+        # Fake item_id: the plugin answers 404, then the refresh falls back. The cassette's first
+        # request carries width/intervalMs/saveWithMedia, so replaying it proves the query shape.
         jellyfin_under_test._trigger_item_refresh("MPG_FAKE_ITEM_ID_99999")
+        assert vcr.all_played
 
 
 class TestJellyfinConnectionContract:
@@ -119,11 +120,10 @@ class TestJellyfinTriggerPathRefreshContract:
     the only safety net.
     """
 
-    def test_path_refresh_posts_library_media_updated(self, jellyfin_under_test):
+    def test_path_refresh_posts_library_media_updated(self, jellyfin_under_test, vcr):
         jellyfin_under_test._trigger_path_refresh(_HIT_PATH)
-        # No return value to assert on — the cassette interaction IS
-        # the assertion. A future regression that changes the URL or
-        # body shape gets a cassette miss on replay.
+        # The method swallows request errors, so a cassette miss would not raise: check it was replayed.
+        assert vcr.all_played
 
 
 @pytest.fixture

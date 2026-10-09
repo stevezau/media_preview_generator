@@ -147,7 +147,7 @@ class TestHwaccelFunctionality:
         assert result is True
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg", f"expected ffmpeg as argv[0], got {cmd[0]!r}"
+        assert cmd[0].endswith("ffmpeg"), f"expected the job FFmpeg binary as argv[0], got {cmd[0]!r}"
         assert "-hwaccel" in cmd, f"-hwaccel missing from cmd: {cmd!r}"
         assert cmd[cmd.index("-hwaccel") + 1] == "cuda", (
             f"-hwaccel must be followed by 'cuda'; got {cmd[cmd.index('-hwaccel') + 1]!r}"
@@ -170,7 +170,7 @@ class TestHwaccelFunctionality:
         assert result is False
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg"
+        assert cmd[0].endswith("ffmpeg")
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "cuda"
 
     @patch("subprocess.run")
@@ -185,7 +185,7 @@ class TestHwaccelFunctionality:
         assert result is False
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg"
+        assert cmd[0].endswith("ffmpeg")
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "cuda"
 
     @patch("subprocess.run")
@@ -197,7 +197,7 @@ class TestHwaccelFunctionality:
         assert result is False
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg"
+        assert cmd[0].endswith("ffmpeg")
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "cuda"
 
     @patch("os.access")
@@ -218,7 +218,7 @@ class TestHwaccelFunctionality:
         assert result is True
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg"
+        assert cmd[0].endswith("ffmpeg")
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "vaapi"
         assert "-vaapi_device" in cmd, f"VAAPI cmd missing -vaapi_device: {cmd!r}"
         assert cmd[cmd.index("-vaapi_device") + 1] == "/dev/dri/renderD128", (
@@ -264,7 +264,7 @@ class TestHwaccelFunctionality:
         assert result is False
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg"
+        assert cmd[0].endswith("ffmpeg")
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "vaapi"
         assert "-vaapi_device" in cmd
         assert cmd[cmd.index("-vaapi_device") + 1] == "/dev/dri/renderD128"
@@ -288,7 +288,7 @@ class TestHwaccelFunctionality:
         assert result is False
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg"
+        assert cmd[0].endswith("ffmpeg")
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "d3d11va"
         # D3D11VA needs to download frames from GPU mem; the SUT injects
         # -hwaccel_output_format d3d11 to keep that pipeline stable.
@@ -340,7 +340,7 @@ class TestHwaccelFunctionality:
         assert result is False
 
         cmd = mock_run.call_args.args[0]
-        assert cmd[0] == "ffmpeg"
+        assert cmd[0].endswith("ffmpeg")
         assert "-hwaccel" in cmd and cmd[cmd.index("-hwaccel") + 1] == "vaapi"
         assert "-vaapi_device" in cmd
         assert cmd[cmd.index("-vaapi_device") + 1] == "/dev/dri/renderD128"
@@ -709,7 +709,7 @@ class TestLogSystemInfo:
         emit literal labels from a format string.
 
         Earlier versions of this test mocked ``platform.system`` and
-        ``platform.release``, but the SUT (``enumeration.py:526``) calls
+        ``platform.release``, but the SUT (``enumeration.py``) calls
         ``platform.platform()`` and ``platform.python_version()``. The test
         passed solely because the assertion accepted the literal label
         ``"Platform"`` from the SUT's format string, regardless of whether
@@ -792,7 +792,7 @@ class TestParseLspciGPUName:
 
     # ---- positive parse branch (rc=0 + realistic lspci stdout) ----
     #
-    # The SUT at ``enumeration.py:392-396`` splits each line on ":",
+    # The SUT in ``enumeration.py`` splits each line on ":",
     # filters for "VGA" + the vendor token, and returns ``parts[2].strip()``.
     # For a line like ``"01:00.0 VGA compatible controller: Advanced Micro
     # Devices [AMD/ATI] Radeon RX 6800"`` the split yields four parts:
@@ -1192,9 +1192,9 @@ class TestDetectAllGPUsEdgeCases:
 
         gpus = detect_all_gpus()
 
-        # Should detect NVIDIA with both CUDA and NVENC
         nvidia_gpus = [g for g in gpus if g[0] == "NVIDIA"]
-        assert len(nvidia_gpus) >= 1
+        assert len(nvidia_gpus) == 1
+        assert nvidia_gpus[0][2]["acceleration"] == "CUDA"
 
 
 class TestWSL2NoDRMDevices:
@@ -3471,3 +3471,31 @@ class TestHwaccelCudaDeviceIndex:
 
         called_cmd = mock_run.call_args.args[0]
         assert "-hwaccel_device" not in called_cmd
+
+
+class TestVulkanProbeConcurrentFirstCalls:
+    """Workers that hit the DV5 path together must share one probe."""
+
+    def test_concurrent_first_calls_run_the_probe_once(self):
+        import threading
+        import time
+
+        from media_preview_generator.gpu import vulkan_probe
+
+        vulkan_probe._reset_vulkan_device_cache()
+        runs = []
+
+        def slow_probe():
+            runs.append(1)
+            time.sleep(0.05)
+            return "Intel UHD"
+
+        with patch.object(vulkan_probe, "_probe_vulkan_device", side_effect=slow_probe):
+            threads = [threading.Thread(target=vulkan_probe.get_vulkan_device_info) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        vulkan_probe._reset_vulkan_device_cache()
+        assert len(runs) == 1

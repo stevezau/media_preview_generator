@@ -6,17 +6,13 @@
 # Usage:
 #   bash scripts/regen_readme_screenshots.sh
 #
-# Run from the repo root. Uses /home/data/.venv/bin/python (shared venv
-# per project convention); fall back to `python3` if that's missing.
+# Run from the repo root. Uses $PYTHON if set, else `python3`.
 
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-PYTHON=/home/data/.venv/bin/python
-if [[ ! -x "$PYTHON" ]]; then
-    PYTHON=python3
-fi
+PYTHON="${PYTHON:-python3}"
 
 echo "[regen] using $PYTHON"
 echo "[regen] capturing 5 tour screenshots (docs site and README) into docs/images/..."

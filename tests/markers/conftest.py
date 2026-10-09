@@ -1,9 +1,19 @@
 """Shared fixtures for Intro & Credits tests."""
 
 import logging
+import os
 
 import pytest
 from loguru import logger
+
+from media_preview_generator.markers import pipeline
+from media_preview_generator.markers.inspect import clear_capability_cache
+from media_preview_generator.markers.models import FileIdentity
+from media_preview_generator.markers.publishers import plex_db
+from media_preview_generator.markers.publishers.plex_db import LocalPlexDb
+from media_preview_generator.markers.sources.ratelimit import reset_limiters
+from media_preview_generator.markers.store import MarkerStore, get_marker_store, reset_marker_store
+from tests.markers.fakes import EDITOR_DURATION_MS, editor_server
 
 
 @pytest.fixture(autouse=True)
@@ -80,6 +90,113 @@ def api_headers():
 
 
 @pytest.fixture
+def store(tmp_path):
+    s = MarkerStore(str(tmp_path / "markers.db"))
+    yield s
+    s.close()
+
+
+@pytest.fixture
+def sql_log(monkeypatch):
+    """Every statement the Plex publisher runs, with bound values expanded."""
+    log: list[str] = []
+    original = LocalPlexDb._connect
+
+    def connect(self, *, read_only, **kwargs):
+        conn = original(self, read_only=read_only, **kwargs)
+        conn.set_trace_callback(log.append)
+        return conn
+
+    monkeypatch.setattr(LocalPlexDb, "_connect", connect)
+    return log
+
+
+@pytest.fixture
+def plex_holds_the_database(monkeypatch):
+    """Stand in for Plex having its DB open, which every write proves before it opens the file. Not autouse."""
+    monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
+
+
+class _CreatedJob:
+    id = "job-123"
+
+    def __init__(self, kwargs):
+        self.kwargs = kwargs
+
+    def to_dict(self):
+        return {"id": self.id, "kind": "intro_credits", "priority": self.kwargs["priority"]}
+
+
+@pytest.fixture
+def created(monkeypatch):
+    """The keyword arguments of every ``triggers.create_intro_credits_job`` call; no real job is created."""
+    from media_preview_generator.markers import triggers
+
+    calls = []
+    monkeypatch.setattr(triggers, "create_intro_credits_job", lambda **kw: calls.append(kw) or _CreatedJob(kw))
+    return calls
+
+
+@pytest.fixture
+def media(tmp_path):
+    """A ``media/tv/Show/S01E01.mkv`` tree, plus a file outside it."""
+    root = tmp_path.resolve() / "media"
+    (root / "tv" / "Show").mkdir(parents=True)
+    (root / "tv" / "Show" / "S01E01.mkv").write_bytes(b"x" * 100)
+    (tmp_path / "outside.mkv").write_bytes(b"x")
+    return root
+
+
+@pytest.fixture
+def episode(media):
+    return str(media / "tv" / "Show" / "S01E01.mkv")
+
+
+@pytest.fixture
+def servers(app, media):
+    """Plex, Jellyfin and Emby over ``media/tv``, Intro & Credits on for all three."""
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    entries = [
+        editor_server("plex-1", "plex", media),
+        editor_server("jf-1", "jellyfin", media),
+        editor_server("emby-1", "emby", media),
+    ]
+    get_settings_manager().set("media_servers", entries)
+    return entries
+
+
+@pytest.fixture
+def known(app, episode):
+    """The episode, already in the marker store."""
+    st = os.stat(episode)
+    return get_marker_store().upsert_file(
+        FileIdentity(episode, st.st_size, st.st_mtime_ns),
+        duration_ms=EDITOR_DURATION_MS,
+        season_key=None,
+        is_movie=False,
+    )
+
+
+@pytest.fixture
+def published(monkeypatch):
+    """Captures every ``publish_now`` call and answers with the rows a test asks for."""
+
+    class Recorder:
+        def __init__(self):
+            self.calls = []
+            self.rows = []
+
+        def __call__(self, path, **kwargs):
+            self.calls.append({"path": path, **kwargs})
+            return self.rows
+
+    recorder = Recorder()
+    monkeypatch.setattr(pipeline, "publish_now", recorder)
+    return recorder
+
+
+@pytest.fixture
 def loguru_caplog(caplog):
     """Forward loguru records into pytest's caplog so tests can assert on them.
 
@@ -102,26 +219,9 @@ def loguru_caplog(caplog):
 @pytest.fixture(autouse=True)
 def _reset_marker_singletons():
     yield
-    # Each singleton is guarded on its own: earlier tasks land before later ones (e.g. store.py
-    # ships before sources/ratelimit.py), so one missing module must never skip resetting another.
-    try:
-        from media_preview_generator.markers.store import reset_marker_store
-    except ImportError:
-        pass
-    else:
-        reset_marker_store()
-    try:
-        from media_preview_generator.markers.sources.ratelimit import reset_limiters
-    except ImportError:
-        pass
-    else:
-        reset_limiters()
-    try:
-        from media_preview_generator.markers.inspect import clear_capability_cache
-    except ImportError:
-        pass
-    else:
-        clear_capability_cache()
+    reset_marker_store()
+    reset_limiters()
+    clear_capability_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -130,7 +230,6 @@ def _no_text_detection_check(monkeypatch, request):
     tests/markers/credits and patch what they need."""
     if request.node.get_closest_marker("integration"):
         return
-    from media_preview_generator.markers import pipeline
     from media_preview_generator.markers.credits.textdet_helper import TextDetState
 
     monkeypatch.setattr(pipeline, "text_detection_state", lambda: TextDetState.ABSENT)

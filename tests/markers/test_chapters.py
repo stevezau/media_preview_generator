@@ -1,4 +1,4 @@
-"""Tests for media_preview_generator.markers.sources.chapters (spec §5.1)."""
+"""Tests for media_preview_generator.markers.sources.chapters."""
 
 import pytest
 
@@ -182,7 +182,7 @@ def test_generic_intro_and_credits_both_kept():
     ]
 
 
-# --- A chapter's end clamps to the next chapter's start (spec §5.1). ---
+# --- A chapter's end clamps to the next chapter's start. ---
 # Real-library evidence: Desperate Housewives S01E07/E11/E16 "Previously On" chapters overrun into
 # the next chapter (their own end_time is wrong / far too late).
 

@@ -1,8 +1,5 @@
 {# Reusable Add Server modal partial.
-   Included from /servers (the dashboard view) and /setup (wizard step 1
-   when the user picks Emby or Jellyfin). The modal's JS lives in
-   static/js/servers.js — that file's DOMContentLoaded handler guards
-   loadServers() so it no-ops on /setup where there's no server list.
+   Included from /servers only. The modal's JS lives in static/js/servers.js.
 
    The header tile, title, subtitle and the three-step progress rail follow the wizard step (servers.js
    updateAddHeader); they are chrome around the same step panes and ids as before. #}

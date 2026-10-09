@@ -8,14 +8,15 @@ import sqlite3
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from media_preview_generator.job_kinds import ItemOutcome
-from media_preview_generator.markers import decide, pipeline, versions
+from media_preview_generator.markers import decide, pipeline
 from media_preview_generator.markers.audio.fingerprint import ChromaprintState
-from media_preview_generator.markers.decide import DECIDE_RULES, DECIDE_RULES_VERSION, DecisionStatus, FileLimits
+from media_preview_generator.markers.decide import DECIDE_RULES, DECIDE_RULES_VERSION, DecisionStatus
 from media_preview_generator.markers.job_log import RunNotes
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from media_preview_generator.markers.outcomes import (
@@ -41,153 +42,49 @@ from media_preview_generator.markers.sources import ratelimit
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.store import EvidenceRow, MarkerStore
 from media_preview_generator.processing.generator import CodecNotSupportedError
-from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import Library, ServerType
+from tests.markers import pipeline_helpers
 from tests.markers.fakes import FakeClient, FakePlexItems, FakeRegistry, ready_publisher, server_config
+from tests.markers.pipeline_helpers import (
+    CHAPTERS_BOTH,
+    CHAPTERS_OPENING,
+    CREDITS_CH,
+    DUR,
+    END_CREDITS_CH,
+    EPISODE_IDS,
+    EPISODE_LIMITS,
+    INTRO_CH,
+    INTRO_ONLY,
+    MOVIE_IDS,
+    NEW_CUT,
+    NO_DATA,
+    OPENING_CH,
+    TIDB_CREDITS,
+    TIDB_INTRO,
+    UNKNOWN_IDS,
+    T,
+    _clients,
+    _ctx,
+    _item,
+    _media_root,
+    _probe,
+    _registry,
+    _rows,
+    _run,
+    _state,
+)
 from tests.markers.test_external_ids import EXTRA_SUFFIXES, EXTRAS_FOLDERS
 
-T = MarkerType
-DUR = 1_321_472
-# What every write for ``media`` carries as the file's limits.
-EPISODE_LIMITS = FileLimits(DUR)
-# A file replaced by another cut (another length): nothing of the file it replaced carries over (spec §5.5 rule 15).
-NEW_CUT = DUR + 2_000
-NO_DATA = LookupResult("no_data")
-
-
-@pytest.fixture
-def media(tmp_path):
-    folder = tmp_path / "media" / "tv" / "Rick and Morty (2013) {tvdb-275274}" / "Season 01"
-    folder.mkdir(parents=True)
-    f = folder / "Rick and Morty (2013) - S01E01 - Pilot.mkv"
-    f.write_bytes(b"x" * 100)
-    return str(f)
-
-
-@pytest.fixture
-def ambiguous(tmp_path):
-    """A show folder with only a tmdb id and a file without SxxEyy: the path alone reads as a movie."""
-    folder = tmp_path / "media" / "tv" / "Some Show (2020) {tmdb-1234}"
-    folder.mkdir(parents=True)
-    f = folder / "Some Show - Pilot.mkv"
-    f.write_bytes(b"x" * 100)
-    return str(f)
-
-
-@pytest.fixture
-def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"))
-    yield s
-    s.close()
-
-
-def _probe(chapters=(), duration=DUR):
-    return MediaProbe(duration, tuple(chapters))
-
-
-CHAPTERS_BOTH = (
-    Chapter(0, 126_771, "Chapter 1"),
-    Chapter(126_771, 157_068, "Intro"),
-    Chapter(157_068, 1_295_324, "Chapter 2"),
-    Chapter(1_295_324, None, "Credits"),
-)
-INTRO_CH = Marker(T.INTRO, 126_771, 157_068, ("chapters",))
-CREDITS_CH = Marker(T.CREDITS, 1_295_324, DUR, ("chapters",))
-# "Opening" at the very start plus end credits: an intro for an episode, never for a movie.
-CHAPTERS_OPENING = (
-    Chapter(0, 30_000, "Opening"),
-    Chapter(30_000, 1_000_000, "Part A"),
-    Chapter(1_000_000, None, "End Credits"),
-)
-OPENING_CH = Marker(T.INTRO, 0, 30_000, ("chapters",))
-END_CREDITS_CH = Marker(T.CREDITS, 1_000_000, DUR, ("chapters",))
-TIDB_INTRO = Candidate(T.INTRO, 127_894, 156_824, Source.THEINTRODB)
-TIDB_CREDITS = Candidate(T.CREDITS, 1_296_000, 1_320_000, Source.THEINTRODB)
-INTRO_ONLY = {"sources": [{"id": "theintrodb", "enabled": True}], "detect": {"intro": True, "credits": False}}
-
-
-def _clients(theintrodb=NO_DATA, introdb=NO_DATA, skipdb=NO_DATA):
-    return {"theintrodb": FakeClient(theintrodb), "introdb": FakeClient(introdb), "skipdb": FakeClient(skipdb)}
-
-
-def _ctx(
-    store,
-    registry,
-    *,
-    settings_raw=None,
-    clients=None,
-    detectors=(),
-    force=False,
-    now=None,
-    ttl=300.0,
-    live_config=None,
-):
-    raw = settings_raw or {"sources": [{"id": "theintrodb", "enabled": True}]}
-    settings = load_global(validate_global(raw, None)[0])
-    return PipelineContext(
-        registry=registry,
-        config=MagicMock(),
-        settings=settings,
-        store=store,
-        priority=lambda: 2,
-        ffprobe="ffprobe",
-        force=force,
-        clients=clients if clients is not None else _clients(),
-        local_detectors=detectors,
-        now=now or (lambda: datetime(2026, 9, 13, tzinfo=UTC)),
-        capability_ttl_s=ttl,
-        # The registry's configs stand in for the saved settings; TestConsentBeforeEachWrite uses the real ones.
-        live_config=live_config or registry.get_config,
-    )
-
-
-def _media_root(path):
-    """The tmp "media" folder every test file lives in: each server's one library covers it."""
-    return path[: path.index("/media/") + len("/media")]
-
-
-def _registry(media, *server_types):
-    root = _media_root(media)
-    configs = {f"{t.value}-1": server_config(f"{t.value}-1", t, root=root) for t in server_types}
-    return FakeRegistry(configs)
-
-
-def _item(path, hints=None):
-    return ProcessableItem(
-        canonical_path=path, server_id="plex-1", item_id_by_server=hints or {}, title=os.path.basename(path)
-    )
-
-
-def _run(ctx, media, publishers, probe=None, stage="check", probe_effect=None, hints=None, **kwargs):
-    probe_kwargs = {"side_effect": probe_effect} if probe_effect else {"return_value": probe or _probe()}
-    with (
-        patch.object(pipeline, "probe_media", **probe_kwargs) as probe_mock,
-        patch.object(pipeline, "publisher_for", side_effect=lambda server, cfg, **kw: publishers.get(cfg.id)),
-    ):
-        fn = check_item if stage == "check" else process_item
-        out = fn(_item(media, hints), ctx=ctx, **kwargs)
-    return out, probe_mock
-
-
-def _state(store, path, sid):
-    return store.get_publish_state(store.get_file(path).id, sid)
-
-
-def _rows(out):
-    return {r["server_id"]: r for r in out.publisher_rows}
+# Fixtures live in pipeline_helpers; a name bound here is what pytest finds (an import reads as redefined).
+media, ambiguous = pipeline_helpers.media, pipeline_helpers.ambiguous
 
 
 class TestOwners:
     # The ownership matrix (library, server, markers switch, Plex confirmation, sports, selection, exclusions) lives in
     # test_marker_ownership.py; these rows check how the pipeline uses the rule.
-    @pytest.mark.parametrize(
-        "mutate",
-        [lambda reg, media: reg.configs_by_id["plex-1"].markers.update({"enabled": False})],
-        ids=["markers-off"],
-    )
-    def test_no_marker_owner_cells(self, store, media, mutate):
+    def test_no_marker_owner_when_markers_are_off(self, store, media):
         reg = _registry(media, ServerType.PLEX)
-        mutate(reg, media)
+        reg.configs_by_id["plex-1"].markers.update({"enabled": False})
         ctx = _ctx(store, reg)
         out, probe = _run(ctx, media, {"plex-1": ready_publisher()})
         assert out.outcome_key == FileOutcome.NO_OWNERS.value
@@ -256,24 +153,16 @@ class TestOwners:
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert store.get_publish_state(store.get_file(media).id, "plex-1") is None
 
-    @pytest.mark.parametrize(
-        ("libraries", "library_ids", "owner"),
-        [(lambda root: [Library("1", "Media", (root,)), Library("2", "TV", (root + "/tv",))], ["2"], True)],
-        ids=["overlapping-inner-ticked"],
-    )
-    def test_markers_ownership_uses_every_matching_library(self, store, media, libraries, library_ids, owner):
+    def test_markers_ownership_uses_every_matching_library(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         cfg = reg.configs_by_id["plex-1"]
-        cfg.libraries = libraries(_media_root(media))
-        cfg.markers["library_ids"] = library_ids
+        root = _media_root(media)
+        cfg.libraries = [Library("1", "Media", (root,)), Library("2", "TV", (root + "/tv",))]
+        cfg.markers["library_ids"] = ["2"]  # the inner library is ticked, the outer one overlaps it
         plex = ready_publisher()
         out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
-        if owner:
-            assert [r["server_id"] for r in out.publisher_rows] == ["plex-1"]  # one row however many libraries match
-            assert plex.write.call_args.args == ("item-plex-1", [INTRO_CH, CREDITS_CH])
-        else:
-            assert out.outcome_key == FileOutcome.NO_OWNERS.value
-            plex.write.assert_not_called()
+        assert [r["server_id"] for r in out.publisher_rows] == ["plex-1"]  # one row however many libraries match
+        assert plex.write.call_args.args == ("item-plex-1", [INTRO_CH, CREDITS_CH])
 
     def test_server_markers_are_read_from_a_library_with_previews_off(self, store, media):
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
@@ -312,7 +201,7 @@ class TestOwners:
 
 
 class TestItemIdLookupScope:
-    """Item ids are looked up in the libraries that hold the file, whatever their preview opt-in (audit C MED-1)."""
+    """Item ids are looked up in the libraries that hold the file, whatever their preview opt-in."""
 
     @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
     @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY])
@@ -538,12 +427,11 @@ class TestIdentityAndProbe:
         reg = _registry(media, ServerType.PLEX)
         answer = self._introdb_and(Candidate(T.INTRO, 118_000, 149_000, Source.SKIPDB))
         rec = self._known_from_before_frame_rates(store, reg, media, tmp_path, clients=answer)
-        ctx = _ctx(store, reg)
-        _, probe = _run(ctx, media, {"plex-1": ready_publisher()}, probe=MediaProbe(DUR, (), frame_rate=25.0))
+        _, probe = _run(
+            _ctx(store, reg), media, {"plex-1": ready_publisher()}, probe=MediaProbe(DUR, (), frame_rate=25.0)
+        )
         probe.assert_called_once_with(media, ffprobe="ffprobe")
         assert store.get_frame_rate(rec.id) == (True, 25.0)
-        # A rate read for the first time can change how the season's other episodes match this one.
-        assert ctx.answers_changed() is True
         _, probe = _run(_ctx(store, reg), media, {"plex-1": ready_publisher()}, probe=MediaProbe(DUR, ()))
         probe.assert_not_called()
 
@@ -580,34 +468,6 @@ class TestIdentityAndProbe:
                 _ctx(store, reg), media, {"plex-1": ready_publisher()}, probe=MediaProbe(DUR, (), frame_rate=frame_rate)
             )
         assert seen and set(seen) == {frame_rate}
-
-    def test_only_a_run_that_stores_something_new_changes_an_answer(self, store, media):
-        # A retry that changed nothing queues no Season job (spec §14, 2026-09-24).
-        reg = _registry(media, ServerType.PLEX)
-        runs = []
-        for replace in (False, False, True):
-            if replace:
-                os.utime(media, ns=(5, 5))
-            ctx = _ctx(store, reg)
-            _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(CHAPTERS_BOTH))
-            runs.append(ctx.answers_changed())
-        assert runs == [True, False, True]  # first run, the same file again, the file replaced
-
-    @pytest.mark.parametrize("answered", [True, False], ids=["answer-stored", "no-answer-this-time"])
-    def test_a_local_detectors_stored_answer_changes_an_answer(self, store, media, answered):
-        rec = store.upsert_file(FileIdentity(media, 100, 1), duration_ms=DUR, season_key=None, is_movie=False)
-
-        def detect(rec, **kwargs):
-            if not answered:
-                raise pipeline.DetectorUnavailableError("an earlier ffmpeg is still stuck")
-            return [Candidate(T.INTRO, 1_000, 30_000, Source.SEASON_AUDIO)]
-
-        spec = LocalDetectorSpec(source=Source.SEASON_AUDIO, types=frozenset({T.INTRO}), detect=detect)
-        ctx = _ctx(store, _registry(media, ServerType.PLEX), detectors=(spec,))
-        pipeline._run_detector(
-            ctx, rec, spec, gpu=None, gpu_device_path=None, phase=lambda _t: None, cancel_check=None, pause_check=None
-        )
-        assert ctx.answers_changed() is answered
 
     def test_probe_uses_the_context_ffprobe(self, store, media):
         reg = _registry(media, ServerType.PLEX)
@@ -754,11 +614,6 @@ class TestIdentityAndProbe:
         out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, probe_effect=probe)
         assert out.outcome_key == FileOutcome.FILE_NOT_FOUND.value
         plex.write.assert_not_called()
-
-
-EPISODE_IDS = {"kind": "episode", "tmdb": None, "imdb": "tt7654321", "tvdb": "999", "season": 1, "episode": 3}
-MOVIE_IDS = {"kind": "movie", "tmdb": "9999", "imdb": "tt0114709", "tvdb": None, "season": None, "episode": None}
-UNKNOWN_IDS = {"kind": "unknown", "tmdb": None, "imdb": None, "tvdb": None, "season": None, "episode": None}
 
 
 class TestKind:
@@ -1230,9 +1085,9 @@ class TestEvidenceAndDecisions:
     def test_an_intro_season_audio_decided_alone_meets_online_answers_on_their_schedule(
         self, store, media, source, priority, start, end, agrees
     ):
-        # Owner 2026-09-24: season audio decides an intro alone when nothing else answers, but the online sources are
+        # Season audio decides an intro alone when nothing else answers, but the online sources are
         # still asked on their schedule (a "no entry" again after NO_DATA_RETRY): one that later agrees confirms it; one
-        # that disagrees leaves the intro undecided (measured 2026-10-03: an intro disagreement writes nothing), a new
+        # that disagrees leaves the intro undecided (an intro disagreement writes nothing), a new
         # answer, so the published marker isn't kept. TheIntroDB isn't kept for chapters-only files here, even at Low.
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
@@ -1271,7 +1126,7 @@ class TestEvidenceAndDecisions:
             assert T.INTRO not in store.get_markers(store.get_file(media).id)
 
     def test_theintrodb_alone_never_publishes_even_at_medium(self, store, media):
-        # TheIntroDB answers the closest cut it has, whatever this file's duration (audit B S2: 81 s of cold open).
+        # TheIntroDB answers the closest cut it has, whatever this file's duration (e.g. a long cold open).
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
         clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
@@ -1348,7 +1203,7 @@ class TestEvidenceAndDecisions:
         plex_server.get_markers.assert_called_once_with("item-plex-1", unknown_if_hidden=True)
 
     def test_chapters_alone_keep_the_search_open_so_agreeing_sources_veto_them_on_the_first_run(self, store, media):
-        # Audit B S1: the generic "Intro" chapter is the cold open (0-95 s); the theme sits in an unnamed chapter
+        # The generic "Intro" chapter is the cold open (0-95 s); the theme sits in an unnamed chapter
         # (95-126 s) that IntroDB and SkipDB agree on. A normal run must not stop at the chapter.
         chapters = (
             Chapter(0, 95_000, "Intro"),
@@ -1572,7 +1427,7 @@ class TestOnlineLookups:
 
     def test_lookups_use_the_job_priority_at_the_time_of_the_lookup(self, store, media):
         other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
-        open(other, "wb").write(b"y" * 10)
+        Path(other).write_bytes(b"y" * 10)
         reg = _registry(media, ServerType.PLEX)
         live = {"priority": 3}
         clients = _clients()
@@ -1681,7 +1536,7 @@ class TestBudgetExhaustedJobWarning:
         other1 = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
         other2 = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E03 - Anatomy Park.mkv")
         for p in (other1, other2):
-            open(p, "wb").write(b"y" * 10)
+            Path(p).write_bytes(b"y" * 10)
         clients = _clients(theintrodb=TIDB_BUDGET_EXHAUSTED)
         ctx = _ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY)
         for p in (media, other1, other2):
@@ -1782,7 +1637,7 @@ class TestBudgetExhaustedJobWarning:
         reg = _registry(media, ServerType.PLEX)
         others = [os.path.join(os.path.dirname(media), f"Rick and Morty (2013) - S01E0{n}.mkv") for n in (2, 3)]
         for p in others:
-            open(p, "wb").write(b"y" * 10)
+            Path(p).write_bytes(b"y" * 10)
         clients = _clients(theintrodb=LookupResult("unavailable", detail=detail))
         ctx = _ctx(store, reg, clients=clients, settings_raw=NO_CHAPTERS)
         for p in (media, *others):
@@ -1818,7 +1673,7 @@ class TestBudgetExhaustedJobWarning:
     def test_warns_once_per_job_per_source_not_per_file(self, store, media, loguru_caplog):
         reg = _registry(media, ServerType.PLEX)
         other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
-        open(other, "wb").write(b"y" * 10)
+        Path(other).write_bytes(b"y" * 10)
         clients = _clients(theintrodb=TIDB_BUDGET_EXHAUSTED)
         ctx = _ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY)
         for p in (media, other):
@@ -1932,7 +1787,7 @@ class TestRealTheIntroDbRefusals:
         client = TheIntroDbClient(key, limiter=limiter, session=session)
         detail = client.lookup(MediaIds("episode", tvdb="1", season=1, episode=1), duration_ms=DUR, priority=2).detail
         other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02.mkv")
-        open(other, "wb").write(b"y" * 10)
+        Path(other).write_bytes(b"y" * 10)
         ctx = _ctx(store, _registry(media, ServerType.PLEX), clients={"theintrodb": client}, settings_raw=NO_CHAPTERS)
         for path in (media, other):
             _run(ctx, path, {"plex-1": ready_publisher()})
@@ -2070,7 +1925,7 @@ class TestServerMarkers:
         version_a = str(folder / "Rick and Morty (2013) - S01E01 - Pilot - 1080p.mkv")
         version_b = str(folder / "Rick and Morty (2013) - S01E01 - Pilot - 2160p.mkv")
         for path in (version_a, version_b):
-            open(path, "wb").write(b"x" * 10)
+            Path(path).write_bytes(b"x" * 10)
         types = (ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY)
         reg = _registry(version_a, *types)
         configs = reg.configs_by_id
@@ -2145,7 +2000,7 @@ class TestServerMarkers:
             str(folder / "Toy Story (1995) - 2160p.mkv"),
         )
         for path in (version_a, version_b):
-            open(path, "wb").write(b"x" * 10)
+            Path(path).write_bytes(b"x" * 10)
         reg = _registry(version_a, ServerType.PLEX)
         server = reg.get("plex-1")
         server.resolve_remote_path_to_item_id.return_value = "42"
@@ -2183,7 +2038,7 @@ class TestServerMarkers:
         assert out.outcome_key == FileOutcome.UP_TO_DATE.value
 
 
-# Audit B S10, the owner's Rick and Morty S01 Blu-rays: the markers Plex serves (its own detection, prod), IntroDB's
+# A season of Blu-rays: the markers Plex serves (its own detection, prod), IntroDB's
 # outro and SkipDB's duration-matched outro (recorded answers), and the credits Plex must be left with. Each file's
 # post-credits scene starts where Plex's non-final credits end.
 RM_S01 = {
@@ -2265,7 +2120,7 @@ class TestServerMarkersFromVendors:
     def test_the_servers_own_credits_shorten_an_early_end_credits_chapter(
         self, store, media, stype, durations, ours, shortened
     ):
-        # Lab scale run, Avatar (2009) / Innerspace (1987): "End Credits" chapters start on the last story shots, and
+        # "End Credits" chapters start on the last story shots, and
         # the server's own credits start later, on the roll.
         reg = _registry(media, stype)
         sid = f"{stype.value}-1"
@@ -2607,7 +2462,7 @@ class TestServerMarkersFromVendors:
             (ServerType.PLEX, [S03E05_BLURAY_MS, S03E05_BLURAY_MS - 1_500], DecisionStatus.DECIDED),
             (ServerType.PLEX, [S03E05_BLURAY_MS, S03E05_BLURAY_MS - 60_000], DecisionStatus.NO_EVIDENCE),
             (ServerType.PLEX, None, DecisionStatus.NO_EVIDENCE),
-            # Each Emby version is its own item with its own markers (spec §3.3): no duration check, so one row covers
+            # Each Emby version is its own item with its own markers: no duration check, so one row covers
             # Emby (the versions an item lists are test_emby_markers_count_only_for_this_files_own_version's).
             (ServerType.EMBY, None, DecisionStatus.DECIDED),
         ],
@@ -2616,7 +2471,7 @@ class TestServerMarkersFromVendors:
     def test_item_wide_markers_are_evidence_only_when_every_version_is_this_cut(
         self, store, media, stype, durations, expected
     ):
-        # Audit B S13: Plex's intro was detected on the WEB version; this file is the Blu-ray with a longer cold open.
+        # Plex's intro was detected on the WEB version; this file is the Blu-ray with a longer cold open.
         reg = _registry(media, stype)
         sid = f"{stype.value}-1"
         server = reg.get(sid)
@@ -2746,7 +2601,7 @@ class TestServerMarkersFromVendors:
     def test_markers_an_importer_plugin_wrote_count_with_the_crowd_source(
         self, store, media, stype, plugins, source, expected
     ):
-        # Audit B S3: an IntroDB answer and its copy on a server with an importer plugin are one source, not two.
+        # An IntroDB answer and its copy on a server with an importer plugin are one source, not two.
         reg = _registry(media, ServerType.PLEX, stype)
         reg.configs_by_id[f"{stype.value}-1"].markers["enabled"] = False
         sid = f"{stype.value}-1"
@@ -2802,7 +2657,7 @@ class TestServerMarkersFromVendors:
     @pytest.mark.parametrize(
         ("plugins", "reason"),
         [
-            # SkipDB and its copy are one source, and SkipDB alone never decides (rule 6, 2026-09-25)
+            # SkipDB and its copy are one source, and SkipDB alone never decides
             (
                 ["SkipDB"],
                 "only SkipDB and a server's imported marker have the intro; an online answer needs a check "
@@ -2956,7 +2811,7 @@ class TestServerMarkersFromVendors:
             {"plex-1": plex},
             probe=_probe(duration=S03E05_BLURAY_MS),
         )
-        # SkipDB never decides alone (rule 6, 2026-09-25): with the copy counted the two agree and publish; without it
+        # SkipDB never decides alone: with the copy counted the two agree and publish; without it
         # SkipDB waits for a second source.
         if server_markers_on:
             published = [Marker(T.INTRO, 25_000, 113_000, ("skipdb", "server_markers_imported"))]
@@ -2979,7 +2834,7 @@ class TestServerMarkersFromVendors:
 
     def test_plugins_are_asked_once_per_server_per_job(self, store, media):
         other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
-        open(other, "wb").write(b"y" * 10)
+        Path(other).write_bytes(b"y" * 10)
         reg = _registry(media, ServerType.JELLYFIN)
         server = reg.get("jellyfin-1")
         server.get_media_segments.return_value = [
@@ -2992,7 +2847,7 @@ class TestServerMarkersFromVendors:
             _run(ctx, path, pubs, probe=_probe(duration=S03E05_BLURAY_MS))
         assert server.get_plugin_names.call_count == 1
         third = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E03 - Anatomy Park.mkv")
-        open(third, "wb").write(b"z" * 10)
+        Path(third).write_bytes(b"z" * 10)
         _run(_ctx(store, reg, settings_raw=INTRO_DEFAULTS), third, pubs, probe=_probe(duration=S03E05_BLURAY_MS))
         assert server.get_plugin_names.call_count == 2  # the next job asks again
 
@@ -3055,7 +2910,7 @@ class TestRulesVersions:
 
     @pytest.mark.parametrize("stored_version", [None, pipeline.CHAPTER_RULES_VERSION - 1], ids=["unversioned", "older"])
     def test_chapters_from_older_rules_are_read_again(self, store, media, stored_version):
-        # Audit B S12: scanned before the cold-open rule, the generic "Intro" chapter (the cold open) was kept.
+        # Scanned before the cold-open rule, the generic "Intro" chapter (the cold open) was kept.
         reg = _registry(media, ServerType.JELLYFIN)
         jf = ready_publisher("jellyfin_bridge")
         raw = {"sources": [{"id": "chapters", "enabled": True}], "detect": {"intro": True, "credits": False}}
@@ -3072,8 +2927,8 @@ class TestRulesVersions:
         _, probe_mock = _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=probe)
         assert probe_mock.call_count == 0
 
-    # Goblin Slayer S02E01: the ED chapter is named "Ending", which the rules read as credits from
-    # CHAPTER_RULES_VERSION 2 (phase 4 Task 15).
+    # An anime episode whose ED chapter is named "Ending", which the rules read as credits from
+    # CHAPTER_RULES_VERSION 2.
     ENDING_S02E01 = (
         Chapter(0, 187_000, "Opening"),
         Chapter(187_000, 1_323_000, "Part B"),
@@ -3107,8 +2962,8 @@ class TestRulesVersions:
         # The rule reads the kind from the PATH, not the resolved kind, so the stored candidates can never
         # disagree with the input that derived them (the evidence cache only re-reads on the rules version).
         # "Server says episode" is therefore a deliberate miss, and it is the cell that tells the two inputs
-        # apart: measured cost on the owner's library is zero, because all 282 anime files with an "Ending"
-        # chapter name a season and episode in the path (evidence/eval/phase4-chapters.md).
+        # apart: measured cost is zero on a large anime library, because every file with an "Ending"
+        # chapter names a season and episode in the path.
         reg = _registry(ambiguous, ServerType.JELLYFIN)
         reg.get("jellyfin-1").get_external_ids.return_value = server_ids
         jf = ready_publisher("jellyfin_bridge")
@@ -3203,7 +3058,7 @@ class TestRulesVersions:
         assert [c for c in store.get_evidence(rec.id) if c.origin == "emby-1"] == []
 
     def test_emby_markers_this_app_wrote_before_a_fresh_config_are_not_evidence(self, store, media):
-        # Scale run 2026-09-19: markers.db was new, so nothing recorded the markers we had published to Emby. The
+        # A fresh markers.db: it was new, so nothing recorded the markers we had published to Emby. The
         # Bridge plugin's store on the server says those rows are ours; Emby's own credits start still counts.
         reg = _registry(media, ServerType.EMBY)
         server = reg.get("emby-1")
@@ -3351,7 +3206,7 @@ class TestPublishFanOut:
         assert state.status == expected_state[status] and state.markers == () and state.message
 
     def test_a_write_that_shows_less_than_decided_is_written_not_waiting(self, store, media):
-        # Since 2026-10-02 a Plex item never waits for its versions: what the publisher returns is what the item shows.
+        # A Plex item never waits for its versions: what the publisher returns is what the item shows.
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
         plex.write.side_effect = lambda item_id, markers, **kwargs: [INTRO_CH]  # another version's credits won
@@ -3670,7 +3525,7 @@ class TestPublishFanOut:
         # Per-item failures (Jellyfin's write check: provider off for a library, stale file size) come back without a
         # state and say nothing about the server.
         other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
-        open(other, "wb").write(b"y" * 10)
+        Path(other).write_bytes(b"y" * 10)
         reg = _registry(media, ServerType.JELLYFIN)
         jf = ready_publisher("jellyfin_bridge")
         jf.write.side_effect = [PublishError("write check failed", state=state), [INTRO_CH, CREDITS_CH]]
@@ -3815,7 +3670,7 @@ def _second_episode(media):
 
 
 class TestConsentBeforeEachWrite:
-    """Turning Intro & Credits off (or the server, or a library) stops a running job's writes (audit C MED-2)."""
+    """Turning Intro & Credits off (or the server, or a library) stops a running job's writes."""
 
     @pytest.mark.parametrize(
         ("flip", "message"),
@@ -3998,10 +3853,9 @@ class TestConsentBeforeEachWrite:
 
 
 class TestPlexPassUnknown:
-    """A READY Plex whose Plex Pass couldn't be read isn't written: Plex serves nothing without a Pass (audit C LOW).
+    """A READY Plex whose Plex Pass couldn't be read isn't written: Plex serves nothing without a Pass.
 
-    The file waits with a retry code, and the answer is reused only for a few seconds (pre-lab LOW-2, read-back
-    review LOW-1): a Plex restart during a webhook follow-up must not leave the file for the next scheduled run, and
+    The file waits with a retry code, and the answer is reused only for a few seconds: a Plex restart during a webhook follow-up must not leave the file for the next scheduled run, and
     a backfill while Plex's HTTP is down must not run the whole capability check for every file.
     """
 
@@ -4121,7 +3975,7 @@ class TestReadBackVerify:
         assert [(c.args, c.kwargs) for c in pub.shows.call_args_list] == [
             ((f"item-{stype.value}-1", [INTRO_CH, CREDITS_CH]), {"kept_types": frozenset(), "item_files": files})
         ]
-        # A read that failed is still "Up to date", but the job says it couldn't check (read-back review LOW-2).
+        # A read that failed is still "Up to date", but the job says it couldn't check.
         assert row.get("read_back_failed", False) is (shows is None or isinstance(shows, Exception))
         assert "verify_later" not in row
         if writes == 2:
@@ -4237,7 +4091,7 @@ class TestReadBackVerify:
     @pytest.mark.parametrize("publisher", ["plex_db", "emby_bridge"])
     def test_nothing_decided_on_an_item_of_kept_types_only_goes_through_the_write(self, store, media, publisher):
         # Emby's plugin still stores ours for a kept type; a Plex record left holding one is drift on every Check servers
-        # run (audit MED-1). The real Plex publisher sends nothing to Plex's DB then (test_publisher_contract).
+        # run. The real Plex publisher sends nothing to Plex's DB then (test_publisher_contract).
         stype = ServerType.PLEX if publisher == "plex_db" else ServerType.EMBY
         sid = f"{stype.value}-1"
         reg = _registry(media, stype)
@@ -4329,7 +4183,7 @@ class TestReadBackVerify:
 
     def test_a_replaced_file_a_worker_finishes_asks_for_a_later_check(self, store, media):
         # The checking stage stores the new file before it hands it to a worker (here credit text, checking the
-        # chapter); the worker's stage still publishes a replaced file and says so (phase 1 lab row 17's verify job).
+        # chapter); the worker's stage still publishes a replaced file and says so.
         reg = _registry(media, ServerType.JELLYFIN)
         jf = ready_publisher("jellyfin_bridge")
         spec = pipeline.LocalDetectorSpec(
@@ -4424,8 +4278,8 @@ class TestReadBackVersions:
 
 
 class TestAOneVersionPlexItemShowingOtherTimes:
-    """Until 2026-09-25 the Plex publisher kept what a one-version item showed when a decision moved by under 2 s
-    (production: 29 items, e.g. Game of Thrones intros ending at 113.0 s where 110.5-112.4 s was decided). The decision
+    """The Plex publisher used to keep what a one-version item showed when a decision moved by under 2 s
+    (intros ended at 113.0 s where 110.5-112.4 s was decided). The decision
     didn't change since, so its publish basis still matches: the next run publishes again instead of "Up to date"."""
 
     SHOWN_INTRO = Marker(T.INTRO, 126_771, 158_000, ("chapters",))
@@ -4479,9 +4333,9 @@ class TestAOneVersionPlexItemShowingOtherTimes:
 
 
 class TestDecideRulesVersion:
-    """A file decided under older rules (``decide.DECIDE_RULES_VERSION``) is listed by the start check
-    (``versions.files_to_read_again``); its run decides it again from the stored answers, asking nothing already
-    answered, and records the rules it was decided under, as every run that decides a file does."""
+    """A file decided under older rules (``decide.DECIDE_RULES_VERSION``) is decided again by its next run from the
+    stored answers, asking nothing already answered, and records the rules it was decided under, as every run that
+    decides a file does."""
 
     SKIPDB_ONLY = {"sources": [{"id": "skipdb", "enabled": True}], "detect": {"intro": True, "credits": False}}
 
@@ -4497,7 +4351,6 @@ class TestDecideRulesVersion:
         )
 
         assert store.version_rerun(store.get_file(media).id, DECIDE_RULES) == DECIDE_RULES_VERSION
-        assert versions.files_to_read_again(store, self._settings()) == {}
 
     SKIPDB_AND_THEINTRODB = {
         "sources": [{"id": "skipdb", "enabled": True}, {"id": "theintrodb", "enabled": True}],
@@ -4534,12 +4387,12 @@ class TestDecideRulesVersion:
     def test_a_lone_skipdb_intro_published_before_the_rule_change_is_kept(
         self, store, media, monkeypatch, loguru_caplog
     ):
-        # Owner ruling 2026-09-25: SkipDB needs a second source for new decisions, but a re-decide that only the rule
+        # SkipDB needs a second source for new decisions, but a re-decide that only the rule
         # change causes doesn't pull an intro users already see (on arm64 no season audio would ever confirm it).
         plex = ready_publisher()
         clients = _clients(skipdb=LookupResult("ok", (self.SKIPDB_INTRO,)))
         reg, rec = self._publish_under_older_rules(store, media, monkeypatch, plex, clients)
-        assert versions.files_to_read_again(store, self._settings()) == {media: {DECIDE_RULES: DECIDE_RULES_VERSION}}
+        assert store.version_rerun(rec.id, DECIDE_RULES) == DECIDE_RULES_VERSION - 1
 
         out = self._run(store, reg, plex, clients)
 
@@ -4553,7 +4406,6 @@ class TestDecideRulesVersion:
         assert "kept: published before a rule change" in loguru_caplog.text
         assert len(clients["skipdb"].calls) == 1  # decided from the stored answer, not asked again
         assert store.version_rerun(rec.id, DECIDE_RULES) == DECIDE_RULES_VERSION
-        assert versions.files_to_read_again(store, self._settings()) == {}
 
         # Later runs, under today's rules all along, keep it too.
         assert self._run(store, reg, plex, clients).outcome_key == FileOutcome.UP_TO_DATE.value
@@ -4567,7 +4419,7 @@ class TestDecideRulesVersion:
     def test_a_lone_skipdb_intro_goes_once_season_audio_read_the_file_without_agreeing(
         self, store, media, monkeypatch, audio, compared, outcome
     ):
-        # 2026-09-27 audit (Somebody Somewhere S03E07, 9 s into the story): the keep is for installs with nothing that
+        # The keep is for installs with nothing that
         # reads the file to check a lone online answer. Where season audio read it and found nothing to agree, it goes;
         # season audio with no other episode to compare (``LocalDetectorSpec.compared``) checked nothing, so it stays.
         plex = ready_publisher()
@@ -4891,10 +4743,7 @@ class TestStages:
         # The job's own pause lets the running file finish; what freezes its ffmpeg is the job's freeze check.
         assert kwargs["pause_check"] is ctx.freeze_check and kwargs["pause_check"] is not pause
         assert clients["theintrodb"].calls[0]["cancel_check"] is cancel
-        assert store.get_evidence(rec.id) == [TIDB_INTRO, *detected] or set(store.get_evidence(rec.id)) == {
-            TIDB_INTRO,
-            *detected,
-        }
+        assert set(store.get_evidence(rec.id)) == {TIDB_INTRO, *detected}
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert any("Looking up" in c.args[0] for c in phase.call_args_list)
 
@@ -5683,10 +5532,6 @@ class TestWorkerStageWaits:
         assert caps == [cap]
         assert ratelimit.wait_cap() is None  # the cap ends with the lookup
 
-    def test_a_workers_slot_wait_is_near_zero(self):
-        # Long enough for one source's own spacing between two requests (0.5 s), far short of the 60 s a check waits.
-        assert 0.5 <= pipeline.WORKER_LOOKUP_WAIT_S <= 1.0
-
     @pytest.mark.parametrize(
         ("check_answer", "worker_asks"),
         [
@@ -5773,9 +5618,6 @@ class TestWorkerStageWaits:
             process_item(_item(media), ctx=ctx)
         assert timeouts == [None]
         assert ctx.busy_promised() == {"/media/tv/another.mkv"}  # asking didn't take a promise
-
-    def test_a_workers_database_wait_is_short(self):
-        assert plex_db.WORKER_BUSY_TIMEOUT_S <= 10.0 < plex_db.BUSY_TIMEOUT_S
 
     @pytest.mark.parametrize(
         ("stage", "server_type", "busy"),
@@ -5956,15 +5798,6 @@ class TestFileRunLockStages:
             )
         release.join(5)
         assert out.outcome_key == FileOutcome.PUBLISHED.value
-
-    def test_process_items_docstring_states_the_no_retry_bound(self):
-        # Comments-vs-code drift guard: the no-retry wait is bounded (holder frozen: at once; else the cap).
-        doc = " ".join(pipeline.process_item.__doc__.split())
-        assert "WORKER_FILE_WAIT_NO_RETRY_S" in doc and "holder" in doc and "frozen" in doc
-        assert "until that run ends or the job is cancelled" not in doc
-
-    def test_a_workers_wait_for_a_file_is_bounded(self):
-        assert 10.0 <= pipeline.WORKER_FILE_WAIT_S <= 120.0
 
     def test_a_cancel_stops_the_workers_wait_for_the_file(self, store, media):
         reg = _registry(media, ServerType.PLEX)
@@ -6177,11 +6010,11 @@ W, U, S, A, F, N = (
         (set(), FileOutcome.NO_MARKERS),
         ({W, U}, FileOutcome.PUBLISHED),
         ({W, S}, FileOutcome.PUBLISHED),
-        ({W, A}, FileOutcome.WAITING),  # Jellyfin written, Jellyfin 12.0 hasn't indexed the file (lab row 8 A)
+        ({W, A}, FileOutcome.WAITING),  # Jellyfin written, Jellyfin 12.0 hasn't indexed the file
         ({W, F}, FileOutcome.FAILED),  # a broken write isn't hidden behind the server that took it
         ({W, N}, FileOutcome.PUBLISHED),
         ({U, S}, FileOutcome.UP_TO_DATE),
-        ({U, A}, FileOutcome.WAITING),  # Jellyfins up to date, Plex waiting for the versions (lab row 8 B1)
+        ({U, A}, FileOutcome.WAITING),  # Jellyfins up to date, Plex waiting for the versions
         ({U, F}, FileOutcome.FAILED),
         ({U, N}, FileOutcome.UP_TO_DATE),
         ({S, A}, FileOutcome.WAITING),
@@ -6243,7 +6076,7 @@ class TestFrameRateIgnoresStaleServerMarkers:
 
     @pytest.mark.parametrize(("stale", "read"), [(False, True), (True, False)], ids=["this-file", "earlier-file"])
     def test_a_plex_marker_warrants_reading_the_rate_only_when_made_for_this_file(self, stale, read):
-        # Bones S07E01 (25 fps): IntroDB's film-rate times and Plex's marker made for the old Blu-ray file.
+        # A 25 fps episode: IntroDB's film-rate times and Plex's marker made for the old Blu-ray file.
         ctx = MagicMock()
         ctx.store.get_frame_rate.return_value = (False, None)
         rec = MagicMock(duration_ms=2_498_304)

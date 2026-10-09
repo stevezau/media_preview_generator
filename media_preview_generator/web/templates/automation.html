@@ -4,7 +4,6 @@
 
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/automation.css') }}">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/automation_schedules.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -150,15 +149,11 @@
             if (target === 'quiet-hours') { window.location.href = '/settings#section-worker-quiet-hours'; return; }
             var which = target === 'triggers' ? 'triggers' : 'schedules';
             showAutomationTab(which);
-            if (target === 'quiet-hours' && window.history && history.replaceState) {
-                history.replaceState(null, '', window.location.pathname + '#section-schedules-quiet-hours');
-            }
             document.querySelectorAll('[data-automation-mobile-target]').forEach(function (item) {
                 if (item === button) item.setAttribute('aria-current', 'location');
                 else item.removeAttribute('aria-current');
             });
-            var destination = target === 'quiet-hours' ? document.getElementById('section-schedules-quiet-hours') :
-                document.getElementById(target === 'triggers' ? 'section-webhooks-overview' : 'section-schedules-overview');
+            var destination = document.getElementById(target === 'triggers' ? 'section-webhooks-overview' : 'section-schedules-overview');
             if (destination) destination.scrollIntoView({ behavior: 'smooth', block: 'start' });
             var feedback = document.getElementById('automationMobileFeedback');
             if (feedback) feedback.textContent = 'Showing ' + button.textContent.trim();

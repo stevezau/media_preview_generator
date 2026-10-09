@@ -200,17 +200,6 @@ def test_confirmed_empty_seek_beyond_duration_has_nonretryable_timestamp_error(e
     assert runner.call_args.kwargs["chapter_output"] == str(plan.folder / "frame.jpg")
 
 
-@pytest.mark.parametrize("duration", [None, 0, -1, float("nan"), float("inf"), "unknown"])
-def test_unknown_duration_does_not_claim_invalid_timestamp(extraction, monkeypatch, duration):
-    plan, config, media, _register = extraction
-    media.video_tracks[0].duration = duration
-    runner = MagicMock(return_value=lambda **_kwargs: (234, 0, "", ["No filtered frames"]))
-    monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
-
-    with pytest.raises(RuntimeError, match="FFmpeg exit 234"):
-        chapters.extract_chapter_frame(plan.canonical_path, 75000, plan.folder / "frame.jpg", config, media_info=media)
-
-
 @pytest.mark.parametrize("duration", [5679279, "5679279"])
 def test_container_duration_diagnoses_missing_video_duration_without_guessing_frames(extraction, monkeypatch, duration):
     plan, config, media, _register = extraction

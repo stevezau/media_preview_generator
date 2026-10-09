@@ -1,4 +1,4 @@
-"""Jellyfin publisher via the Media Preview Bridge plugin (spec §3.2, §6.3).
+"""Jellyfin publisher via the Media Preview Bridge plugin.
 
 Jellyfin has no API for writing media segments. The Bridge plugin stores what we POST and serves it through its own
 segment provider, so markers survive scans, refreshes and restarts. Each POST replaces everything the plugin stored for

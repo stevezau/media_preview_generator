@@ -8,9 +8,8 @@ synthetic data only.
 
 Every run uses `nice -n 19`, one heavy job at a time on storage. Media files are only read, by ffprobe and ffmpeg.
 Fingerprints are cached under `$MARKERS_EVAL_CACHE` (default `~/.cache/markers_eval`), never under `/data*`. The
-truth files are local-only (git-ignored) in the main checkout's `docs/design/intro-credits/evidence/`; in a git
-worktree, set `MARKERS_EVAL_EVIDENCE` to that folder. Committed summaries hold counts and show names only, never file
-paths. Summaries go to `docs/design/intro-credits/evidence/eval/phase2-harness.md` and, for the credit text rows,
+truth files are local-only (never committed); set `MARKERS_EVAL_EVIDENCE` to the folder that holds them. Committed summaries hold counts and show names only, never file
+paths. Summaries go to `$MARKERS_EVAL_EVIDENCE/eval/phase2-harness.md` and, for the credit text rows,
 `phase3-harness.md` beside it.
 
 ## `reproduce`: the season matcher gate
@@ -34,9 +33,8 @@ The guards' end-picture check decodes the real files, like a worker: `--decode g
 `--gpu-device cuda:0`) or `--decode cpu`. Each share is measured once per run.
 
 ```bash
-cd /home/data/workspace/plex_generate_vid_previews
-nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval reproduce --ffmpeg /usr/bin/ffmpeg \
-  --json docs/design/intro-credits/evidence/eval/phase2_reproduce.json
+nice -n 19 python -m tools.markers_eval reproduce --ffmpeg /usr/bin/ffmpeg \
+  --json $MARKERS_EVAL_EVIDENCE/eval/phase2_reproduce.json
 ```
 
 Exit 0 means the gate passed. `--json` writes the details, which hold file paths, so keep that file local (the
@@ -65,9 +63,8 @@ file that has no intro (an answer there counts as wrong; none counts as `none_ok
 (57 episodes of "Accused: Guilty or Innocent", truth from frame checks) goes in `evidence/eval/accused_truth.json`:
 
 ```bash
-cd /home/data/workspace/plex_generate_vid_previews
-nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval season-truth --ffmpeg /usr/bin/ffmpeg \
-  --truth docs/design/intro-credits/evidence/eval/accused_truth.json --expect 2,0
+nice -n 19 python -m tools.markers_eval season-truth --ffmpeg /usr/bin/ffmpeg \
+  --truth $MARKERS_EVAL_EVIDENCE/eval/accused_truth.json --expect 2,0
 ```
 
 `--expect useful,wrong` makes it exit 1 below that many useful or above that many wrong (Accused: 2 / 0 / 54, as
@@ -76,11 +73,10 @@ measured). `--json`, `--cache`, `--decode` and `--gpu-device` work as for `repro
 ## `report`: our decisions against Plex's own markers, online cases, credits chapter rules
 
 ```bash
-cd /home/data/workspace/plex_generate_vid_previews
-nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval report --ffmpeg /usr/bin/ffmpeg \
-  --json docs/design/intro-credits/evidence/eval/phase2_report_lists.json
-nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval report --ffmpeg /usr/bin/ffmpeg --full-folder \
-  --json docs/design/intro-credits/evidence/eval/phase2_report_full_folder.json
+nice -n 19 python -m tools.markers_eval report --ffmpeg /usr/bin/ffmpeg \
+  --json $MARKERS_EVAL_EVIDENCE/eval/phase2_report_lists.json
+nice -n 19 python -m tools.markers_eval report --ffmpeg /usr/bin/ffmpeg --full-folder \
+  --json $MARKERS_EVAL_EVIDENCE/eval/phase2_report_full_folder.json
 ```
 
 Its season audio answers come from the same season step, end-picture decodes included (`--decode`, `--gpu-device`).
@@ -151,11 +147,11 @@ Chapters come from ffprobe, cached as JSON next to the fingerprints (`ProbeCache
 - A fresh export of the eval's folders, read-only:
 
 ```bash
-/home/data/.venv/bin/python -m tools.markers_eval plex-sql > "$SCRATCH/plex_baseline.sql"
+python -m tools.markers_eval plex-sql > "$SCRATCH/plex_baseline.sql"
 grep -Eic 'insert|update|delete|create|attach|pragma|vacuum|replace' "$SCRATCH/plex_baseline.sql"   # must print 0
 PROD_PLEX_DB="/config/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
 ssh -o BatchMode=yes plex "nice -n 19 sqlite3 -separator '|' 'file:${PROD_PLEX_DB}?mode=ro'" < "$SCRATCH/plex_baseline.sql" \
-  > docs/design/intro-credits/evidence/lab/prod_plex_baseline.txt
+  > $MARKERS_EVAL_EVIDENCE/lab/prod_plex_baseline.txt
 ```
 
 Pass that file as `--plex-baseline`. The `?mode=ro` URI is what keeps the query read-only, so never drop it. A path
@@ -168,7 +164,7 @@ the app's "another cut" rule never drops Plex's markers here.
 
 Runs the app's own credit text detector (`markers/credits/detector.find_credits`, rule J) over the credits truth sets
 and puts what the pipeline would publish with it beside Plex's own credits markers. Results:
-`docs/design/intro-credits/evidence/eval/phase3-harness.md`.
+`$MARKERS_EVAL_EVIDENCE/eval/phase3-harness.md`.
 
 The truth is each file's last credits chapter (3 movies corrected by frame checks, `credits/adjudicated.json`), so
 **chapters are left out of every row**: these files stand for files without usable chapters. The rows mirror the
@@ -213,13 +209,12 @@ A file of any set that is gone from disk (Sonarr or Radarr replaced it) is left 
 `summary["gone"]`, so runs compared with each other must name the same files there.
 
 ```bash
-cd /home/data/workspace/plex_generate_vid_previews
 export MEDIA_PREVIEW_TEXTDET_MODEL="$MARKERS_BENCH_DIR/textdet-model/ch_PP-OCRv4_det_infer.onnx"
-nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --decode gpu --sets 80,205 --online \
+nice -n 19 python -m tools.markers_eval credits-text --decode gpu --sets 80,205 --online \
   --sheets "$HOME/.cache/markers_eval/sheets-phase3" \
-  --json docs/design/intro-credits/evidence/eval/phase3_credits_gpu.json
-nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --decode cpu --sets 80 \
-  --json docs/design/intro-credits/evidence/eval/phase3_credits_cpu.json
+  --json $MARKERS_EVAL_EVIDENCE/eval/phase3_credits_gpu.json
+nice -n 19 python -m tools.markers_eval credits-text --decode cpu --sets 80 \
+  --json $MARKERS_EVAL_EVIDENCE/eval/phase3_credits_cpu.json
 ```
 
 The GPU run reads 285 files plus the online cases' 43 and takes about an hour on storage; the CPU run on the 80 files
@@ -299,7 +294,7 @@ a one-off failure stays until its entry is deleted. Entries are written whole or
   three read.
 
   ```bash
-  nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --decode gpu --sets 80,205 \
+  nice -n 19 python -m tools.markers_eval credits-text --decode gpu --sets 80,205 \
     --sweep rule_j.BAND_TOLERANCE_PX=16,24,32,40,48
   ```
 

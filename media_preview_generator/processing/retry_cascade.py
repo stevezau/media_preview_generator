@@ -1,6 +1,6 @@
 """Retry-cascade predicates for FFmpeg thumbnail jobs.
 
-:func:`generate_images` in :mod:`..media_processing` runs up to four
+:func:`generate_images` in :mod:`.generator` runs up to four
 FFmpeg invocations in sequence when the first attempt produces zero
 thumbnails. The predicates here decide, given the outcome of the last
 FFmpeg pass, whether to retry at the next tier and with what reason
@@ -22,27 +22,10 @@ The tiers (from first to last):
 
 from __future__ import annotations
 
-from enum import Enum
-
 from .hdr_detection import (
     detect_dolby_vision_rpu_error,
     detect_zscale_colorspace_error,
 )
-
-
-class RetryTier(Enum):
-    """Which FFmpeg-retry tier fired for a given item.
-
-    Exposed primarily for logging / telemetry so future callers can
-    aggregate retry reasons per job without reparsing log strings.
-    """
-
-    NONE = "none"
-    SKIP_FRAME = "skip_frame"
-    SW_LIBPLACEBO = "sw_libplacebo"
-    DV_SAFE_FILTER = "dv_safe_filter"
-    CPU_FALLBACK = "cpu_fallback"
-
 
 # ---------------------------------------------------------------------------
 # Tier 3 — DV-safe filter retry
@@ -112,7 +95,7 @@ def classify_cpu_fallback_reason(
 
     The detection predicates are injected (rather than imported) to
     keep this module dependency-free on the private ``_detect_*``
-    helpers in :mod:`..media_processing` — callers pass them in.
+    helpers in :mod:`.generator` — callers pass them in.
 
     Args:
         returncode: FFmpeg exit code.
@@ -140,7 +123,6 @@ def classify_cpu_fallback_reason(
 
 
 __all__ = [
-    "RetryTier",
     "classify_dv_safe_retry_reason",
     "classify_cpu_fallback_reason",
 ]

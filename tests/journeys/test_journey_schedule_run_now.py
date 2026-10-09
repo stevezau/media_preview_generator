@@ -240,8 +240,8 @@ class TestScheduleRunNow:
             f"the timestamp wasn't actually updated to 'now'."
         )
 
-        # next_run still anchored at the original cron firing time — the
-        # APScheduler job wasn't dropped or rescheduled to "never". A
+        # next_run is still set — the APScheduler job wasn't dropped or
+        # rescheduled to "never". A
         # regression that nuked the trigger after run-now would leave
         # next_run=None and the schedule would never auto-fire again.
         next_run_after = schedule_after.get("next_run")

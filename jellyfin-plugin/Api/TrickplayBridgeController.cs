@@ -23,7 +23,7 @@ using SkiaSharp;
 namespace Jellyfin.Plugin.MediaPreviewBridge.Api;
 
 /// <summary>
-/// Single REST endpoint that registers externally-published trickplay
+/// REST endpoints (ping, path resolution, trickplay) that register externally-published trickplay
 /// tiles with Jellyfin's TrickplayInfos store. Saves the publisher
 /// from having to flip <c>ExtractTrickplayImagesDuringLibraryScan</c>
 /// (and racing concurrent library scans) just to make Jellyfin notice
@@ -296,9 +296,7 @@ public class TrickplayBridgeController : ControllerBase
             {
                 return BadRequest(new { error = $"could not decode last sheet {lastSheetPath}" });
             }
-            lastSheetFilled = sheetFiles.Count == 1
-                ? CountFilledTiles(lastSheet, tileWidth, tileHeight, thumbWidth, thumbHeight)
-                : CountFilledTiles(lastSheet, tileWidth, tileHeight, thumbWidth, thumbHeight);
+            lastSheetFilled = CountFilledTiles(lastSheet, tileWidth, tileHeight, thumbWidth, thumbHeight);
         }
         catch (Exception exc)
         {

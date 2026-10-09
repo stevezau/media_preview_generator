@@ -1,4 +1,4 @@
-"""Season intro matcher v3 (spec §5.3): a vectorised port of evidence/detect/fp3.py.
+"""Season intro matcher v3: a vectorised port of the reference matcher in tools/markers_eval/fp3_reference.py.
 
 For every pair of episodes: the 40 best alignment shifts (inverted index, values within ±2), runs of points whose
 fingerprints differ in ≤ 6 bits with gaps ≤ 3.5 s, at least 8 s long, all non-overlapping runs kept (runs over 120 s are dropped per episode). Per episode: cluster
@@ -16,7 +16,6 @@ import numpy as np
 
 from . import POINT_S
 
-MATCHER_VERSION = 3
 MAX_BIT_DIFF = 6
 MAX_GAP_S = 3.5
 MIN_RUN_S = 8.0
@@ -25,9 +24,9 @@ PREFERRED_MIN_S = 15.0
 CLUSTER_TOLERANCE_S = 4.0
 QUORUM = 0.5
 TOP_SHIFTS = 40
-_VALUE_SHIFTS = (-2, -1, 0, 1, 2)
+VALUE_SHIFTS = (-2, -1, 0, 1, 2)
 _MIN_PTS = int(MIN_RUN_S / POINT_S)
-_GAP_PTS = int(MAX_GAP_S / POINT_S)
+GAP_PTS = int(MAX_GAP_S / POINT_S)
 _MATCHES_PER_CHUNK = 1 << 18
 _POPCOUNT8 = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
 
@@ -65,7 +64,7 @@ class IntroCandidate(NamedTuple):
     members: tuple[Hit, ...]
 
 
-def _popcount32(x: np.ndarray) -> np.ndarray:
+def popcount32(x: np.ndarray) -> np.ndarray:
     return _POPCOUNT8[x.view(np.uint8).reshape(-1, 4)].sum(axis=1)
 
 
@@ -83,9 +82,9 @@ def _top_shifts(a: np.ndarray, b: np.ndarray) -> list[int]:
     order = np.argsort(b)
     sorted_b = b[order].astype(np.int64)
     a64 = a.astype(np.int64)
-    lefts = [np.searchsorted(sorted_b, a64 + d, side="left") for d in _VALUE_SHIFTS]
+    lefts = [np.searchsorted(sorted_b, a64 + d, side="left") for d in VALUE_SHIFTS]
     matches = [
-        np.searchsorted(sorted_b, a64 + d, side="right") - left for d, left in zip(_VALUE_SHIFTS, lefts, strict=True)
+        np.searchsorted(sorted_b, a64 + d, side="right") - left for d, left in zip(VALUE_SHIFTS, lefts, strict=True)
     ]
     matches_up_to = np.cumsum(np.sum(matches, axis=0))
     width = len(b) + 1
@@ -96,7 +95,7 @@ def _top_shifts(a: np.ndarray, b: np.ndarray) -> list[int]:
     while lo < len(a):
         before = int(matches_up_to[lo - 1]) if lo else 0
         hi = max(lo + 1, int(np.searchsorted(matches_up_to, before + _MATCHES_PER_CHUNK, side="right")))
-        for d_index in range(len(_VALUE_SHIFTS)):
+        for d_index in range(len(VALUE_SHIFTS)):
             per_i = matches[d_index][lo:hi]
             total = int(per_i.sum())
             if total == 0:
@@ -106,7 +105,7 @@ def _top_shifts(a: np.ndarray, b: np.ndarray) -> list[int]:
             j = order[np.repeat(lefts[d_index][lo:hi], per_i) + within].astype(np.int64)
             slot = j - i + len(a)
             counts += np.bincount(slot, minlength=len(counts))
-            np.minimum.at(first_seen, slot, (i * len(_VALUE_SHIFTS) + d_index) * width + j)
+            np.minimum.at(first_seen, slot, (i * len(VALUE_SHIFTS) + d_index) * width + j)
         lo = hi
     seen = np.flatnonzero(counts)
     ranked = seen[np.lexsort((first_seen[seen], -counts[seen]))]
@@ -131,10 +130,10 @@ def pair_runs(a: np.ndarray, b: np.ndarray) -> list[Run]:
         n = min(len(a) - a0, len(b) - b0)
         if n <= 0:
             continue
-        idx = np.flatnonzero(_popcount32(a[a0 : a0 + n] ^ b[b0 : b0 + n]) <= MAX_BIT_DIFF)
+        idx = np.flatnonzero(popcount32(a[a0 : a0 + n] ^ b[b0 : b0 + n]) <= MAX_BIT_DIFF)
         if len(idx) < 2:
             continue
-        breaks = np.flatnonzero(np.diff(idx) > _GAP_PTS)
+        breaks = np.flatnonzero(np.diff(idx) > GAP_PTS)
         starts = np.concatenate(([idx[0]], idx[breaks + 1]))
         ends = np.concatenate((idx[breaks], [idx[-1]]))
         for x, y in zip(starts.tolist(), ends.tolist(), strict=True):

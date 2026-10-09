@@ -101,7 +101,6 @@ def real_bif_setup(tmp_path_factory):
 def backend_real_app_with_bif(tmp_path_factory, real_bif_setup):
     """Variant of backend_real_app that seeds settings to point at our BIF."""
     import subprocess as sp
-    import sys
 
     overrides, bif_path = real_bif_setup
 
@@ -110,36 +109,19 @@ def backend_real_app_with_bif(tmp_path_factory, real_bif_setup):
     from .conftest import (
         _build_fake_ffmpeg_path,
         _seed_settings_complete,
-        app_boot_payload,
+        _start_app,
         get_free_port,
-        wait_for_port,
     )
 
     _seed_settings_complete(str(config_dir), overrides)
 
     fake_bin = _build_fake_ffmpeg_path(str(config_dir))
     port = get_free_port()
-    env = {
-        **os.environ,
-        "WEB_PORT": str(port),
-        "CONFIG_DIR": str(config_dir),
-        "WEB_AUTH_TOKEN": "e2e-test-token",
-        "PATH": fake_bin + os.pathsep + os.environ.get("PATH", ""),
-    }
-    proc = sp.Popen(
-        [
-            sys.executable,
-            "-c",
-            app_boot_payload(port),
-        ],
-        env=env,
-        stdout=sp.PIPE,
-        stderr=sp.PIPE,
+    proc = _start_app(
+        str(config_dir),
+        port,
+        extra_env={"PATH": fake_bin + os.pathsep + os.environ.get("PATH", "")},
     )
-    if not wait_for_port(port, timeout=20):
-        stdout, stderr = proc.communicate(timeout=5)
-        proc.kill()
-        raise RuntimeError(f"App failed to start: {stderr.decode()[:1000]}")
     try:
         yield (f"http://localhost:{port}", str(config_dir), bif_path)
     finally:
