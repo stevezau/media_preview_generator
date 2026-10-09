@@ -51,6 +51,13 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # BuildKit's image and Docker Hub base images come through Google's Docker Hub mirror: setup-buildx pulls
+          # BuildKit before any login, and anonymous pulls from shared runners hit Docker Hub's rate limit (429).
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
