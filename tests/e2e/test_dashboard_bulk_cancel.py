@@ -20,7 +20,7 @@ def _complete_setup(complete_setup) -> None:
     return complete_setup
 
 
-def test_cancel_selected_cancels_only_ticked_queued_rows(authed_page: Page, app_url: str) -> None:
+def test_cancel_selected_cancels_only_ticked_rows_including_running(authed_page: Page, app_url: str) -> None:
     page = authed_page
     mock_dashboard_defaults(page)
     page.add_init_script(_SOCKET_STUB)
@@ -47,21 +47,20 @@ def test_cancel_selected_cancels_only_ticked_queued_rows(authed_page: Page, app_
     page.goto(f"{app_url}/")
 
     expect(page.locator("#job-row-q-one")).to_be_visible()
-    expect(page.locator("#job-row-r-run .job-select-cb")).to_have_count(0)
     expect(page.locator("#selectionBar")).to_be_hidden()
 
     page.locator("#job-row-q-one .job-select-cb").check()
-    page.locator("#job-row-q-two .job-select-cb").check()
-    expect(page.locator("#cancelSelectedButtonText")).to_have_text("Cancel queued (2)")
+    page.locator("#job-row-r-run .job-select-cb").check()
+    expect(page.locator("#cancelSelectedButtonText")).to_have_text("Cancel (2)")
 
     page.locator("#cancelSelectedButton").click()
     accept_app_confirm(page)
 
     expect(page.locator("#selectionBar")).to_be_hidden()
     expect(page.locator("#job-row-q-one")).to_contain_text("Cancelled")
-    expect(page.locator("#job-row-q-two")).to_contain_text("Cancelled")
+    expect(page.locator("#job-row-r-run")).to_contain_text("Cancelled")
     expect(page.locator("#job-row-q-keep")).not_to_contain_text("Cancelled")
-    assert sorted(bulk_bodies[0]["job_ids"]) == ["q-one", "q-two"]
+    assert sorted(bulk_bodies[0]["job_ids"]) == ["q-one", "r-run"]
 
 
 def test_cancel_selected_shows_neutral_toast_when_some_are_skipped(authed_page: Page, app_url: str) -> None:
@@ -80,7 +79,7 @@ def test_cancel_selected_shows_neutral_toast_when_some_are_skipped(authed_page: 
         jobs["q-one"]["status"] = "cancelled"
         _fulfill_json(
             route,
-            {"cancelled": ["q-one"], "skipped": [{"id": "q-two", "reason": "not_pending (running)"}]},
+            {"cancelled": ["q-one"], "skipped": [{"id": "q-two", "reason": "not_active (completed)"}]},
         )
 
     page.route("**/api/jobs?**", jobs_list)
@@ -92,9 +91,7 @@ def test_cancel_selected_shows_neutral_toast_when_some_are_skipped(authed_page: 
     page.locator("#cancelSelectedButton").click()
     accept_app_confirm(page)
 
-    expect(
-        page.locator(".toast", has_text="1 could not be cancelled (already started, finished or removed)")
-    ).to_be_visible()
+    expect(page.locator(".toast", has_text="1 could not be cancelled (already finished or removed)")).to_be_visible()
 
 
 def test_delete_finished_acts_only_on_ticked_rows_and_clear_dropdown_hides(authed_page: Page, app_url: str) -> None:
@@ -134,7 +131,7 @@ def test_delete_finished_acts_only_on_ticked_rows_and_clear_dropdown_hides(authe
     expect(page.locator("#clearJobsDropdown")).to_be_hidden()
     expect(page.locator("#selectionCount")).to_have_text("3 selected")
     expect(page.locator("#deleteSelectedButtonText")).to_have_text("Delete finished (2)")
-    expect(page.locator("#cancelSelectedButtonText")).to_have_text("Cancel queued (1)")
+    expect(page.locator("#cancelSelectedButtonText")).to_have_text("Cancel (1)")
 
     page.locator("#deleteSelectedButton").click()
     accept_app_confirm(page)
@@ -168,7 +165,7 @@ def test_select_all_checkbox_sits_in_its_own_column_left_of_id(authed_page: Page
     expect(page.locator("#selectionCount")).to_have_text("2 selected")
 
 
-def test_paused_running_rows_are_selectable_but_active_ones_are_not(authed_page: Page, app_url: str) -> None:
+def test_running_rows_are_selectable_whether_paused_or_not(authed_page: Page, app_url: str) -> None:
     page = authed_page
     mock_dashboard_defaults(page)
     page.add_init_script(_SOCKET_STUB)
@@ -184,6 +181,7 @@ def test_paused_running_rows_are_selectable_but_active_ones_are_not(authed_page:
 
     expect(page.locator("#job-row-r-held")).to_be_visible()
     expect(page.locator("#job-row-r-held .job-select-cb")).to_have_count(1)
-    expect(page.locator("#job-row-r-active .job-select-cb")).to_have_count(0)
+    expect(page.locator("#job-row-r-active .job-select-cb")).to_have_count(1)
     page.locator("#job-row-r-held .job-select-cb").check()
-    expect(page.locator("#cancelSelectedButtonText")).to_have_text("Cancel queued (1)")
+    page.locator("#job-row-r-active .job-select-cb").check()
+    expect(page.locator("#cancelSelectedButtonText")).to_have_text("Cancel (2)")
