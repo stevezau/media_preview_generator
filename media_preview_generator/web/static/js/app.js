@@ -3577,10 +3577,9 @@ function showNewJobModal() {
     MediaScanFilters.reset('job');
     const sortByEl = document.getElementById('jobSortBy');
     if (sortByEl) sortByEl.value = 'default';
-    // Back to Previews; the priority is only reset when the last open left it on the Intro & Credits default.
-    const wasOwnRunner = _jobKindIsMarkers() || _jobKindIsLoudness();
-    const previewsKind = document.getElementById('jobKindPreviews');
-    if (previewsKind) previewsKind.checked = true;
+    // Back to Previews only; the priority is only reset when the last open left it on the Low default.
+    const wasOwnRunner = !_jobKindIsPreviews();
+    document.querySelectorAll('input[name="jobKind"]').forEach(cb => { cb.checked = cb.id === 'jobKindPreviews'; });
     const markersForce = document.getElementById('jobMarkersForce');
     if (markersForce) markersForce.checked = false;
     const findMarkers = document.getElementById('jobMarkersModeFind');
@@ -3717,11 +3716,11 @@ function _updateJobScopeBadge() {
 
     const allCb = document.getElementById('jobLibraryAll');
     if (allCb && allCb.checked) {
-        show('all', 'bi-globe2', _jobKindIsMarkers()
-            ? 'Checking every library with Intro &amp; Credits on'
-            : _jobKindIsLoudness()
-                ? 'Checking every library with Loudness on'
-                : 'Scanning every enabled library on all servers');
+        show('all', 'bi-globe2', _jobKindIsPreviews()
+            ? 'Scanning every enabled library on all servers'
+            : _jobKindIsMarkers()
+                ? 'Checking every library with Intro &amp; Credits on'
+                : 'Checking every library with Loudness on');
         return;
     }
 
@@ -3738,7 +3737,7 @@ function _updateJobScopeBadge() {
         serverNames.add(sid);
         singleServerName = cb.dataset.serverName || sid;
     }
-    const verb = _jobKindIsMarkers() || _jobKindIsLoudness() ? 'Checking' : 'Scanning';
+    const verb = _jobKindIsPreviews() ? 'Scanning' : 'Checking';
     if (serverNames.size === 1) {
         show('one', 'bi-bullseye', `${verb} → <strong>${escapeHtml(singleServerName)}</strong> only`);
     } else if (serverNames.size > 1) {
@@ -3760,18 +3759,20 @@ const _JOB_PRIORITY_NAMES = { 1: 'High', 2: 'Normal', 3: 'Low' };
 function _syncJobDialog() {
     const modal = document.getElementById('newJobModal');
     if (!modal) return;
-    const kind = _jobKindIsMarkers() ? 'intro_credits' : _jobKindIsLoudness() ? 'loudness' : 'previews';
-    const type = _JOB_DIALOG_TYPES[kind];
+    const kinds = _jobKinds();
+    const types = kinds.map(kind => _JOB_DIALOG_TYPES[kind]);
     const checksServers = _jobChecksServers();
-    modal.dataset.kind = checksServers ? 'check' : kind;
+    modal.dataset.kind = checksServers ? 'check' : kinds[0];
 
     const priority = document.getElementById('jobPriority');
     if (priority) {
-        priority.dataset.segDefault = type.defaultPriority;
+        priority.dataset.segDefault = _jobDefaultPriority();
         if (window.OverlaySegments) window.OverlaySegments.sync(priority);
     }
     const startLabel = document.getElementById('jobStartLabel');
-    if (startLabel) startLabel.textContent = checksServers ? 'Check servers' : type.start;
+    if (startLabel) {
+        startLabel.textContent = checksServers ? 'Check servers' : types.length > 1 ? `Start ${types.length} jobs` : types[0].start;
+    }
 
     const regenerate = document.getElementById('jobRegenerateAll')?.checked;
     const modeHint = document.getElementById('jobProcessingModeHint');
@@ -3788,7 +3789,8 @@ function _syncJobDialog() {
         const picked = document.querySelectorAll('.job-library-checkbox:checked').length;
         const scope = checksServers ? 'Every server' : all ? 'All libraries' : `${picked} ${picked === 1 ? 'library' : 'libraries'}`;
         const priorityName = _JOB_PRIORITY_NAMES[parseInt(priority?.value, 10)] || 'Normal';
-        summary.innerHTML = `<span class="ov-task"><i class="bi ${type.icon}" aria-hidden="true"></i>${escapeHtml(type.name)}</span>`
+        const taskChips = types.map(type => `<span class="ov-task"><i class="bi ${type.icon}" aria-hidden="true"></i>${escapeHtml(type.name)}</span>`).join('');
+        summary.innerHTML = taskChips
             + `<span>${scope} · <b>${priorityName}</b></span>`;
     }
 }
@@ -3805,14 +3807,33 @@ document.getElementById('newJobForm')?.addEventListener('change', () => {
     _syncJobDialog();
 });
 
+function _jobKindIsPreviews() {
+    const box = document.getElementById('jobKindPreviews');
+    return !!(box && box.checked);
+}
+
 function _jobKindIsMarkers() {
-    const radio = document.getElementById('jobKindMarkers');
-    return !!(radio && radio.checked);
+    const box = document.getElementById('jobKindMarkers');
+    return !!(box && box.checked);
 }
 
 function _jobKindIsLoudness() {
-    const radio = document.getElementById('jobKindLoudness');
-    return !!(radio && radio.checked);
+    const box = document.getElementById('jobKindLoudness');
+    return !!(box && box.checked);
+}
+
+// The ticked job types, in the order their jobs are started: previews first.
+function _jobKinds() {
+    const kinds = [];
+    if (_jobKindIsPreviews()) kinds.push('previews');
+    if (_jobKindIsMarkers()) kinds.push('intro_credits');
+    if (_jobKindIsLoudness()) kinds.push('loudness');
+    return kinds;
+}
+
+// Previews run at Normal; a dialog with only Intro & Credits and/or loudness defaults to Low.
+function _jobDefaultPriority() {
+    return _jobKindIsPreviews() ? '2' : '3';
 }
 
 // Intro & Credits · Check servers reads back every server, so it has no libraries and no "re-check" switch.
@@ -3821,12 +3842,11 @@ function _jobChecksServers() {
     return _jobKindIsMarkers() && !!(radio && radio.checked);
 }
 
-// Intro & Credits has no processing mode or order (every file is checked, season by season), a "re-check" switch
-// instead.
+// Processing mode, order and scan filters belong to Previews alone: Intro & Credits and loudness check every file
+// (the former with a "re-check" switch instead).
 function _showJobKindControls() {
     const markers = _jobKindIsMarkers();
-    // Plex loudness, like Intro & Credits, checks every file of the chosen libraries (files already done are skipped).
-    const ownRunner = markers || _jobKindIsLoudness();
+    const previews = _jobKindIsPreviews();
     const checksServers = _jobChecksServers();
     const toggle = function (id, hidden) {
         const el = document.getElementById(id);
@@ -3834,21 +3854,33 @@ function _showJobKindControls() {
     };
     toggle('jobMarkersModeGroup', !markers);
     toggle('jobLibrariesGroup', checksServers);
-    toggle('jobProcessingModeGroup', ownRunner);
-    toggle('jobSortByGroup', ownRunner);
+    toggle('jobProcessingModeGroup', !previews);
+    toggle('jobSortByGroup', !previews);
     toggle('jobMarkersForceGroup', !markers || checksServers);
-    toggle('jobScanFiltersGroup', ownRunner);
-    toggle('jobOwnRunnerFiltersNote', !ownRunner || checksServers);
+    toggle('jobScanFiltersGroup', !previews);
+    toggle('jobOwnRunnerFiltersNote', previews || checksServers);
     toggle('jobCheckServersNote', !checksServers);
     _updateJobScopeBadge();
 }
 
-// Picking a job type also picks its default priority: Intro & Credits runs at Low, previews at Normal.
-function onJobKindChange() {
+// Ticking job types also picks the default priority. At least one type stays ticked, and Check servers cannot be
+// combined with another type, so ticking one drops back to Find markers.
+function onJobKindChange(changed) {
+    if (!_jobKinds().length && changed) changed.checked = true;
+    const findMarkers = document.getElementById('jobMarkersModeFind');
+    if (_jobChecksServers() && _jobKinds().length > 1 && findMarkers) findMarkers.checked = true;
     _showJobKindControls();
     const priority = document.getElementById('jobPriority');
-    if (priority) priority.value = _jobKindIsMarkers() || _jobKindIsLoudness() ? '3' : '2';
+    if (priority) priority.value = _jobDefaultPriority();
     _syncJobDialog();
+}
+
+function onMarkersModeChange() {
+    if (_jobChecksServers()) {
+        document.getElementById('jobKindPreviews').checked = false;
+        document.getElementById('jobKindLoudness').checked = false;
+    }
+    onJobKindChange();
 }
 
 function toggleAllLibraries(checkbox) {
@@ -3884,41 +3916,49 @@ function _jobLibraryLabel(names, pickedCount) {
     return joined.length <= 60 ? joined : `${names.slice(0, 2).join(', ')} + ${names.length - 2} more`;
 }
 
-async function _submitNewJob(url, payload, successMessage) {
-    const opening = modalOpening(document.getElementById('newJobModal'));
-    // Retry once on transient network errors ("Failed to fetch" from
-    // server congestion).
-    let lastError;
-    for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-            await apiPost(url, payload);
+// Posts one job, retrying once on a transient network error ("Failed to fetch" from server congestion).
+async function _postNewJob(url, payload) {
+    try {
+        await apiPost(url, payload);
+    } catch (error) {
+        if (error.message !== 'Failed to fetch') throw error;
+        await new Promise(r => setTimeout(r, 500));
+        await apiPost(url, payload);
+    }
+}
 
-            hideModalSafely(document.getElementById('newJobModal'), opening);
-            loadJobs();
-            loadJobStats();
-            showToast('Job Started', successMessage, 'success');
-            return;  // success — exit
+// Starts each built job ({url, payload, message, name}) in order. The dialog closes once any job has started, so a
+// later failure never invites a resubmit of the ones already queued.
+async function _submitNewJobs(jobs) {
+    const opening = modalOpening(document.getElementById('newJobModal'));
+    let started = 0;
+    const finish = () => {
+        hideModalSafely(document.getElementById('newJobModal'), opening);
+        loadJobs();
+        loadJobStats();
+    };
+    for (const job of jobs) {
+        try {
+            await _postNewJob(job.url, job.payload);
+            started += 1;
         } catch (error) {
-            lastError = error;
-            if (attempt === 0 && error.message === 'Failed to fetch') {
-                // Brief pause before retry
-                await new Promise(r => setTimeout(r, 500));
-                continue;
-            }
-            break;
+            if (started) finish();
+            showToast('Error', `Failed to start ${job.name} job: ${error.message}`, 'danger');
+            return;
         }
     }
-    showToast('Error', 'Failed to start job: ' + lastError.message, 'danger');
+    finish();
+    showToast('Job Started', jobs.length === 1 ? jobs[0].message : `${jobs.length} jobs have been started`, 'success');
 }
 
 // Intro & Credits: libraries go as server + library pairs, because library ids repeat across servers (Plex numbers
 // its libraries from "1" on every server). An empty list means every library with Intro & Credits turned on.
-async function _startMarkersJob() {
+function _buildMarkersJob() {
     const allTicked = document.getElementById('jobLibraryAll').checked;
     const ticked = allTicked ? [] : Array.from(document.querySelectorAll('.job-library-checkbox:checked'));
     if (!allTicked && ticked.length === 0) {
         _jobLibrariesMissing();
-        return;
+        return null;
     }
     const picked = ticked.map(cb => ({ server_id: cb.dataset.serverId || '', library_id: cb.value }));
     const names = picked
@@ -3931,17 +3971,17 @@ async function _startMarkersJob() {
         force: document.getElementById('jobMarkersForce').checked,
         library_name: `Intro & Credits: ${label}`,
     };
-    await _submitNewJob('/api/markers/jobs', payload, 'Intro & Credits job has been started');
+    return { url: '/api/markers/jobs', payload, message: 'Intro & Credits job has been started', name: 'Intro & Credits' };
 }
 
 // Plex loudness: libraries go as server + library pairs like Intro & Credits; an empty list means every library with
 // Loudness turned on. Libraries without it are skipped by the server (named in the job's warning).
-async function _startLoudnessJob() {
+function _buildLoudnessJob() {
     const allTicked = document.getElementById('jobLibraryAll').checked;
     const ticked = allTicked ? [] : Array.from(document.querySelectorAll('.job-library-checkbox:checked'));
     if (!allTicked && ticked.length === 0) {
         _jobLibrariesMissing();
-        return;
+        return null;
     }
     const picked = ticked.map(cb => ({ server_id: cb.dataset.serverId || '', library_id: cb.value }));
     const names = picked
@@ -3953,7 +3993,7 @@ async function _startLoudnessJob() {
         priority: parseInt(document.getElementById('jobPriority').value, 10) || 3,
         library_name: `Plex loudness: ${label}`,
     };
-    await _submitNewJob('/api/loudness/jobs', payload, 'Plex loudness job has been started');
+    return { url: '/api/loudness/jobs', payload, message: 'Plex loudness job has been started', name: 'Plex loudness' };
 }
 
 // The answer to a Check servers request (POST /api/markers/reconcile, or Re-run on a Check servers job): job_id is
@@ -3990,19 +4030,28 @@ async function _startCheckServersJob() {
     _showCheckServersAnswer(result);
 }
 
+// Validates every ticked type first, then starts one job per type (previews, Intro & Credits, loudness).
 async function startNewJob() {
     if (_jobChecksServers()) {
         await _startCheckServersJob();
         return;
     }
-    if (_jobKindIsMarkers()) {
-        await _startMarkersJob();
-        return;
+    const builders = [
+        [_jobKindIsPreviews, _buildPreviewsJob],
+        [_jobKindIsMarkers, _buildMarkersJob],
+        [_jobKindIsLoudness, _buildLoudnessJob],
+    ];
+    const jobs = [];
+    for (const [isTicked, build] of builders) {
+        if (!isTicked()) continue;
+        const job = build();
+        if (!job) return;
+        jobs.push(job);
     }
-    if (_jobKindIsLoudness()) {
-        await _startLoudnessJob();
-        return;
-    }
+    await _submitNewJobs(jobs);
+}
+
+function _buildPreviewsJob() {
     const allLibrariesCheckbox = document.getElementById('jobLibraryAll');
     const forceRegenerate = document.getElementById('jobRegenerateAll').checked;
 
@@ -4022,7 +4071,7 @@ async function startNewJob() {
 
         if (selectedIdsLocal.length === 0) {
             _jobLibrariesMissing();
-            return;
+            return null;
         }
 
         selectedLibraryIds = selectedIdsLocal;
@@ -4047,7 +4096,7 @@ async function startNewJob() {
     const sortBy = sortByEl ? sortByEl.value : '';
 
     const scanFilters = MediaScanFilters.read('job');
-    if (scanFilters === null) return;
+    if (scanFilters === null) return null;
     const jobConfig = { force_generate: forceRegenerate, ...scanFilters };
     if (sortBy) {
         jobConfig.sort_by = sortBy;
@@ -4068,7 +4117,7 @@ async function startNewJob() {
         jobPayload.server_id = Array.from(selectedServerIds)[0];
     }
 
-    await _submitNewJob('/api/jobs', jobPayload, 'Processing job has been started');
+    return { url: '/api/jobs', payload: jobPayload, message: 'Processing job has been started', name: 'previews' };
 }
 
 async function cancelJob(jobId) {

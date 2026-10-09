@@ -30,7 +30,7 @@ def automatic(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(triggers, "_server_configs", lambda: [cfg])
     monkeypatch.setattr(triggers, "markers_enabled_anywhere", lambda: False)
-    preview = manager.create_job(kind="previews", library_name="Movies", config={"source": "manual"})
+    preview = manager.create_job(kind="previews", library_name="Movies", config={"source": "schedule"})
     return manager, preview, cfg
 
 
@@ -139,7 +139,7 @@ def test_two_preview_arrivals_each_keep_their_own_barrier_and_source(automatic):
     orchestrator._queue_loudness_follow_up(preview.id, items, "plex")
     orchestrator._queue_loudness_follow_up(second.id, items, "plex")
     assert {(entry.config["follows_job_id"], entry.config["source"]) for entry in _loudness(manager)} == {
-        (preview.id, "manual"),
+        (preview.id, "schedule"),
         (second.id, "sonarr"),
     }
 
@@ -177,7 +177,7 @@ def test_large_enumeration_uses_one_persisted_job(automatic, monkeypatch, tmp_pa
     assert follow_up.config["file_paths"] == []
     assert read_file_paths(manager.config_dir, follow_up.config) == paths
     assert follow_up.config["server_id"] == "plex"
-    assert follow_up.config["source"] == "manual"
+    assert follow_up.config["source"] == "schedule"
     assert set(follow_up.config["follows_job_ids"]) == {preview.id, marker.id}
     assert follow_up.library_name == "Plex loudness · Movies"
 
@@ -209,7 +209,7 @@ def test_dependency_limit_preserves_every_file_and_barrier(automatic, monkeypatc
         assert len(entry.config["follows_job_ids"]) <= 3
 
 
-@pytest.mark.parametrize("source", ["manual", "scheduled", "scheduled_recently_added", "sonarr"])
+@pytest.mark.parametrize("source", ["schedule", "scheduled", "scheduled_recently_added", "sonarr"])
 def test_real_dispatch_queues_already_previewed_files_before_checking(automatic, monkeypatch, source):
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -276,3 +276,19 @@ def test_upfront_missing_file_retains_sender_path_for_loudness_retry(automatic):
     assert len(_loudness(manager)) == 1
     assert _loudness(manager)[0].config["file_paths"] == [missing]
     assert _loudness(manager)[0].config["source"] == "sonarr"
+
+
+@pytest.mark.parametrize(
+    "source,queued",
+    [(None, False), ("manual", False), ("schedule", True), ("recently_added", True), ("sonarr", True)],
+)
+def test_loudness_follow_up_skips_manual_previews_only(automatic, source, queued):
+    manager, _, _ = automatic
+    config = {} if source is None else {"source": source}
+    preview = manager.create_job(kind="previews", library_name="Movies", config=config)
+    orchestrator._queue_loudness_follow_up(preview.id, [ProcessableItem("/media/movies/a.mkv", "plex")], None)
+    loudness = _loudness(manager)
+    assert len(loudness) == int(queued)
+    if queued:
+        assert loudness[0].config["source"] == (source or "manual")
+        assert loudness[0].config["file_paths"] == ["/media/movies/a.mkv"]

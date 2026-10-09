@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from playwright.sync_api import Page, Route, expect
 
-from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status
+from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status, pick_job_kind
 from .conftest import expect_modal_shown, watch_modal_shown
 
 _SERVERS = [
@@ -353,7 +353,7 @@ class TestStartJobModalIntroCredits:
         expect(page.locator("#jobSortByGroup")).to_be_visible()
         expect(page.locator("#jobMarkersForce")).to_be_hidden()
 
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
 
         expect(page.locator("#jobProcessingModeGroup")).to_be_hidden()
         expect(page.locator("#jobSortByGroup")).to_be_hidden()
@@ -371,7 +371,7 @@ class TestStartJobModalIntroCredits:
             in (" ".join(detail.split()))
         )
 
-        page.locator("#jobKindPreviews").check()
+        pick_job_kind(page, "jobKindPreviews")
         expect(page.locator("#jobProcessingModeGroup")).to_be_visible()
         expect(page.locator("#jobSortByGroup")).to_be_visible()
         expect(page.locator("#jobMarkersForce")).to_be_hidden()
@@ -382,7 +382,7 @@ class TestStartJobModalIntroCredits:
         markers_posts = _capture_posts(page, "**/api/markers/jobs", {"id": "ic-1", "kind": "intro_credits"})
         preview_posts = _capture_posts(page, "**/api/jobs", {"id": "job-1"})
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobLibraryAll").uncheck()
         page.locator('.job-library-checkbox[data-server-id="plex-1"][value="1"]').check()
         page.locator('.job-library-checkbox[data-server-id="plex-1"][value="2"]').check()
@@ -408,7 +408,7 @@ class TestStartJobModalIntroCredits:
         page = dashboard()
         posts = _capture_posts(page, "**/api/markers/jobs", {"id": "ic-1"})
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobLibraryAll").uncheck()
         page.locator('.job-library-checkbox[data-server-id="plex-1"][value="1"]').check()
         page.locator('.job-library-checkbox[data-server-id="jf-1"][value="1"]').check()
@@ -428,7 +428,7 @@ class TestStartJobModalIntroCredits:
         page = dashboard()
         posts = _capture_posts(page, "**/api/markers/jobs", {"id": "ic-1"})
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobMarkersForce").check()
         page.locator("#jobPriority").select_option("1")
 
@@ -473,7 +473,7 @@ class TestStartJobModalIntroCredits:
         markers_posts = _capture_posts(page, "**/api/markers/jobs", {"id": "ic-1"})
         _open_start_modal(page)
         expect(page.locator("#jobMarkersModeGroup")).to_be_hidden()
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         expect(page.locator("#jobMarkersModeGroup")).to_be_visible()
         expect(page.locator("#jobMarkersModeFind")).to_be_checked()
         expect(page.locator("#jobLibrariesGroup")).to_be_visible()
@@ -506,7 +506,7 @@ class TestStartJobModalIntroCredits:
             page, "**/api/markers/reconcile", {"job_id": "rc-0", "already_queued": True}, status=202
         )
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobMarkersModeCheckServers").check()
         page.locator("#jobPriority").select_option("1")
         with page.expect_request("**/api/markers/reconcile"):
@@ -521,7 +521,7 @@ class TestStartJobModalIntroCredits:
             page, "**/api/markers/reconcile", {"job_id": "rc-0", "already_queued": True, "paused": True}, status=202
         )
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobMarkersModeCheckServers").check()
         with page.expect_request("**/api/markers/reconcile"):
             _start_button(page).click()
@@ -571,7 +571,7 @@ class TestStartJobModalIntroCredits:
             status=200,
         )
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobMarkersModeCheckServers").check()
         with page.expect_request("**/api/markers/reconcile"):
             _start_button(page).click()
@@ -581,21 +581,21 @@ class TestStartJobModalIntroCredits:
     def test_find_markers_again_shows_the_libraries_and_reopening_resets_the_mode(self, dashboard) -> None:
         page = dashboard()
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobMarkersModeCheckServers").check()
         page.locator("#jobMarkersModeFind").check()
         expect(page.locator("#jobLibrariesGroup")).to_be_visible()
         expect(page.locator("#jobMarkersForce")).to_be_visible()
         page.locator("#jobMarkersModeCheckServers").check()
-        page.locator("#jobKindPreviews").check()
+        pick_job_kind(page, "jobKindPreviews")
         expect(page.locator("#jobMarkersModeGroup")).to_be_hidden()
         expect(page.locator("#jobLibrariesGroup")).to_be_visible()
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#newJobModal .btn-close").click()
         expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
 
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
 
         expect(page.locator("#jobMarkersModeFind")).to_be_checked()
         expect(page.locator("#jobLibrariesGroup")).to_be_visible()
@@ -603,7 +603,7 @@ class TestStartJobModalIntroCredits:
     def test_reopening_the_modal_resets_the_job_type_to_previews(self, dashboard) -> None:
         page = dashboard()
         _open_start_modal(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#newJobModal .btn-close").click()
         expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
 

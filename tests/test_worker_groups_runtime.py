@@ -536,7 +536,7 @@ def test_preview_continuation_preserves_follow_up_scope_with_two_owners(tmp_path
     # Keep the real persisted follow-up queued; its separate execution is not
     # part of resuming a preview and must not contact either Plex server here.
     monkeypatch.setattr(loudness_job, "start_loudness_job_async", lambda *_: None)
-    preview = manager.create_job(kind="previews", config={"source": "manual", "server_id": pin})
+    preview = manager.create_job(kind="previews", config={"source": "schedule", "server_id": pin})
     work = ProcessableItem(root + "/remaining.mkv", "plex-a", {"plex-a": "7", "plex-b": "8"})
     assert {cfg.id for cfg in triggers._server_configs()} == {"plex-a", "plex-b"}
     if existing_follow_up:

@@ -159,7 +159,7 @@
                                 <label class="sm-lab" for="editServerVerifySsl">Verify SSL certificate
                                     <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks the server's HTTPS certificate. Turn it off only for a self-signed one; it does nothing on plain HTTP."><i class="bi bi-info-circle"></i></button>
                                 </label>
-                                <div class="form-check form-switch mb-0"><input type="checkbox" role="switch" id="editServerVerifySsl" class="form-check-input"></div>
+                                <div class="form-check form-switch markers-switch mb-0"><input type="checkbox" role="switch" id="editServerVerifySsl" class="form-check-input"></div>
                             </div>
 
                             <!-- Test Connection — verify URL + credentials right here in the modal, especially
@@ -213,7 +213,7 @@
 </template>
                                     </div>
                                 </div>
-                                <div class="form-check form-switch mb-0"><input type="checkbox" role="switch" id="editJellyfinSaveOffMedia" class="form-check-input"></div>
+                                <div class="form-check form-switch markers-switch mb-0"><input type="checkbox" role="switch" id="editJellyfinSaveOffMedia" class="form-check-input"></div>
                             </div>
                             <div id="editJellyfinConfigFolderGroup" class="sm-fld d-none">
                                 <label class="sm-lab" for="editJellyfinConfigFolder">Jellyfin config folder (this container)
@@ -525,7 +525,7 @@
                                             Install Media Preview Bridge plugin (recommended — instant previews, no races)
                                             <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="With the plugin, previews appear in Jellyfin as soon as they're made." data-explain-title="Media Preview Bridge plugin" data-explain-template="infoJellyfinPluginTpl"><i class="bi bi-info-circle"></i></button>
                                         </label>
-                                        <div class="form-check form-switch mb-0"><input type="checkbox" role="switch" class="form-check-input" id="editReadinessPluginOptIn" checked></div>
+                                        <div class="form-check form-switch markers-switch mb-0"><input type="checkbox" role="switch" class="form-check-input" id="editReadinessPluginOptIn" checked></div>
                                     </div>
                                     <div id="editReadinessPluginOptOutWarning" class="sm-warnline d-none">
                                         <i class="bi bi-exclamation-triangle-fill"></i>
@@ -849,7 +849,7 @@
                                         </label>
                                         <div class="sm-hint" id="editPlexChapterThumbnailsHelp">Pictures in Plex's chapter menu.</div>
                                     </div>
-                                    <div class="form-check form-switch mb-0">
+                                    <div class="form-check form-switch markers-switch mb-0">
                                         <input class="form-check-input" type="checkbox" role="switch" id="editPlexChapterThumbnails" aria-describedby="editPlexChapterThumbnailsHelp">
                                     </div>
                                 </div>

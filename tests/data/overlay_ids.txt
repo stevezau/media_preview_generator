@@ -55,7 +55,7 @@
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	30	kept	#jobSortBy
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	31	restyled	-
 1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	32	new	-
-1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	33	kept	_submitNewJob
+1. Start New Job (`#newJobModal`, opens from Dashboard "Start new job")	33	kept	_submitNewJobs
 2. Process a file or folder (`#manualTriggerModal`, Dashboard "Manual trigger")	34	restyled	name=manualJobKind
 2. Process a file or folder (`#manualTriggerModal`, Dashboard "Manual trigger")	34	restyled	#manualKind*
 2. Process a file or folder (`#manualTriggerModal`, Dashboard "Manual trigger")	35	restyled	#manualKindHelp

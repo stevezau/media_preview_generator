@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
-from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status, mock_servers_list
+from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status, mock_servers_list, pick_job_kind
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -88,7 +88,7 @@ def test_intro_credits_job_hides_and_omits_preview_filters(filter_page: Page, ch
     page = filter_page
     page.locator("#jobAddedFilter").select_option("last_days")
     page.locator("#jobAddedLastDays").fill("0")
-    page.locator("#jobKindMarkers").check()
+    pick_job_kind(page, "jobKindMarkers")
     if check_servers:
         page.locator("#jobMarkersModeCheckServers").check()
     expect(page.locator("#jobScanFilters")).to_be_hidden()

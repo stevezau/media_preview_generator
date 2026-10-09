@@ -56,7 +56,7 @@ window.MediaScanFilters = (() => {
         el.querySelectorAll('[data-filter-error]').forEach(box => { box.hidden = true; });
         const enabled = prefix === 'schedule'
             ? document.getElementById('scanModeFull')?.checked
-            : !document.getElementById('jobKindMarkers')?.checked;
+            : !!document.getElementById('jobKindPreviews')?.checked;
         el.hidden = !enabled;
         const all = document.getElementById(`${prefix}LibraryAll`)?.checked;
         const rows = Array.from(document.querySelectorAll(`.${prefix}-library-checkbox`));

@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import pytest
 from playwright.sync_api import Page, Route, expect
 
-from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status
+from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status, pick_job_kind
 
 pytestmark = pytest.mark.e2e
 
@@ -163,15 +163,15 @@ def test_start_dialog_preserves_preview_filters_and_hides_them_for_other_kinds(
     expect(page.locator("#jobAddedFilter")).to_be_visible()
     page.locator("#jobSortBy").select_option("random")
     for radio in ("jobKindMarkers", "jobKindLoudness"):
-        page.locator("#" + radio).check()
+        pick_job_kind(page, radio)
         expect(page.locator("#jobScanFiltersGroup")).to_be_hidden()
         expect(page.locator("#jobSortByGroup")).to_be_hidden()
         expect(page.locator("#jobOwnRunnerFiltersNote")).to_be_visible()
-    page.locator("#jobKindMarkers").check()
+    pick_job_kind(page, "jobKindMarkers")
     page.locator("#jobMarkersModeCheckServers").check()
     expect(page.locator("#jobLibrariesGroup")).to_be_hidden()
     expect(page.locator("#jobOwnRunnerFiltersNote")).to_be_hidden()
-    page.locator("#jobKindPreviews").check()
+    pick_job_kind(page, "jobKindPreviews")
     expect(page.locator("#jobScanFiltersGroup")).to_be_visible()
     expect(page.locator("#jobSortBy")).to_have_value("random")
     assert writes == []

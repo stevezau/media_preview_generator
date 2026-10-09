@@ -11,22 +11,22 @@
                 <form id="newJobForm">
                     <section class="ov-sec" id="jobTypeGroup">
                         <div class="ov-sec-h"><span class="ov-n" aria-hidden="true"></span>Job type</div>
-                        <div class="ov-tcards" role="radiogroup" aria-label="Job type">
+                        <div class="ov-tcards" role="group" aria-label="Job types">
                             <div class="ov-tcard" data-type="previews">
-                                <input class="ov-tcard-input" type="radio" name="jobKind" id="jobKindPreviews" value="previews" checked onchange="onJobKindChange()">
+                                <input class="ov-tcard-input" type="checkbox" name="jobKind" id="jobKindPreviews" value="previews" checked onchange="onJobKindChange(this)">
                                 <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-film"></i></span><label for="jobKindPreviews">Previews</label></span>
                                 <span class="ov-tp">Scrubbing thumbnails for Plex, Emby and Jellyfin.</span>
                                 <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
                             </div>
                             <div class="ov-tcard" data-type="intro_credits">
-                                <input class="ov-tcard-input" type="radio" name="jobKind" id="jobKindMarkers" value="intro_credits" onchange="onJobKindChange()">
+                                <input class="ov-tcard-input" type="checkbox" name="jobKind" id="jobKindMarkers" value="intro_credits" onchange="onJobKindChange(this)">
                                 <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-skip-forward"></i></span><label for="jobKindMarkers">Intro &amp; Credits</label>
                                 <button type="button" class="info-icon" id="jobKindMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds Skip Intro and Skip Credits markers for the chosen libraries and sends them to your servers." data-explain-title="Intro &amp; Credits job" data-explain-template="infoJobKindMarkersTpl" aria-label="Finds Skip Intro and Skip Credits markers for the chosen libraries and sends them to your servers."><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
                                 <span class="ov-tp">Skip Intro and Skip Credits markers.</span>
                                 <i class="bi bi-check-circle-fill ov-ok" aria-hidden="true"></i>
                             </div>
                             <div class="ov-tcard" data-type="loudness">
-                                <input class="ov-tcard-input" type="radio" name="jobKind" id="jobKindLoudness" value="loudness" onchange="onJobKindChange()">
+                                <input class="ov-tcard-input" type="checkbox" name="jobKind" id="jobKindLoudness" value="loudness" onchange="onJobKindChange(this)">
                                 <span class="ov-tt"><span class="ov-ti" aria-hidden="true"><i class="bi bi-soundwave"></i></span><label for="jobKindLoudness">Plex loudness</label>
                                 <button type="button" class="info-icon" id="jobKindLoudnessInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Runs Plex's loudness analysis of each audio track in the chosen libraries and stores it in Plex, for Normalize Loudness. Libraries need Loudness on (server settings)." data-explain-title="Plex loudness" data-explain-template="infoJobKindLoudnessTpl" aria-label="Runs Plex's loudness analysis of each audio track in the chosen libraries and stores it in Plex, for Normalize Loudness. Libraries need Loudness on (server settings)."><i class="bi bi-info-circle" aria-hidden="true"></i></button></span>
                                 <span class="ov-tp">Audio loudness, stored in Plex.</span>
@@ -35,8 +35,8 @@
                         </div>
                         <div class="ov-row" id="jobMarkersModeGroup" hidden>
                             <div class="ov-seg" role="radiogroup" aria-label="Intro and credits mode">
-                                <span class="ov-seg-opt"><input type="radio" name="jobMarkersMode" id="jobMarkersModeFind" value="find" checked onchange="_showJobKindControls()"><label for="jobMarkersModeFind">Find markers</label></span>
-                                <span class="ov-seg-opt"><input type="radio" name="jobMarkersMode" id="jobMarkersModeCheckServers" value="check_servers" onchange="_showJobKindControls()"><label for="jobMarkersModeCheckServers">Check servers</label></span>
+                                <span class="ov-seg-opt"><input type="radio" name="jobMarkersMode" id="jobMarkersModeFind" value="find" checked onchange="onMarkersModeChange()"><label for="jobMarkersModeFind">Find markers</label></span>
+                                <span class="ov-seg-opt"><input type="radio" name="jobMarkersMode" id="jobMarkersModeCheckServers" value="check_servers" onchange="onMarkersModeChange()"><label for="jobMarkersModeCheckServers">Check servers</label></span>
                             </div>
                             <button type="button" class="info-icon" id="jobMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks your servers still show the markers this app sent, and resends any missing or changed." data-explain-title="Check servers" data-explain-template="infoJobCheckServersTpl" aria-label="Checks your servers still show the markers this app sent, and resends any missing or changed."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                         </div>

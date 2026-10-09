@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, Route, expect
 
-from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status, mock_servers_list
+from ._mocks import _fulfill_json, mock_dashboard_defaults, mock_media_servers_status, mock_servers_list, pick_job_kind
 from .conftest import expect_modal_shown, watch_modal_shown
 
 pytestmark = pytest.mark.e2e
@@ -148,7 +148,7 @@ class TestStartNewJob:
     ) -> None:
         page, writes = overlay_page
         _open_start(page)
-        page.locator(f"#{radio}").check()
+        pick_job_kind(page, radio)
         expect(page.locator("#jobStartLabel")).to_have_text(label)
         expect(page.locator("#jobPriority")).to_have_value(str(priority))
         expect(_segment(page, "jobPriority", "Low")).to_have_attribute("aria-checked", "true")
@@ -165,7 +165,7 @@ class TestStartNewJob:
     def test_check_servers_hides_the_libraries_and_posts_the_reconcile_request(self, overlay_page) -> None:
         page, writes = overlay_page
         _open_start(page)
-        page.locator("#jobKindMarkers").check()
+        pick_job_kind(page, "jobKindMarkers")
         page.locator("#jobMarkersModeCheckServers").check()
         expect(page.locator("#jobLibrariesGroup")).to_be_hidden()
         expect(page.locator("#jobCheckServersNote")).to_be_visible()
@@ -174,16 +174,56 @@ class TestStartNewJob:
         page.locator("#jobStartButton").click()
         assert [w for w in writes if w["url"] == "markers/reconcile"][0]["body"] == {"priority": 2}
 
-    def test_type_cards_follow_arrow_keys_and_colour_the_dialog(self, overlay_page) -> None:
+    def test_type_cards_colour_the_dialog_by_the_first_ticked_type(self, overlay_page) -> None:
         page, _ = overlay_page
         _open_start(page)
         expect(page.locator("#newJobModal")).to_have_attribute("data-kind", "previews")
-        page.locator("#jobKindPreviews").focus()
-        page.keyboard.press("ArrowDown")
-        expect(page.locator("#jobKindMarkers")).to_be_checked()
+        pick_job_kind(page, "jobKindMarkers")
         expect(page.locator("#newJobModal")).to_have_attribute("data-kind", "intro_credits")
-        page.locator("#jobKindLoudness").check()
+        pick_job_kind(page, "jobKindLoudness")
         expect(page.locator("#newJobModal")).to_have_attribute("data-kind", "loudness")
+
+    def test_the_last_ticked_type_cannot_be_unticked(self, overlay_page) -> None:
+        page, _ = overlay_page
+        _open_start(page)
+        page.locator("#jobKindPreviews").click()
+        expect(page.locator("#jobKindPreviews")).to_be_checked()
+
+    def test_ticking_several_types_posts_one_job_each_previews_first(self, overlay_page) -> None:
+        page, writes = overlay_page
+        _open_start(page)
+        page.locator("#jobKindMarkers").check()
+        page.locator("#jobKindLoudness").check()
+        expect(page.locator("#jobStartLabel")).to_have_text("Start 3 jobs")
+        expect(page.locator("#jobPriority")).to_have_value("2")
+        expect(page.locator("#jobProcessingModeGroup")).to_be_visible()
+        expect(page.locator("#jobMarkersForce")).to_be_visible()
+        page.locator("#jobStartButton").click()
+        expect(page.locator("#newJobModal")).to_be_hidden()
+        posted = [w["url"] for w in writes if w["url"] in ("jobs", "markers/jobs", "loudness/jobs")]
+        assert posted == ["jobs", "markers/jobs", "loudness/jobs"]
+        expect(page.locator("#toastBody")).to_have_text("3 jobs have been started")
+
+    def test_unticking_previews_hides_its_options_and_defaults_to_low(self, overlay_page) -> None:
+        page, _ = overlay_page
+        _open_start(page)
+        page.locator("#jobKindLoudness").check()
+        page.locator("#jobKindPreviews").uncheck()
+        expect(page.locator("#jobProcessingModeGroup")).to_be_hidden()
+        expect(page.locator("#jobScanFiltersGroup")).to_be_hidden()
+        expect(page.locator("#jobPriority")).to_have_value("3")
+        expect(page.locator("#jobStartLabel")).to_have_text("Start loudness job")
+
+    def test_check_servers_clears_the_other_types_and_ticking_one_leaves_it(self, overlay_page) -> None:
+        page, _ = overlay_page
+        _open_start(page)
+        page.locator("#jobKindMarkers").check()
+        page.locator("#jobMarkersModeCheckServers").check()
+        expect(page.locator("#jobKindPreviews")).not_to_be_checked()
+        expect(page.locator("#jobKindLoudness")).not_to_be_checked()
+        page.locator("#jobKindLoudness").check()
+        expect(page.locator("#jobMarkersModeFind")).to_be_checked()
+        expect(page.locator("#jobLibrariesGroup")).to_be_visible()
 
 
 class TestManualTrigger:

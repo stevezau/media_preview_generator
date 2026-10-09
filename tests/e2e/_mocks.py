@@ -927,3 +927,11 @@ def mock_worker_groups(page: Page, *, cpu_count: int = 1) -> dict:
 
     page.route("**/api/worker-groups**", handler)
     return result
+
+
+def pick_job_kind(page, kind_id: str) -> None:
+    """Make one job type the only ticked card in the Start-job dialog (the cards are checkboxes)."""
+    page.locator(f"#{kind_id}").check()
+    for other in ("jobKindPreviews", "jobKindMarkers", "jobKindLoudness"):
+        if other != kind_id:
+            page.locator(f"#{other}").uncheck()

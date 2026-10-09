@@ -1270,7 +1270,7 @@ def _queue_loudness_follow_up(
 ) -> None:
     """Queue opted-in loudness for this preview's enumerated files, without another library scan.
 
-    Retry attempts never spawn new feature jobs. Existing dependencies identify this preview's own follow-ups across
+    Manual and retry runs never spawn new feature jobs. Existing dependencies identify this preview's own follow-ups across
     restart, deduplicating this preview's upfront webhook or Recently Added follow-up at dispatch time.
     """
     try:
@@ -1284,12 +1284,12 @@ def _queue_loudness_follow_up(
         cfg = preview.config or {}
         if cfg.get("is_retry") or cfg.get("is_retry_attempt") or cfg.get("retry_attempt"):
             return
+        origin = source or str(cfg.get("source") or "manual")
+        if origin == "manual":
+            # A manual run does exactly what its dialog ticked; loudness is its own job there.
+            return
         _submit_loudness_follow_up(
-            job_id,
-            list(intro_job_ids or []),
-            [item.canonical_path for item in items],
-            source or str(cfg.get("source") or "manual"),
-            pin,
+            job_id, list(intro_job_ids or []), [item.canonical_path for item in items], origin, pin
         )
     except Exception:
         logger.exception("Could not queue loudness for the files preview job {} listed", job_id)
