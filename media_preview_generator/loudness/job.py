@@ -314,7 +314,7 @@ def process_item(
         stop_analysis = False
         for start in range(0, len(ordered), MAX_AUDIO_BATCH):
             group = ordered[start : start + MAX_AUDIO_BATCH]
-            batch_fields: dict[int, dict[str, str]] = {}
+            batch_fields: dict[int, dict[str, str] | analyze.LoudnessError] = {}
             if len(group) > 1:
                 if cancel_check and cancel_check():
                     errors.append(f"cancelled before stream {group[0][0]}")
@@ -365,6 +365,10 @@ def process_item(
                     phase_callback(f"Loudness {n}/{len(todo)}")
                 try:
                     fields = batch_fields.get(index)
+                    if isinstance(fields, analyze.LoudnessError):
+                        # A single-track run would hit the same deterministic failure.
+                        errors.append(f"stream {index} ({same[0].codec}): {fields}")
+                        continue
                     if fields is None:
                         fields = analyze.run(
                             ctx.ffmpeg,

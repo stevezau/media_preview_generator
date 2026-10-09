@@ -101,15 +101,29 @@ def test_parse_many_associates_reports_by_name_when_ffmpeg_finishes_out_of_order
 @pytest.mark.parametrize(
     ("stderr", "indices", "message"),
     [
-        (f"{_named(1)}\n{_named(3)}", [1, 3, 8], "omitted"),
         (f"{_named(1)}\n{_named(3)}\n{_named(3)}\n{_named(8)}", [1, 3, 8], "duplicate"),
         (f"{_named(1)}\n{_named(3)}\n{_named(8)}\n{_named(9)}", [1, 3, 8], "unexpected"),
-        ("[loudnorm@track1 @ 0x1234] {not json}", [1], "unreadable"),
     ],
 )
-def test_parse_many_rejects_missing_duplicate_unknown_or_malformed_reports(stderr, indices, message):
+def test_parse_many_rejects_duplicate_or_unknown_reports(stderr, indices, message):
     with pytest.raises(analyze.LoudnessError, match=message):
         analyze.parse_many(stderr, indices)
+
+
+@pytest.mark.parametrize(
+    ("bad_stderr", "message"),
+    [
+        ("", "omitted"),
+        ("[loudnorm@track3 @ 0x1234] {not json}", "unreadable"),
+        ("[loudnorm@track3 @ 0x1234] [1, 2]", "unreadable"),
+    ],
+)
+def test_parse_many_returns_a_per_stream_error_and_keeps_valid_reports(bad_stderr, message):
+    reports = analyze.parse_many(f"{_named(1)}\n{bad_stderr}", [1, 3])
+
+    assert reports[1] == _REPORT
+    assert isinstance(reports[3], analyze.LoudnessError)
+    assert message in str(reports[3])
 
 
 def test_parse_many_accepts_verified_silence_and_rejects_other_nonfinite_values():
@@ -121,10 +135,12 @@ def test_parse_many_accepts_verified_silence_and_rejects_other_nonfinite_values(
         analyze.ln_fields(analyze.parse_many(_named(4, invalid), [4])[4])
 
 
-def test_parse_many_rejects_an_unreadable_named_report():
+def test_parse_many_returns_an_unreadable_named_report_as_that_streams_error():
     stderr = '[loudnorm@track4 @ 0x1234] {"input_i": "-23.0", bad json}'
-    with pytest.raises(analyze.LoudnessError, match="unreadable"):
-        analyze.parse_many(stderr, [4])
+    reports = analyze.parse_many(stderr, [4])
+
+    assert isinstance(reports[4], analyze.LoudnessError)
+    assert "unreadable" in str(reports[4])
 
 
 def test_run_many_discards_reports_when_ffmpeg_exits_nonzero(tmp_path):
@@ -134,3 +150,15 @@ def test_run_many_discards_reports_when_ffmpeg_exits_nonzero(tmp_path):
 
     with pytest.raises(analyze.LoudnessError, match="exited 1"):
         analyze.run_many(str(script), "/m/movie.mkv", [(1, "aac", 1000), (3, "eac3", 1000)])
+
+
+def test_run_many_returns_fields_for_valid_streams_and_an_error_for_a_missing_one(tmp_path):
+    script = tmp_path / "ffmpeg"
+    script.write_text(f"#!/bin/sh\ncat >&2 <<'REPORTS'\n{_named(1)}\nREPORTS\nexit 0\n")
+    script.chmod(0o755)
+
+    results = analyze.run_many(str(script), "/m/movie.mkv", [(1, "aac", 1000), (3, "eac3", 1000)])
+
+    assert results[1] == analyze.ln_fields(_REPORT)
+    assert isinstance(results[3], analyze.LoudnessError)
+    assert "omitted" in str(results[3])

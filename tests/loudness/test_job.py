@@ -687,3 +687,46 @@ def test_worker_stops_publishing_a_batch_when_cancelled_between_stream_writes(ct
     assert "ln:loudness" in stored[11] and stored[12] is None
     assert not job.read_streams(db, [FILE], deadline=1e12)[0][0].item_marked
     assert outcome.outcome_key == job.FAILED and "cancelled" in outcome.message
+
+
+def test_worker_reports_a_bad_batch_stream_without_rereading_the_file_for_it(ctx, db, media):  # noqa: F811
+    results = {1: FIELDS, 2: job.analyze.LoudnessError("ffmpeg omitted the loudnorm report for stream 2")}
+
+    with (
+        patch.object(job.analyze, "run_many", return_value=results) as run_many,
+        patch.object(job.analyze, "run") as run,
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    run_many.assert_called_once()
+    run.assert_not_called()
+    stored = _streams(db)
+    assert "ln:loudness" in stored[11] and stored[12] is None
+    assert not job.read_streams(db, [FILE], deadline=1e12)[0][0].item_marked
+    assert outcome.outcome_key == job.FAILED and "stream 2" in outcome.message
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        job.DatabaseBusyError("Plex database busy"),
+        job.SourceChangedError("Plex's indexed source differs from the file"),
+        job.PublishError("Plex database is no longer open", state=job.Capability.UNREACHABLE),
+    ],
+)
+def test_worker_stops_after_a_retryable_write_error_without_analysing_the_next_group(ctx, db, media, error):  # noqa: F811
+    for stream_id, index in ((13, 3), (14, 5)):
+        _add_audio_stream(db, stream_id, index)
+
+    with (
+        patch.object(job.analyze, "run_many", return_value={1: FIELDS, 2: FIELDS, 3: FIELDS}) as run_many,
+        patch.object(job.analyze, "run", return_value=FIELDS) as run,
+        patch.object(job, "write_stream", side_effect=error),
+    ):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    run_many.assert_called_once()
+    run.assert_not_called()
+    assert outcome.outcome_key == job.WAITING
+    assert str(error) in outcome.message
+    assert not job.read_streams(db, [FILE], deadline=1e12)[0][0].item_marked
