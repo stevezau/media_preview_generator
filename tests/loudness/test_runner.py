@@ -70,7 +70,6 @@ def run(monkeypatch, tmp_path):
         "_ensure_gpu_cache": lambda: [],
         "_build_selected_gpus": lambda *a, **kw: [],
         "get_or_create_dispatcher": lambda config, gpus: dispatcher,
-        "wait_for_preceding_job": lambda *a: True,
         "wait_for_retry_time": lambda *a: True,
         "wait_for_tracker": lambda *a, **kw: None,
         "set_file_result_callback": lambda fn, job_id: callback.__setitem__("fn", fn),
@@ -251,7 +250,7 @@ def test_a_job_started_while_processing_is_paused_stays_pending(run, monkeypatch
     run["gate"].acquire.assert_not_called()
 
 
-@pytest.mark.parametrize("wait", ["wait_for_preceding_job", "wait_for_retry_time", "hold_pause_from_before_restart"])
+@pytest.mark.parametrize("wait", ["wait_for_retry_time", "hold_pause_from_before_restart"])
 def test_a_job_cancelled_while_it_waits_to_start_holds_no_slot(run, monkeypatch, wait):
     run["jm"].get_job.return_value.paused = True
     monkeypatch.setattr(job, "hold_pause_from_before_restart", lambda *a: True)
@@ -421,7 +420,7 @@ def follow_up(monkeypatch):
 def test_follow_up_is_skipped_when_loudness_is_off_everywhere(follow_up, monkeypatch):
     triggers, created = follow_up
     monkeypatch.setattr("media_preview_generator.loudness.settings.loudness_enabled_anywhere", lambda configs: False)
-    triggers._submit_loudness_follow_up("p1", [], ["/m/a.mkv"], "sonarr", None)
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", None)
     assert created == []
 
 
@@ -436,8 +435,8 @@ def test_follow_up_drops_a_known_non_plex_originator_pin_and_keeps_a_plex_pin(fo
         "media_preview_generator.loudness.settings.loudness_enabled_anywhere",
         lambda configs: any(c.id == "plex-1" for c in configs),
     )
-    triggers._submit_loudness_follow_up("p1", [], ["/m/a.mkv"], "sonarr", "jellyfin-1")
-    triggers._submit_loudness_follow_up("p1", [], ["/m/a.mkv"], "sonarr", "plex-1")
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", "jellyfin-1")
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", "plex-1")
     assert [c["server_id"] for c in created] == [None, "plex-1"]
     assert created[0]["follows_job_id"] == "p1" and created[0]["file_paths"] == ["/m/a.mkv"]
 
@@ -478,7 +477,7 @@ def test_follow_up_never_broadens_an_explicit_plex_or_unknown_pin(
         ]
     ]
     monkeypatch.setattr(triggers, "_server_configs", lambda: configs)
-    triggers._submit_loudness_follow_up("p1", ["intro-1"], ["/m/a.mkv"], "sonarr", pin)
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", pin)
     if not should_create:
         assert created == []  # The enabled second Plex server cannot receive this pinned request.
     else:
@@ -488,8 +487,7 @@ def test_follow_up_never_broadens_an_explicit_plex_or_unknown_pin(
                 "priority": triggers.PRIORITY_NORMAL,
                 "source": "sonarr",
                 "file_paths": ["/m/a.mkv"],
-                "follows_job_id": "intro-1",
-                "follows_job_ids": ["p1", "intro-1"],
+                "follows_job_id": "p1",
                 "server_id": expected_pin,
             }
         ]
@@ -511,7 +509,7 @@ def test_a_failing_loudness_follow_up_never_costs_the_intro_follow_up(monkeypatc
 def test_follow_up_runs_at_normal_and_skips_paths_already_queued_for_the_preview(follow_up, monkeypatch):
     triggers, created = follow_up
     monkeypatch.setattr("media_preview_generator.loudness.settings.loudness_enabled_anywhere", lambda configs: True)
-    triggers._submit_loudness_follow_up("p1", [], ["/m/a.mkv"], "sonarr", None)
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", None)
     assert created[0]["priority"] == triggers.PRIORITY_NORMAL  # never ahead of its High preview, nor below Normal
     assert created[0]["library_name"] == "Plex loudness · Show S01E01"
     earlier = SimpleNamespace(
@@ -520,24 +518,16 @@ def test_follow_up_runs_at_normal_and_skips_paths_already_queued_for_the_preview
         config={"follows_job_id": "p1", "file_paths": ["/m/a.mkv"], "source": "sonarr"},
     )
     triggers.get_job_manager().get_all_jobs.return_value = [earlier]
-    triggers._submit_loudness_follow_up("p1", [], ["/m/a.mkv", "/m/b.mkv"], "sonarr", None)
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv", "/m/b.mkv"], "sonarr", None)
     assert created[1]["file_paths"] == ["/m/b.mkv"]
-    triggers._submit_loudness_follow_up("p1", [], ["/m/a.mkv"], "sonarr", None)
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", None)
     assert len(created) == 2
-
-
-def test_follow_up_waits_for_the_intro_and_credits_follow_up_when_there_is_one(follow_up, monkeypatch):
-    triggers, created = follow_up
-    monkeypatch.setattr("media_preview_generator.loudness.settings.loudness_enabled_anywhere", lambda configs: True)
-    triggers._submit_loudness_follow_up("p1", ["intro-1"], ["/m/a.mkv"], "sonarr", None)
-    triggers._submit_loudness_follow_up("p2", [], ["/m/b.mkv"], "sonarr", None)
-    assert [c["follows_job_id"] for c in created] == ["intro-1", "p2"]
 
 
 @pytest.mark.parametrize("existing_pin", [None, "plex-1", "plex-2"])
 @pytest.mark.parametrize("incoming_pin", [None, "plex-1", "plex-2"])
 @pytest.mark.parametrize("state", ["pending", "revived", "running"])
-def test_different_preview_always_keeps_its_own_barrier(follow_up, monkeypatch, existing_pin, incoming_pin, state):
+def test_different_preview_always_gets_its_own_follow_up(follow_up, monkeypatch, existing_pin, incoming_pin, state):
     triggers, created = follow_up
     configs = [_follow_up_plex(sid) for sid in ("plex-1", "plex-2")]
     monkeypatch.setattr(triggers, "_server_configs", lambda: configs)
@@ -555,15 +545,14 @@ def test_different_preview_always_keeps_its_own_barrier(follow_up, monkeypatch, 
     jm = triggers.get_job_manager()
     getattr(jm, "get_running_jobs" if state == "running" else "get_pending_jobs").return_value = [earlier]
     jm.get_all_jobs.return_value = [earlier]
-    triggers._submit_loudness_follow_up("p1", ["intro-1"], ["/m/a.mkv"], "sonarr", incoming_pin)
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", incoming_pin)
     assert created == [
         {
             "library_name": "Plex loudness · Show S01E01",
             "priority": triggers.PRIORITY_NORMAL,
             "source": "sonarr",
             "file_paths": ["/m/a.mkv"],
-            "follows_job_id": "intro-1",
-            "follows_job_ids": ["p1", "intro-1"],
+            "follows_job_id": "p1",
             "server_id": incoming_pin,
         }
     ]
@@ -582,7 +571,7 @@ def test_different_preview_preserves_mapped_sender_retries(follow_up, monkeypatc
             config={"follows_job_id": "previous", "file_paths": ["/remote/a.mkv"], "source": existing_source},
         )
     ]
-    triggers._submit_loudness_follow_up("p1", [], ["/m/a.mkv"], "sonarr", "plex-1")
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", "plex-1")
     assert len(created) == 1
     assert created[0]["file_paths"] == ["/m/a.mkv"]
     assert created[0]["server_id"] == "plex-1"
@@ -600,9 +589,9 @@ def test_marker_follow_up_cannot_cover_loudness(follow_up, monkeypatch):
             config={"follows_job_id": "p1", "file_paths": ["/m/a.mkv"], "source": "sonarr"},
         )
     ]
-    triggers._submit_loudness_follow_up("p1", ["intro-1"], ["/m/a.mkv"], "sonarr", None)
+    triggers._submit_loudness_follow_up("p1", ["/m/a.mkv"], "sonarr", None)
     assert created[0]["file_paths"] == ["/m/a.mkv"]
-    assert created[0]["follows_job_id"] == "intro-1"
+    assert created[0]["follows_job_id"] == "p1"
 
 
 @pytest.mark.parametrize("pin", [None, "plex-2"])
@@ -651,26 +640,3 @@ def test_permanent_publisher_failures_do_not_create_retries(run):
     run["publisher_rows"] = {"/m/a.mkv": [{"server_id": "plex-1", "status": job.FAILED}]}
     job.run_loudness_job("j1")
     assert run["retries"] == []
-
-
-@pytest.mark.parametrize("blocked", [None, "preview", "marker-2"])
-def test_every_predecessor_is_checked_before_acquiring_worker_slot(run, monkeypatch, blocked):
-    run["jm"].get_job.return_value.config.update(
-        follows_job_id="marker-1", follows_job_ids=["preview", "marker-1", "marker-2"]
-    )
-    seen = []
-
-    def wait(job_id, predecessor, cancel_check):
-        run["gate"].acquire.assert_not_called()
-        seen.append(predecessor)
-        return predecessor != blocked
-
-    monkeypatch.setattr(job, "wait_for_preceding_job", wait)
-    job.run_loudness_job("j1")
-    expected = ["marker-1", "preview", "marker-2"]
-    assert seen == expected[: expected.index(blocked) + 1] if blocked else seen == expected
-    if blocked:
-        run["gate"].acquire.assert_not_called()
-        run["jm"].cancel_job.assert_called_with("j1")
-    else:
-        run["gate"].acquire.assert_called_once()

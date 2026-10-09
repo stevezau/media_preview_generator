@@ -1230,8 +1230,8 @@ def _queue_intro_credits_follow_ups(job_id: str, items: list, pin: str | None) -
         from ..markers.job_runner import RECENTLY_ADDED_SOURCE
         from ..markers.triggers import submit_follow_ups
 
-        intro_jobs = submit_follow_ups(preview_job_id=job_id, items=list(items), source=RECENTLY_ADDED_SOURCE, pin=pin)
-        _queue_loudness_follow_up(job_id, items, pin, source=RECENTLY_ADDED_SOURCE, intro_job_ids=intro_jobs)
+        submit_follow_ups(preview_job_id=job_id, items=list(items), source=RECENTLY_ADDED_SOURCE, pin=pin)
+        _queue_loudness_follow_up(job_id, items, pin, source=RECENTLY_ADDED_SOURCE)
     except Exception:
         logger.exception("Could not queue the Intro & Credits jobs for the files Recently Added scan {} listed", job_id)
 
@@ -1242,11 +1242,10 @@ def _queue_loudness_follow_up(
     pin: str | None,
     *,
     source: str | None = None,
-    intro_job_ids: list[str] | None = None,
 ) -> None:
     """Queue opted-in loudness for this preview's enumerated files, without another library scan.
 
-    Manual and retry runs never spawn new feature jobs. Existing dependencies identify this preview's own follow-ups across
+    Manual and retry runs never spawn new feature jobs. ``follows_job_id`` identifies this preview's own follow-ups across
     restart, deduplicating this preview's upfront webhook or Recently Added follow-up at dispatch time.
     """
     try:
@@ -1264,9 +1263,7 @@ def _queue_loudness_follow_up(
         if origin == "manual":
             # A manual run does exactly what its dialog ticked; loudness is its own job there.
             return
-        _submit_loudness_follow_up(
-            job_id, list(intro_job_ids or []), [item.canonical_path for item in items], origin, pin
-        )
+        _submit_loudness_follow_up(job_id, [item.canonical_path for item in items], origin, pin)
     except Exception:
         logger.exception("Could not queue loudness for the files preview job {} listed", job_id)
 

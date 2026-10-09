@@ -570,7 +570,8 @@ def test_preview_continuation_preserves_follow_up_scope_with_two_owners(tmp_path
         assert len(queued) == 1
         assert queued[0].config.get("server_id") == pin
         assert queued[0].config["file_paths"] == [work.canonical_path]
-        assert queued[0].config["follows_job_ids"] == [preview.id]
+        assert queued[0].config["follows_job_id"] == preview.id
+        assert "follows_job_ids" not in queued[0].config
         if existing_follow_up:
             assert {queued[0].id} == previous_ids
         assert result["outcome"]["skipped_file_not_found"] == 1

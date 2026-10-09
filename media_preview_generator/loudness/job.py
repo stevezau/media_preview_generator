@@ -31,7 +31,6 @@ from ..markers.job_runner import (
     job_freeze_check,
     sent_by_a_sender,
     server_pin,
-    wait_for_preceding_job,
     wait_for_retry_time,
     wait_for_tracker,
     worker_cards,
@@ -70,7 +69,6 @@ from .resume import CompletionLedger, source_fingerprint
 from .settings import library_chosen, load_server_loudness, loudness_libraries
 
 LABEL = "Plex loudness"
-MAX_FOLLOW_UP_DEPENDENCIES = 500
 WRITTEN = "loudness_written"
 UP_TO_DATE = "loudness_up_to_date"
 NO_OWNERS = "loudness_no_owners"
@@ -590,11 +588,6 @@ def _run_loudness_pass(job_id: str) -> bool | None:
         with failure_scope(job_id):
             try:
                 cfg = load_file_input(jm.config_dir, cfg)
-                dependencies = dict.fromkeys([cfg.get("follows_job_id"), *(cfg.get("follows_job_ids") or [])])
-                for dependency in dependencies:
-                    if not wait_for_preceding_job(job_id, dependency, cancel_check):
-                        jm.cancel_job(job_id)
-                        return
                 retry_wait_kwargs = {"progress_job_id": chain_head} if chain_head else {}
                 if not wait_for_retry_time(job_id, cfg, cancel_check, **retry_wait_kwargs):
                     jm.cancel_job(job_id)
@@ -910,7 +903,6 @@ def create_loudness_job(
     libraries: list[dict] | None = None,
     file_paths: list[str] | None = None,
     follows_job_id: str | None = None,
-    follows_job_ids: list[str] | None = None,
     server_id: str | None = None,
     retry_attempt: int = 0,
     retry_delay_s: int = 0,
@@ -926,9 +918,7 @@ def create_loudness_job(
         source: What created it (``manual``, a webhook source).
         libraries: ``[{"server_id", "library_id"}]``; empty with no ``file_paths`` = every library loudness is on for.
         file_paths: Explicit files or folders instead of libraries.
-        follows_job_id: The job this one waits for before taking a slot: a webhook's Intro & Credits follow-up, else
-            its preview job.
-        follows_job_ids: Additional preview and marker jobs whose first attempts must finish before this job.
+        follows_job_id: The preview job a follow-up was queued for. Shown as its companion; never waited for.
         server_id: Only this server (the preview job's pin); None = every server with loudness on.
         retry_attempt: For a retry (``_queue_retry``): which retry (1-based).
         retry_delay_s: For a retry: seconds to wait before it takes a slot.
@@ -946,11 +936,6 @@ def create_loudness_job(
         "file_paths": list(file_paths or []),
         "follows_job_id": follows_job_id,
     }
-    if follows_job_ids:
-        dependencies = list(dict.fromkeys([*(follows_job_ids or []), *([follows_job_id] if follows_job_id else [])]))
-        if len(dependencies) > MAX_FOLLOW_UP_DEPENDENCIES:
-            raise ValueError("Too many preceding jobs for one loudness follow-up")
-        config["follows_job_ids"] = dependencies
     if server_id:
         config["server_id"] = server_id
     if retry_attempt:
