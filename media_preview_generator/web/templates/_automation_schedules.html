@@ -118,8 +118,9 @@
                                 <span class="ov-seg-opt"><input type="radio" name="scheduleMarkersMode" id="scheduleMarkersFind" value="find" checked onchange="onScanModeChange()"><label for="scheduleMarkersFind">Find markers</label></span>
                                 <span class="ov-seg-opt"><input type="radio" name="scheduleMarkersMode" id="scheduleMarkersCheckServers" value="check_servers" onchange="onScanModeChange()"><label for="scheduleMarkersCheckServers">Check servers</label></span>
                             </div>
-                            <button type="button" class="info-icon" id="scheduleMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks your servers still show the markers this app sent, and resends any missing or changed." data-explain-title="Check servers" data-explain-template="infoScheduleCheckServersTpl" aria-label="Checks your servers still show the markers this app sent, and resends any missing or changed."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                            <button type="button" class="info-icon" id="scheduleMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Doesn't scan files. Quickly checks every server still has the markers this app added, and puts back any it lost." data-explain-title="Check servers" data-explain-template="infoScheduleCheckServersTpl" aria-label="Doesn't scan files. Quickly checks every server still has the markers this app added, and puts back any it lost."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                         </div>
+                        <div class="ov-hint" id="scheduleMarkersModeHint" hidden>Finds skip markers for new or changed files in the libraries below, and puts back any a server has lost.</div>
                         <div class="ov-fld" id="scheduleLookbackGroup" style="display:none;">
                             <label for="scheduleLookback" class="ov-lbl">Lookback window
                                 <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far back a Recently Added scan looks for new items." data-explain-title="Lookback window" data-explain-template="infoScheduleLookbackTpl" aria-label="How far back a Recently Added scan looks for new items."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
@@ -284,8 +285,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <!-- ⓘ details: each opens in #globalInfoModal from the ⓘ whose data-explain-template names it. -->
 <template id="infoScheduleCheckServersTpl">
-    <p>Checks that every server with Intro &amp; Credits on still shows the markers this app sent, and sends them again where they're missing or changed (unless that server is set to keep its own).</p>
-    <p>Covers all servers and libraries.</p>
+    <p>Doesn't scan files. Quickly checks every server still has the markers this app added, and puts back any it lost.</p>
     <p>Low priority unless you pick otherwise.</p>
 </template>
 <template id="infoScanModeFullTpl">

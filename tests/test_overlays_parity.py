@@ -19,7 +19,6 @@ WEB = ROOT / "media_preview_generator/web"
 # Inventory tokens that name something the redesign deliberately replaced; each maps to what superseded it.
 SUPERSEDED = {
     ".sched-group-label": "numbered section headers (.ov-sec-h) carry the group labels",
-    "#jobCheckServersNote": None,
 }
 SUPERSEDED = {token: why for token, why in SUPERSEDED.items() if why}
 TOKEN = re.compile(r"`([^`]+)`")
