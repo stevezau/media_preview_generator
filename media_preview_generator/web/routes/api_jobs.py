@@ -1201,11 +1201,10 @@ def _cancel_job_by_user(job_manager, job_id: str):
 @api.route("/jobs/cancel-bulk", methods=["POST"])
 @api_token_required
 def cancel_jobs_bulk():
-    """Cancel several queued or paused jobs at once.
+    """Cancel several queued or running jobs at once, as the row Cancel button would.
 
     Body: ``{"job_ids": ["<id>", ...]}`` with 1 to ``_BULK_CANCEL_MAX`` ids.
-    Jobs that are neither pending nor paused (actively running, finished, unknown) and retry-chain heads
-    with a running retry are skipped, so a stale selection never kills running work.
+    Finished and unknown jobs are skipped.
 
     Returns:
         ``{"cancelled": [ids], "skipped": [{"id": id, "reason": str}]}``
@@ -1217,14 +1216,11 @@ def cancel_jobs_bulk():
     if len(job_ids) > _BULK_CANCEL_MAX:
         return jsonify({"error": f"At most {_BULK_CANCEL_MAX} jobs can be cancelled at once"}), 400
 
-    from ..settings_manager import get_settings_manager
-
     job_manager = get_job_manager()
-    global_pause = bool(get_settings_manager().processing_paused)
     cancelled: list[str] = []
     skipped: list[dict[str, str]] = []
     for job_id in dict.fromkeys(job_ids):
-        _job, reason = job_manager.cancel_job_if_pending(job_id, global_pause=global_pause)
+        _job, reason = job_manager.cancel_job_if_active(job_id)
         if reason:
             skipped.append({"id": job_id, "reason": reason})
         else:

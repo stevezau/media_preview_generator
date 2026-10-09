@@ -513,3 +513,30 @@ class TestCleanupOnAllFreshFastPath:
             "Jellyfin/Emby never received UpdateType:Deleted for the old release."
         )
         assert deleted_calls[0].kwargs["deleted_paths"] == [str(media_dir / "Movie (2024) -OLD.mkv")]
+
+
+class TestPlexOnlySkipsFolderListing:
+    """Plex writes into its own config dir, so cleanup must not list the media folder (a network call per file)."""
+
+    def test_plex_only_registry_never_lists_media_folder(self, tmp_path, mock_config, monkeypatch):
+        _touch(tmp_path / "Movie.mkv")
+        registry = _make_registry_with_servers(["plex"])
+        listed = MagicMock(return_value=[])
+        monkeypatch.setattr("media_preview_generator.processing.multi_server._list_video_files", listed)
+
+        removed = cleanup_orphaned_outputs(
+            str(tmp_path / "Movie.mkv"), deleted_paths=[], registry=registry, config=mock_config
+        )
+
+        assert removed == []
+        listed.assert_not_called()
+
+    def test_plex_plus_emby_still_sweeps_once(self, tmp_path, mock_config, monkeypatch):
+        _touch(tmp_path / "Movie.mkv")
+        registry = _make_registry_with_servers(["plex", "emby"])
+        listed = MagicMock(return_value=[tmp_path / "Movie.mkv"])
+        monkeypatch.setattr("media_preview_generator.processing.multi_server._list_video_files", listed)
+
+        cleanup_orphaned_outputs(str(tmp_path / "Movie.mkv"), deleted_paths=[], registry=registry, config=mock_config)
+
+        listed.assert_called_once_with(tmp_path)

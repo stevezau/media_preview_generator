@@ -2511,48 +2511,37 @@ class JobManager:
         any worker spawned) the stale flag is harmless: IDs are UUIDs
         so nothing else will ever poll it.
         """
-        job, _reason = self._cancel_job(job_id, pending_only=False)
+        job, _reason = self._cancel_job(job_id, active_only=False)
         return job
 
-    def cancel_job_if_pending(self, job_id: str, *, global_pause: bool = False) -> tuple[Job | None, str | None]:
-        """Cancel a job only if it is still PENDING or held by a pause, deciding under the manager lock.
+    def cancel_job_if_active(self, job_id: str) -> tuple[Job | None, str | None]:
+        """Cancel a job only if it is still PENDING or RUNNING, deciding under the manager lock.
 
-        Used by the bulk-cancel route so a job that started (or finished) after
-        the caller looked at it is never cancelled. The cancellation flag and the
-        "Cancellation requested by user" log line are applied only when the job
-        is actually cancelled. A live retry-chain head whose retry child is
-        RUNNING is skipped rather than killing running work. A RUNNING job that
-        is paused (its own pause, or ``global_pause``) does no work, so it can be cancelled.
+        Used by the bulk-cancel route so a job that finished after the caller
+        looked at it gets no cancellation flag or "Cancellation requested by
+        user" log line. Otherwise it behaves like the row Cancel button,
+        including cancelling a retry-chain head's pending or running retries.
 
         Args:
             job_id: Id of the job to cancel.
-            global_pause: Whether "Pause all" currently holds every running job.
 
         Returns:
             ``(job, None)`` when cancelled; ``(job_or_None, reason)`` when skipped,
-            with reason ``not_found``, ``not_pending (<status>)`` or ``retry_running``.
+            with reason ``not_found`` or ``not_active (<status>)``.
         """
-        return self._cancel_job(job_id, pending_only=True, global_pause=global_pause)
+        return self._cancel_job(job_id, active_only=True)
 
-    def _cancel_job(self, job_id: str, pending_only: bool, global_pause: bool = False) -> tuple[Job | None, str | None]:
-        """Shared body of ``cancel_job`` / ``cancel_job_if_pending``."""
+    def _cancel_job(self, job_id: str, active_only: bool) -> tuple[Job | None, str | None]:
+        """Shared body of ``cancel_job`` / ``cancel_job_if_active``."""
         cancelled = False
         cancel_children_of_chain: str | None = None
         with self._lock:
             job = self._jobs.get(job_id)
-            if pending_only:
+            if active_only:
                 if job is None:
                     return None, "not_found"
-                held = job.status == JobStatus.RUNNING and (job.paused or global_pause)
-                if job.status != JobStatus.PENDING and not held:
-                    return job, f"not_pending ({job.status.value})"
-                if job.config.get("is_retry_chain") and any(
-                    j.config.get("is_retry")
-                    and j.config.get("parent_job_id") == job.id
-                    and j.status == JobStatus.RUNNING
-                    for j in self._jobs.values()
-                ):
-                    return job, "retry_running"
+                if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+                    return job, f"not_active ({job.status.value})"
                 self.request_cancellation(job_id)
                 self.add_log(job_id, "WARNING - Cancellation requested by user")
             if job and job.status in (JobStatus.PENDING, JobStatus.RUNNING):

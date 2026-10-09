@@ -246,6 +246,15 @@ def _tmp_path_for(canonical_path: str, working_tmp_folder: str) -> str:
     return os.path.join(working_tmp_folder, f"frames-{digest}")
 
 
+def _writes_beside_media(adapter: OutputAdapter) -> bool:
+    """True when the adapter overrides either sidecar cleanup hook."""
+    cls = type(adapter)
+    return (
+        cls.list_orphans_in_folder is not OutputAdapter.list_orphans_in_folder
+        or cls.sweep_stale_write_temps is not OutputAdapter.sweep_stale_write_temps
+    )
+
+
 def _adapters_for_cleanup(registry: ServerRegistry) -> list[OutputAdapter]:
     """Return one adapter instance per configured server, for the orphan sweep.
 
@@ -258,14 +267,14 @@ def _adapters_for_cleanup(registry: ServerRegistry) -> list[OutputAdapter]:
 
     Skips adapters that don't write basename-derived sidecars (Plex's
     bundle BIF lives under the Plex config folder, not next to the
-    media — its default ``list_orphans_in_folder`` returns ``[]`` so
-    including it here is safe but wasted work).
+    media). Keeping them would list the media folder on every file —
+    a network round trip per item for nothing.
     """
     seen_kinds: set[str] = set()
     adapters: list[OutputAdapter] = []
     for cfg in registry.configs():
         adapter = _adapter_for_server(cfg)
-        if adapter is None:
+        if adapter is None or not _writes_beside_media(adapter):
             continue
         # Dedupe by adapter class name — multiple Jellyfin servers all
         # share the same artifact layout, so one JellyfinTrickplayAdapter
@@ -783,8 +792,8 @@ def _try_reuse_existing_bif(
         canonical_path: The source media file we're trying to publish.
         out_dir: Frame-cache slot to unpack into. Must be safe to overwrite.
         probe_bundle_factory: Zero-arg callable returning a placeholder
-            :class:`BifBundle` for ``compute_output_paths`` (only the
-            canonical_path is consulted in the Plex bundle code path).
+            :class:`BifBundle` for ``compute_output_paths`` (the Plex bundle
+            path reads the canonical_path and, for bulk scans, the server hash).
         resolve_item_id: Per-dispatch memoising resolver from
             :func:`_make_item_id_resolver` so repeated calls across
             sub-phases don't re-burn slow Jellyfin Pass 2 enumerations.
@@ -1739,9 +1748,12 @@ def _process_canonical_path_previews(
     # the probe path. Build one helper so the three call-sites below stay in
     # sync (a divergence here previously hid behind copy-pasted dataclass kwargs).
     probe_frame_interval = int(getattr(config, "thumbnail_interval", 10) or 10)
-    # Preserve enumeration metadata for callers that inspect bundles;
-    # Plex output paths use the current file's hash, not these staleable hints.
     _bundle_meta_by_server = bundle_metadata_by_server or {}
+    # Only bulk scans may take Plex's per-part hash (after a name + size match);
+    # webhook and path-only dispatches hash the file, since Plex may not have rescanned it yet.
+    trust_server_hash = not (
+        source or getattr(config, "webhook_source", None) or getattr(config, "webhook_paths", None)
+    )
 
     def _probe_bundle(server_id: str = "") -> BifBundle:
         prefetched = _bundle_meta_by_server.get(server_id, ()) if server_id else ()
@@ -1755,6 +1767,7 @@ def _process_canonical_path_previews(
             frame_count=0,
             prefetched_bundle_metadata=prefetched,
             source_fingerprint=source_fingerprint,
+            trust_server_hash=trust_server_hash,
         )
 
     # Per-dispatch memoiser for server reverse-lookups. Without this,
@@ -2196,6 +2209,7 @@ def _process_canonical_path_previews(
                 prefetched_bundle_metadata=_bundle_meta_by_server.get(server.id, ()),
                 server_display_name=server.name,
                 source_fingerprint=source_fingerprint,
+                trust_server_hash=trust_server_hash,
             )
 
         # Tag each publisher's result with where its frames came from so

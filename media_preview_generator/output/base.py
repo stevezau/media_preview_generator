@@ -42,9 +42,8 @@ class BifBundle:
     width: int
     height: int
     frame_count: int
-    # Enumeration metadata is retained for compatibility with job callers.
-    # Plex destinations use the current source bytes: these hints may refer
-    # to an older file replaced at the same path since Plex's last scan.
+    # Enumeration metadata is retained for compatibility with job callers;
+    # Plex output paths ignore it (it may describe a file since replaced).
     prefetched_bundle_metadata: tuple[tuple[str, str], ...] = ()
     # Owning server's display name, threaded through purely for log
     # attribution in the BIF packing helper (``generate_bif`` prefixes its
@@ -53,6 +52,9 @@ class BifBundle:
     # cross-referencing the next "Publisher result:" line).
     server_display_name: str | None = None
     source_fingerprint: SourceFingerprint | None = None
+    # Only bulk scans may take the bundle hash from the server (after a name and size
+    # match) instead of reading the file; webhooks and path-only jobs leave this False.
+    trust_server_hash: bool = False
 
 
 class OutputAdapter(ABC):
@@ -92,8 +94,8 @@ class OutputAdapter(ABC):
         ``output-status`` endpoint) only needs path computation and
         hasn't built a live client. Adapters that don't actually need
         the server (Emby sidecar, Jellyfin trickplay) accept ``None``
-        unconditionally. Plex derives its bundle hash from local bytes
-        and also accepts ``None``.
+        unconditionally. Plex hashes the local file when it has no server (or the
+        bundle isn't trusted to use the server's hash) and also accepts ``None``.
 
         Implementations may raise ``LibraryNotYetIndexedError`` when the
         server has not yet ingested the item the adapter needs metadata for;

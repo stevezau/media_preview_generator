@@ -203,13 +203,13 @@
             </button>
             <span id="selectionBar" class="selection-bar d-none d-inline-flex align-items-center gap-2" role="group" aria-label="Actions for selected jobs">
                 <span class="selection-count text-nowrap" id="selectionCount" aria-live="polite">0 selected</span>
-                <button type="button" class="btn dash-btn-sm text-nowrap" id="cancelSelectedButton" onclick="cancelSelectedQueuedJobs()">
-                    <i class="bi bi-x-circle" aria-hidden="true"></i><span id="cancelSelectedButtonText">Cancel queued (0)</span>
+                <button type="button" class="btn dash-btn-sm text-nowrap" id="cancelSelectedButton" onclick="cancelSelectedJobs()">
+                    <i class="bi bi-x-circle" aria-hidden="true"></i><span id="cancelSelectedButtonText">Cancel (0)</span>
                 </button>
                 <button type="button" class="btn dash-btn-sm text-nowrap" id="deleteSelectedButton" onclick="deleteSelectedFinishedJobs()">
                     <i class="bi bi-trash" aria-hidden="true"></i><span id="deleteSelectedButtonText">Delete finished (0)</span>
                 </button>
-                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Cancel queued stops ticked waiting jobs. Delete finished removes ticked completed, failed and cancelled jobs. Running jobs are never touched." aria-label="What the selection buttons do"><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Cancel stops the ticked waiting and running jobs. Delete finished removes the ticked completed, failed and cancelled jobs." aria-label="What the selection buttons do"><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                 <button type="button" class="btn dash-btn-sm text-nowrap" onclick="clearJobSelection()">Clear selection</button>
             </span>
             <div class="dropdown d-inline-block" id="clearJobsDropdown">

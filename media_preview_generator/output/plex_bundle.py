@@ -5,9 +5,10 @@ and packs the BIF at that location. Plex's expected path structure:
 
     {plex_config_folder}/Media/localhost/<h0>/<h[1:]>.bundle/Contents/Indexes/index-sd.bif
 
-where ``<h0>`` is the first character of the bundle hash calculated from the
-local media file. Publishing does not require Plex to be online or to have
-indexed the file.
+where ``<h0>`` is the first character of the bundle hash. The hash is calculated
+from the local media file, except in bulk scans, where Plex's own per-part hash is
+used after a file name and size match. Publishing does not require Plex to be
+online or to have indexed the file.
 """
 
 from __future__ import annotations
@@ -52,14 +53,35 @@ class PlexBundleAdapter(OutputAdapter):
     ) -> list[Path]:
         """Return the bundle destination derived from the current source file.
 
-        Server metadata can describe a replaced file, so even prefetched
-        hashes are not authoritative for the bytes being processed now.
+        The hash is read from the file, except for bulk scans
+        (``bundle.trust_server_hash``): Plex's own hash saves two disk reads per
+        file, and is used only when exactly one of its parts has this file's name
+        and byte size. Anything else, including a Plex that has no hash yet,
+        falls back to reading the file.
 
         Raises:
             OSError: The source is unreadable or changes during hashing.
         """
         self._validate_source(bundle)
-        return [self._bundle_bif_path(calculate_plex_hash(bundle.canonical_path))]
+        bundle_hash = self._server_hash(bundle, server, item_id) or calculate_plex_hash(bundle.canonical_path)
+        return [self._bundle_bif_path(bundle_hash)]
+
+    @staticmethod
+    def _server_hash(bundle: BifBundle, server: MediaServer | None, item_id: str | None) -> str | None:
+        """Plex's bundle hash for this exact file, or ``None`` when it can't be trusted."""
+        if not (bundle.trust_server_hash and server is not None and item_id):
+            return None
+        get_parts = getattr(server, "get_bundle_parts", None)
+        if get_parts is None:
+            return None
+        size = (bundle.source_fingerprint or get_source_fingerprint(bundle.canonical_path))[2]
+        name = os.path.basename(bundle.canonical_path)
+        hashes = {
+            h
+            for h, remote, part_size in get_parts(item_id, quiet=True)
+            if part_size == size and os.path.basename(remote.replace("\\", "/")) == name
+        }
+        return hashes.pop() if len(hashes) == 1 else None
 
     def publish(self, bundle: BifBundle, output_paths: list[Path], item_id: str | None = None) -> None:
         """Pack ``bundle.frame_dir`` into a BIF file at the first output path.

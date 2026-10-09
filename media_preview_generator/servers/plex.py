@@ -2150,12 +2150,16 @@ class PlexServer(MediaServer):
         return True
 
     def get_bundle_metadata(self, item_id: str) -> list[tuple[str, str]]:
-        """Return ``(bundle_hash, remote_path)`` for every MediaPart of an item.
+        """Return ``(bundle_hash, remote_path)`` for every MediaPart of an item (see :meth:`get_bundle_parts`)."""
+        return [(h, f) for h, f, _size in self.get_bundle_parts(item_id)]
 
-        Retained Plex metadata API for diagnostics and compatibility, outside
-        the abstract :class:`MediaServer` interface. The ``/tree`` endpoint
-        returns XML; we surface the relevant attributes as plain tuples.
-        Preview publishing calculates its bundle hash from local media instead.
+    def get_bundle_parts(self, item_id: str, *, quiet: bool = False) -> list[tuple[str, str, int]]:
+        """Return ``(bundle_hash, remote_path, size)`` for every MediaPart of an item.
+
+        Outside the abstract :class:`MediaServer` interface. The ``/tree`` endpoint
+        returns XML; we surface the relevant attributes as plain tuples. Bulk scans
+        use the hash only after the size matches the local file (see
+        :meth:`PlexBundleAdapter.compute_output_paths`); webhook and path-only jobs hash the file.
 
         ``item_id`` may be either a bare ratingKey (``"557676"``) or a full
         Plex API path (``"/library/metadata/557676"``); we normalise both so
@@ -2164,6 +2168,10 @@ class PlexServer(MediaServer):
         previously misreported as ``not_indexed``). The path-form input
         used to be the silent root cause of every Sonarr/Radarr → Plex
         webhook returning ``skipped_not_indexed`` — see D31.
+
+        With ``quiet=True`` (the per-file fast path in bulk scans) the call is not
+        retried and a failure logs at DEBUG: the caller falls back to hashing the
+        file, so a Plex outage must not stall or flood the log for every item.
 
         Returns an empty list when the lookup fails or the item has no parts.
         Failures now WARN (not DEBUG) so the next time we malform a URL it
@@ -2180,9 +2188,11 @@ class PlexServer(MediaServer):
             return []
 
         try:
-            data = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}/tree")
+            data = retry_plex_call(
+                self._connect().query, f"/library/metadata/{bare_id}/tree", max_retries=0 if quiet else 3
+            )
         except Exception as exc:
-            logger.warning(
+            (logger.debug if quiet else logger.warning)(
                 "Plex /tree query failed for item {!r} ({}: {}). Bundle metadata is unavailable.",
                 bare_id,
                 type(exc).__name__,
@@ -2190,12 +2200,13 @@ class PlexServer(MediaServer):
             )
             return []
 
-        results: list[tuple[str, str]] = []
+        results: list[tuple[str, str, int]] = []
         for part in data.findall(".//MediaPart"):
             bundle_hash = part.attrib.get("hash") or ""
             file_path = part.attrib.get("file") or ""
             if bundle_hash and file_path:
-                results.append((bundle_hash, file_path))
+                size = part.attrib.get("size", "")
+                results.append((bundle_hash, file_path, int(size) if size.isdigit() else -1))
         return results
 
     def get_external_ids(self, item_id: str) -> dict[str, Any] | None:

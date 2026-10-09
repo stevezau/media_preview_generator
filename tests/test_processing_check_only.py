@@ -367,3 +367,47 @@ class TestAlreadyDoneFilesLogAtDebug:
             "Owners resolved:": ["INFO"],
             "All publishers' outputs already fresh": ["DEBUG"],
         }
+
+
+class TestServerHashTrustFlag:
+    """Scans may take the server's bundle hash; webhooks (``source`` set) must read the file."""
+
+    @pytest.mark.parametrize(
+        ("source", "config_attrs", "expected"),
+        [
+            (None, {}, True),
+            ("radarr", {}, False),
+            # The dispatcher check stage passes no ``source``; the job's config carries the webhook flags.
+            (None, {"webhook_source": "sonarr"}, False),
+            (None, {"webhook_paths": ["/data/Movies/Foo.mkv"]}, False),
+        ],
+    )
+    def test_bundle_flag_follows_dispatch_origin(
+        self, mock_config_for_processing, tmp_path, source, config_attrs, expected
+    ):
+        from media_preview_generator.output.emby_sidecar import EmbyBifAdapter
+
+        # A real Config defaults both to None; the MagicMock would otherwise report them as truthy.
+        mock_config_for_processing.webhook_source = None
+        mock_config_for_processing.webhook_paths = None
+        for name, value in config_attrs.items():
+            setattr(mock_config_for_processing, name, value)
+
+        registry = _emby_registry(tmp_path)
+        media_file = _seed_media(tmp_path)
+        seen = []
+
+        def spy(self, bundle, server, item_id):
+            seen.append(bundle.trust_server_hash)
+            return [tmp_path / "out" / "Foo.bif"]
+
+        with patch.object(EmbyBifAdapter, "compute_output_paths", autospec=True, side_effect=spy):
+            process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config_for_processing,
+                check_only=True,
+                source=source,
+            )
+        assert seen
+        assert set(seen) == {expected}
