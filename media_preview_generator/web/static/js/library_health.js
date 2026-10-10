@@ -122,11 +122,10 @@
         const running = state.data && state.data.running;
         if (!running) { setHtml('lhProgress', ''); return; }
         const reread = running.kind === 'reread';
-        const lead = reread ? 'Asking Plex to re-read' : '';
         const name = running.server_name ? `${running.server_name}: ` : '';
-        const step = running.step || (reread ? 'Working' : 'Checking');
+        const step = running.step || (reread ? 'Asking Plex to re-read' : 'Checking');
         const count = running.total ? ` · ${n(running.done)} of ${n(running.total)}` : '';
-        const text = running.cancelled ? 'Cancelling…' : `${lead ? lead + ' · ' : ''}${name}${step}${count}`;
+        const text = running.cancelled ? 'Cancelling…' : `${name}${step}${count}`;
         const pct = running.total ? Math.min(100, Math.round((running.done / running.total) * 100)) : 0;
         setHtml('lhProgress', `<div class="lh-progress">
             <div class="lh-progress-text"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>${escapeHtml(text)}</span>
@@ -364,7 +363,7 @@
         $('lhFixTitle').textContent = `Ask Plex to show ${n(total)} previews`;
         $('lhFixBody').innerHTML = `<p>These previews are already made. Plex only starts showing a preview after it re-reads the video, and it hasn't re-read these. This asks Plex to re-read each one. Nothing new is made.</p>
             <dl class="lh-kv">${rows.map(function (row) { return `<dt>${escapeHtml(row.name)}</dt><dd>${n(row.count)}</dd>`; }).join('')}</dl>
-            <p class="mb-0">Plex re-reads a few videos at a time, so a big list can take a while. It runs in the background on this page, where you can cancel it.</p>`;
+            <p class="mb-0">Plex re-reads one video at a time and can take a few seconds each, so thousands take hours. It runs in the background; you can cancel it on this page.</p>`;
         const start = $('lhFixStart');
         start.dataset.server = serverId;
         start.disabled = false;
