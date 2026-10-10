@@ -38,6 +38,7 @@ from typing import cast
 
 from loguru import logger
 
+from ..logging_config import PER_FILE_LOG
 from .carry_over import CARRIED_OVER
 from .decide import (
     AUDIO_OVER_CHAPTER_REASON,
@@ -241,11 +242,13 @@ class ServerResult:
 def write_line(text: str, level: str = "INFO") -> None:
     """Log one line as its own record.
 
+    The job's own log gets it at ``level``; the app-wide sinks drop it below WARNING unless they log DEBUG.
+
     Args:
         text: The line.
         level: Its level.
     """
-    logger.log(level, "{}", text)
+    logger.bind(**{PER_FILE_LOG: True}).log(level, "{}", text)
 
 
 def titled(title: str, text: str) -> str:

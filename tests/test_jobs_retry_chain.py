@@ -1509,3 +1509,90 @@ class TestGetStatsExcludesHiddenRetryChildren:
             f"got failed={stats['failed']} (orphan children are still being counted)"
         )
         assert stats["total"] == 0
+
+
+class TestChainHeadWaitingOnRetries:
+    """A chain head that only waits on its retries reads "Waiting for retry", not a finished 100% run."""
+
+    @staticmethod
+    def _waiting_head(jm, outcome="scheduled", eta_s=7199):
+        head = _seed_originating_job(jm)
+        jm.start_job(head.id)
+        jm.update_progress(head.id, percent=100, processed_items=3, total_items=3, current_item="Done")
+        eta = (datetime.now(UTC) + timedelta(seconds=eta_s)).isoformat()
+        jm.upsert_retry_chain_job(
+            canonical_path="",
+            basename="",
+            attempt=2,
+            max_attempts=5,
+            next_run_at=eta,
+            wait_seconds=eta_s,
+            outcome=outcome,
+            originating_job_id=head.id,
+        )
+        # The head's own pass restarts it after the chain went back to waiting.
+        jm.get_job(head.id).status = JobStatus.RUNNING
+        return head
+
+    def test_a_running_head_waiting_on_a_scheduled_retry_shows_the_attempt_and_time(self, jm):
+        head = self._waiting_head(jm)
+
+        progress = jm.get_job(head.id).to_dict()["progress"]
+
+        assert progress["percent"] == 0
+        assert progress["current_item"] == "Waiting for retry 2 of 5 · starts in 1h 59m"
+
+    def test_a_running_head_queued_for_a_slot_shows_the_attempt_without_a_time(self, jm):
+        head = self._waiting_head(jm, outcome="queued_for_slot")
+        jm.get_job(head.id).progress.retry_eta = None
+
+        progress = jm.get_job(head.id).to_dict()["progress"]
+
+        assert progress["percent"] == 0
+        assert progress["current_item"] == "Waiting for retry 2 of 5"
+
+    def test_the_live_progress_event_says_the_same_and_the_stored_progress_is_untouched(self, jm):
+        head = self._waiting_head(jm)
+        events = []
+        jm._emit_event = lambda name, payload: events.append((name, payload))
+
+        jm.update_progress(head.id, percent=100)
+
+        [(_, payload)] = [e for e in events if e[0] == "job_progress"]
+        assert payload["progress"]["current_item"].startswith("Waiting for retry 2 of 5")
+        assert payload["progress"]["percent"] == 0
+        assert jm.get_job(head.id).progress.percent == 100
+
+    def test_a_head_whose_retry_is_running_says_which_retry_is_running(self, jm):
+        head = self._waiting_head(jm, outcome="running")
+
+        progress = jm.get_job(head.id).to_dict()["progress"]
+
+        assert progress["percent"] == 0
+        assert progress["current_item"] == "Running retry 2 of 5"
+        assert jm.get_job(head.id).progress.percent == 100
+
+    def test_the_database_keeps_the_real_progress_while_the_view_shows_the_wait(self, jm, tmp_path):
+        import json
+        import sqlite3
+
+        head = self._waiting_head(jm)
+        storage = JobStorage(str(tmp_path / "waiting.db"))
+
+        storage.upsert(jm.get_job(head.id))
+
+        with sqlite3.connect(str(tmp_path / "waiting.db")) as conn:
+            [(raw,)] = conn.execute("SELECT progress_json FROM jobs WHERE id = ?", (head.id,)).fetchall()
+        stored = json.loads(raw)
+        assert stored["percent"] == 100
+        assert stored["current_item"] == jm.get_job(head.id).progress.current_item
+        assert not stored["current_item"].startswith("Waiting")
+        view = jm.get_job(head.id).to_dict()["progress"]
+        assert view["percent"] == 0
+        assert view["current_item"].startswith("Waiting for retry 2 of 5")
+
+    def test_a_pending_head_is_left_alone(self, jm):
+        head = self._waiting_head(jm)
+        jm.get_job(head.id).status = JobStatus.PENDING
+
+        assert jm.get_job(head.id).to_dict()["progress"]["percent"] == 100

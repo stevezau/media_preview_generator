@@ -541,6 +541,65 @@ class TestSourceGoneFromDisk:
         assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
         assert result.message == "Skipped: replaced by a newer file (Show (2020) - S01E05 - B.mkv)"
 
+    @pytest.mark.parametrize("sep", ["-", ".", "_"])
+    def test_date_named_episode_replaced_by_same_air_date_file_is_source_gone(
+        self, mock_config_for_processing, tmp_path, sep
+    ):
+        root = self._tv_root(tmp_path)
+        season = root / "Dateline NBC (1992)" / "Season 2026"
+        date = sep.join(["2026", "10", "09"])
+        _video(season / "Dateline NBC (1992) - 2026-10-08 - Other [WEBDL-1080p]-GRP.mkv")
+        _video(season / f"Dateline NBC (1992) - {date} - Heartless [PCOK][WEBDL-1080p]-RAWR.mkv")
+        stale = season / "Dateline NBC (1992) - 2026-10-09 - Heartless [WEBDL-1080p]-EDITH.mkv"
+
+        result = self._run(stale, _emby_registry(root), mock_config_for_processing)
+
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.message == (
+            f"Skipped: replaced by a newer file (Dateline NBC (1992) - {date} - Heartless [PCOK][WEBDL-1080p]-RAWR.mkv)"
+        )
+
+    def test_two_events_on_the_same_date_are_not_a_replacement(self, mock_config_for_processing, tmp_path):
+        root = self._tv_root(tmp_path)
+        season = root / "NBA" / "Season 2026"
+        _video(season / "NBA - 2026-10-09 - Knicks vs Heat.mkv")
+        stale = season / "NBA - 2026-10-09 - Lakers vs Celtics.mkv"
+
+        self._assert_retries(self._run(stale, _emby_registry(root), mock_config_for_processing), stale)
+
+    def test_untitled_date_named_episode_replaced_by_the_one_video_of_that_date(
+        self, mock_config_for_processing, tmp_path
+    ):
+        root = self._tv_root(tmp_path)
+        season = root / "Daily Show" / "Season 2026"
+        _video(season / "Daily Show - 2026-10-08-GRP.mkv")
+        _video(season / "Daily Show - 2026-10-09 [WEBDL-1080p]-RAWR.mkv")
+        stale = season / "Daily Show - 2026-10-09-EDITH.mkv"
+
+        result = self._run(stale, _emby_registry(root), mock_config_for_processing)
+
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.message == "Skipped: replaced by a newer file (Daily Show - 2026-10-09 [WEBDL-1080p]-RAWR.mkv)"
+
+    def test_untitled_date_named_episode_with_two_videos_of_that_date_still_retries(
+        self, mock_config_for_processing, tmp_path
+    ):
+        root = self._tv_root(tmp_path)
+        season = root / "Daily Show" / "Season 2026"
+        _video(season / "Daily Show - 2026-10-09 [WEBDL-1080p]-RAWR.mkv")
+        _video(season / "Daily Show - 2026-10-09 [HDTV-720p]-GRP.mkv")
+        stale = season / "Daily Show - 2026-10-09-EDITH.mkv"
+
+        self._assert_retries(self._run(stale, _emby_registry(root), mock_config_for_processing), stale)
+
+    def test_date_named_episode_with_only_a_shared_year_still_retries(self, mock_config_for_processing, tmp_path):
+        root = self._tv_root(tmp_path)
+        season = root / "Dateline NBC (1992)" / "Season 2026"
+        _video(season / "Dateline NBC (1992) - 2026-10-08 - Other-GRP.mkv")
+        stale = season / "Dateline NBC (1992) - 2026-10-09 - Heartless-EDITH.mkv"
+
+        self._assert_retries(self._run(stale, _emby_registry(root), mock_config_for_processing), stale)
+
     @pytest.mark.parametrize("kind", ["movies", "movie"], ids=["emby-movies", "plex-movie"])
     def test_movie_replaced_by_the_one_other_video_in_its_folder_is_source_gone(
         self, mock_config_for_processing, tmp_path, kind

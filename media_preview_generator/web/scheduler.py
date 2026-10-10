@@ -258,6 +258,150 @@ def _warn_paused_jobs_of_deleted_schedule(schedule_id: str, name: str) -> None:
             )
 
 
+def _has_scan_filters(cfg: dict) -> bool:
+    """Whether a job config carries a filter that can exclude items (``ScanFilters.active`` plus the date keys).
+
+    The UI always sends ``added_filter="all"`` and null values, which filter nothing.
+    """
+    return (
+        cfg.get("added_filter") not in (None, "all")
+        or any(cfg.get(key) is not None for key in ("latest_seasons", "movie_year_from", "movie_year_to"))
+        or any(cfg.get(key) for key in ("added_last_days", "added_from", "added_to"))
+    )
+
+
+def _scan_scope(job: Any) -> tuple[str | None, frozenset[str] | None] | None:
+    """The libraries a whole-library scan job covers, or None when the job is not one.
+
+    Filtered scans (added-in-last-N-days and the like), webhook, retry, Recently Added and Check servers jobs, and
+    Intro & Credits jobs for explicit files, cover only part of a library and so return None. A job spanning several
+    servers' libraries also returns None; schedules pin one server, so it is never the job that covers them.
+
+    Args:
+        job: A job from the job manager.
+
+    Returns:
+        ``(server_id, library_ids)``: the server the job is pinned to (None = every server) and the library ids it
+        scans (None = every library), or None when it does not scan whole libraries.
+    """
+    from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
+
+    cfg = job.config or {}
+    if cfg.get("is_retry") or cfg.get("is_retry_chain") or cfg.get("webhook_paths"):
+        return None
+    if job.kind == JOB_KIND_PREVIEWS:
+        if cfg.get("job_type", "full_library") != "full_library" or cfg.get("source"):
+            return None
+        if _has_scan_filters(cfg):
+            return None
+        library_ids = {str(x) for x in cfg.get("selected_library_ids") or []}
+        library_ids |= {str(x) for x in cfg.get("selected_libraries") or []}
+        if job.library_id:
+            library_ids.add(str(job.library_id))
+        return (job.server_id or cfg.get("server_id") or None, frozenset(library_ids) if library_ids else None)
+    if job.kind == JOB_KIND_INTRO_CREDITS:
+        if cfg.get("file_paths") or cfg.get("reconcile") or cfg.get("verify") or cfg.get("follows_job_id"):
+            return None
+        if cfg.get("source") not in ("manual", "schedule"):
+            return None
+        pin = cfg.get("server_id") or None
+        libraries = cfg.get("libraries") or []
+        if not libraries:
+            return (pin, None)
+        servers = {lib.get("server_id") for lib in libraries}
+        if len(servers) != 1:
+            return None
+        return (next(iter(servers)) or pin, frozenset(str(lib.get("library_id")) for lib in libraries))
+    return None
+
+
+def _find_covering_scan(
+    kind: str, server_id: str | None, library_ids: list[str], *, schedule_id: str, force: bool = False
+) -> Any:
+    """The pending or running whole-library scan of ``kind`` that already covers what a schedule tick would scan.
+
+    A user-paused job still counts: it holds its scope and finishes when resumed. A job paused by a schedule window
+    does not: it may sit idle for hours. The schedule's own jobs are left to its same-scope check, which lets a tick
+    with a changed scope through, and a regenerate tick does work a plain scan doesn't, so only another regenerate
+    covers it.
+
+    Args:
+        kind: Job kind the schedule starts.
+        server_id: Server the schedule scans (None = not pinned, so every server).
+        library_ids: Library ids the schedule scans (empty = every library of the server).
+        schedule_id: Schedule that fired.
+        force: Whether the tick regenerates existing outputs.
+
+    Returns:
+        The covering job, or None when the tick has to run. Every library must be covered; there is no partial skip.
+    """
+    from .jobs import JobStatus, get_job_manager, job_pause_reasons
+
+    for job in get_job_manager().get_all_jobs():
+        if job.kind != kind or job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+            continue
+        if job.parent_schedule_id == schedule_id or "schedule" in job_pause_reasons(job):
+            continue
+        cfg = job.config or {}
+        if force and not (cfg.get("force") or cfg.get("force_generate")):
+            continue
+        scope = _scan_scope(job)
+        if scope is None:
+            continue
+        job_server, job_libraries = scope
+        if job_server is not None and job_server != server_id:
+            continue
+        if job_libraries is None:
+            return job
+        if job_server is not None and library_ids and set(library_ids) <= job_libraries:
+            return job
+    return None
+
+
+def _skip_if_already_scanned(
+    manager: "ScheduleManager",
+    schedule_id: str,
+    kind: str,
+    server_id: str | None,
+    library_ids: list[str],
+    library_name: str,
+    *,
+    force: bool = False,
+) -> bool:
+    """Skip a schedule tick whose libraries a running whole-library scan already covers.
+
+    Logs one line and stamps the schedule's last run as a normal tick does.
+
+    Args:
+        manager: The schedule manager.
+        schedule_id: Schedule that fired.
+        kind: Job kind the schedule starts.
+        server_id: Server the schedule scans.
+        library_ids: Library ids the schedule scans (empty = all).
+        library_name: Display name of those libraries.
+        force: Whether the tick regenerates existing outputs.
+
+    Returns:
+        True when the tick was skipped.
+    """
+    covering = _find_covering_scan(kind, server_id, library_ids, schedule_id=schedule_id, force=force)
+    if covering is None:
+        return False
+    schedule = manager.get_schedule(schedule_id) or {}
+    plural = len(library_ids) > 1 or not library_ids
+    logger.info(
+        'Skipped scheduled "{}" run: {} {} {} already being scanned by job {} ({})',
+        schedule.get("name") or schedule_id,
+        "libraries" if plural else "library",
+        library_name or "all libraries",
+        "is" if not plural else "are",
+        covering.id[:8],
+        covering.library_name or "All Libraries",
+    )
+    manager._update_last_run(schedule_id)
+    return True
+
+
 def _start_scheduled_intro_credits_job(
     manager: "ScheduleManager",
     schedule_id: str,
@@ -350,6 +494,10 @@ def _start_scheduled_intro_credits_job(
                         server_id,
                     )
                     return
+            if _skip_if_already_scanned(
+                manager, schedule_id, JOB_KIND_INTRO_CREDITS, server_id, library_ids, library_name
+            ):
+                return
             libraries = [{"server_id": server_id, "library_id": str(lid)} for lid in library_ids] if server_id else []
             # A schedule for one server's libraries publishes to that server only, as its scheduled preview job does
             # (``config["server_id"]`` in execute_scheduled_job): another server holding the same files isn't touched.
@@ -632,6 +780,12 @@ def execute_scheduled_job(
             cfg["schedule_scope"] = signature
             from .jobs import JobStatus, get_job_manager
 
+            pinned_server_id = server_id
+            if not pinned_server_id and library_ids:
+                from .routes.api_jobs import _infer_server_from_library_ids
+
+                pinned_server_id = _infer_server_from_library_ids(library_ids)[0]
+
             with _FULL_LIBRARY_TICK_LOCK:
                 existing = next(
                     (
@@ -644,7 +798,15 @@ def execute_scheduled_job(
                     ),
                     None,
                 )
-                if existing is None:
+                if existing is None and not _skip_if_already_scanned(
+                    manager,
+                    schedule_id,
+                    "previews",
+                    pinned_server_id,
+                    library_ids,
+                    library_name,
+                    force=bool((config or {}).get("force") or (config or {}).get("force_generate")),
+                ):
                     manager.run_job_callback(**kwargs)
                 manager._update_last_run(schedule_id)
         except Exception:

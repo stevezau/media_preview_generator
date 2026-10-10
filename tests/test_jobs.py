@@ -1236,6 +1236,62 @@ class TestJobCreationLogLine:
         assert created[0]["extra"].get(JOB_LOG_SKIP) is True
 
 
+class TestPriorityAndPauseAreLogged:
+    """The app log records who held or reordered a job, so a scheduling incident can be reconstructed."""
+
+    @pytest.fixture
+    def app_lines(self):
+        from loguru import logger
+
+        lines: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: lines.append((m.record["level"].name, m.record["message"])), level="INFO")
+        yield lines
+        logger.remove(sink)
+
+    def test_a_priority_change_logs_old_and_new_as_words(self, config_dir, app_lines):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Movies")
+
+        jm.update_job_priority(job.id, 1)
+
+        assert ("INFO", f"Job {job.id[:8]} (Movies) priority changed: Normal -> High") in app_lines
+        jm.close()
+
+    def test_an_unchanged_priority_logs_nothing(self, config_dir, app_lines):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Movies")
+        app_lines.clear()
+
+        jm.update_job_priority(job.id, 2)
+
+        assert not [line for line in app_lines if "priority" in line[1]]
+        jm.close()
+
+    @pytest.mark.parametrize(
+        ("by_schedule", "who"), [(False, "manual"), (True, "schedule")], ids=["manual", "schedule"]
+    )
+    def test_pause_and_resume_each_log_one_line(self, config_dir, app_lines, by_schedule, who):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Movies")
+        jm.start_job(job.id)
+        app_lines.clear()
+
+        assert jm.request_pause(job.id, by_schedule=by_schedule)
+        assert jm.request_resume(job.id, only_paused_by_schedule=by_schedule)
+
+        assert [line for line in app_lines if "pause" in line[1].lower()] == [
+            ("INFO", f"Job {job.id[:8]} (Movies) paused ({who})"),
+            ("INFO", f"Job {job.id[:8]} (Movies) resumed ({who} pause cleared)"),
+        ]
+        jm.close()
+
+    def test_a_refused_pause_logs_nothing(self, config_dir, app_lines):
+        jm = JobManager(config_dir=config_dir)
+        assert jm.request_pause("nope") is False
+        assert not [line for line in app_lines if "paused" in line[1]]
+        jm.close()
+
+
 class TestSetJobOutcome:
     """set_job_outcome mirrors the live per-file outcome breakdown onto progress,
     and a later update replaces it (the dispatcher pushes the full snapshot each

@@ -66,6 +66,9 @@ def test_a_job_says_which_files_it_works_on_where_the_page_looks() -> None:
 
 def test_progress_events_carry_the_job_id_and_progress_the_page_reads() -> None:
     assert '"job_progress",' in _JOBS_PY
-    assert '"job_id": job_id,' in _JOBS_PY and '"progress": job.progress.to_dict(),' in _JOBS_PY
+    assert (
+        '"job_id": job_id,' in _JOBS_PY
+        and '"progress": chain_waiting_progress(job) or job.progress.to_dict(),' in _JOBS_PY
+    )
     assert "jobsSocket.on('job_progress', onJobProgress);" in _JS
     assert "data.job_id" in _JS and "data.progress" in _JS

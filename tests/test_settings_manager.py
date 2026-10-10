@@ -968,3 +968,28 @@ def test_unchanged_pause_reason_writes_no_file_or_backup(tmp_path):
     assert path.read_text() == content
     assert path.stat().st_mtime_ns == mtime_ns
     assert timestamped_backups(str(path)) == backups
+
+
+def test_a_global_pause_change_logs_one_app_line_and_a_repeat_none(tmp_path):
+    from loguru import logger
+
+    from media_preview_generator.web.settings_manager import SettingsManager
+
+    sm = SettingsManager(str(tmp_path))
+    lines: list[str] = []
+    sink = logger.add(lambda m: lines.append(m.record["message"]), level="INFO")
+    try:
+        sm.set_processing_pause_reason("manual", True)
+        sm.set_processing_pause_reason("manual", True)
+        sm.set_processing_pause_reason("manual", False)
+        sm.set_processing_pause_reason("quiet_hours", True)
+        sm.set_processing_pause_reason("quiet_hours", False)
+    finally:
+        logger.remove(sink)
+
+    assert [line for line in lines if "rocessing" in line] == [
+        "Processing paused (manual hold added)",
+        "Processing resumed (manual hold cleared)",
+        "Processing paused (quiet_hours hold added)",
+        "Processing resumed (quiet_hours hold cleared)",
+    ]

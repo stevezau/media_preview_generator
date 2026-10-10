@@ -958,3 +958,98 @@ def test_corrupt_index_with_past_end_chapter_is_ready_with_note(plan, config, ex
     assert recovered == [1]
     run.assert_not_called()
     assert list(register.call_args.args[2]) == [1]
+
+
+def _flood(_source, start_ms, *_args, **_kw):
+    raise chapters.ChapterDiagnosticFloodError(
+        f"Chapter extraction at {start_ms}ms produced excessive diagnostic output"
+    )
+
+
+class TestRememberedChapterFailures:
+    def test_diagnostic_flood_is_remembered_and_next_prepare_skips(self, plan, config, extraction, monkeypatch):
+        run, register = extraction
+        run.side_effect = _flood
+        monkeypatch.setattr(chapters, "recover_bif_frame", lambda *_a: None)
+        plan.folder = _prepare_for(plan, config, monkeypatch).folder
+
+        first = chapters.publish_chapters(plan, config)
+
+        assert first.status == "failed"
+        run.reset_mock()
+        again = _prepare_for(plan, config, monkeypatch)
+        assert again.target is None
+        assert again.outcome.status == "skipped"
+        assert "failed before (FFmpeg produced excessive diagnostic output)" in again.outcome.message
+        assert "retried when the file changes" in again.outcome.message
+        assert chapters.chapter_work_needed(again) is False
+        run.assert_not_called()
+        register.assert_not_called()
+
+    def test_changed_file_is_retried(self, plan, config, extraction, monkeypatch):
+        run, _register = extraction
+        run.side_effect = _flood
+        monkeypatch.setattr(chapters, "recover_bif_frame", lambda *_a: None)
+        plan.folder = _prepare_for(plan, config, monkeypatch).folder
+        chapters.publish_chapters(plan, config)
+
+        Path(plan.canonical_path).write_bytes(b"different, longer video bytes")
+        plan.target = replace(plan.target, source_size=Path(plan.canonical_path).stat().st_size)
+
+        assert _prepare_for(plan, config, monkeypatch).outcome.status != "skipped"
+
+    def test_regenerate_overrides_and_clears_memory(self, plan, config, extraction, monkeypatch):
+        run, _register = extraction
+        run.side_effect = _flood
+        monkeypatch.setattr(chapters, "recover_bif_frame", lambda *_a: None)
+        plan.folder = _prepare_for(plan, config, monkeypatch).folder
+        chapters.publish_chapters(plan, config)
+
+        forced = _prepare_for(plan, config, monkeypatch, regenerate=True)
+        assert forced.target is not None
+        run.side_effect = lambda _source, _start, path, *_a, **_kw: _image(path)
+        assert chapters.publish_chapters(forced, config, regenerate=True).status == "ready"
+        assert _prepare_for(plan, config, monkeypatch).outcome.status != "skipped"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            chapters.ChapterExtractionStalledError("watchdog stopped it"),
+            TimeoutError("slow disk"),
+            RuntimeError("Chapter extraction failed at 0ms (FFmpeg exit -9)"),
+            ChapterError("Waiting for Plex Analyze", code="pending_index"),
+        ],
+    )
+    def test_transient_failures_are_not_remembered(self, plan, config, extraction, monkeypatch, error):
+        run, _register = extraction
+        run.side_effect = error
+        monkeypatch.setattr(chapters, "recover_bif_frame", lambda *_a: None)
+        plan.folder = _prepare_for(plan, config, monkeypatch).folder
+
+        chapters.publish_chapters(plan, config)
+
+        assert _prepare_for(plan, config, monkeypatch).outcome.status != "skipped"
+
+    @pytest.mark.parametrize("rc", [1, 127, 128, 137, 255, -9])
+    def test_any_ffmpeg_exit_raises_plain_runtime_error_and_is_not_remembered(self, tmp_path, config, monkeypatch, rc):
+        track = SimpleNamespace(hdr_format=None, transfer_characteristics=None)
+        runner = MagicMock(return_value=(rc, 0.1, 1, []))
+        monkeypatch.setattr(chapters, "create_ffmpeg_runner", MagicMock(return_value=runner))
+
+        with pytest.raises(RuntimeError, match=f"FFmpeg exit {rc}") as raised:
+            chapters.extract_chapter_frame(
+                "movie.mkv", 0, tmp_path / "frame.jpg", config, media_info=SimpleNamespace(video_tracks=[track])
+            )
+
+        assert type(raised.value) is RuntimeError
+        assert chapters._repeatable_reason(raised.value) is None
+
+    def test_generic_ffmpeg_exit_1_is_not_remembered_by_the_next_prepare(self, plan, config, extraction, monkeypatch):
+        run, _register = extraction
+        run.side_effect = RuntimeError("Chapter extraction failed at 0ms (FFmpeg exit 1)")
+        monkeypatch.setattr(chapters, "recover_bif_frame", lambda *_a: None)
+        plan.folder = _prepare_for(plan, config, monkeypatch).folder
+
+        chapters.publish_chapters(plan, config)
+
+        assert _prepare_for(plan, config, monkeypatch).outcome.status != "skipped"

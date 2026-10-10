@@ -128,6 +128,46 @@ def is_live_retry_chain(config: dict | None) -> bool:
     return bool(cfg.get("is_retry_chain")) and cfg.get("last_outcome") in _CHAIN_LIVE_OUTCOMES
 
 
+def _short_duration(seconds: int) -> str:
+    """``7199`` -> ``1h 59m``, ``300`` -> ``5m``, ``42`` -> ``42s``."""
+    hours, rest = divmod(seconds, 3600)
+    minutes = rest // 60
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m" if minutes else f"{seconds}s"
+
+
+def chain_waiting_progress(job: "Job") -> dict | None:
+    """The progress a retry-chain head shows while it only waits for its retries, or None when it isn't doing that.
+
+    A head that is still ``running`` after its own pass, while its hidden retry runs or waits, would otherwise keep
+    that pass's 100% and read as stuck. Only the view is changed; the stored progress is not.
+
+    Args:
+        job: The job.
+
+    Returns:
+        The job's progress as a dict with ``percent`` 0 and a "Running retry N of M" or "Waiting for retry N of M"
+        ``current_item``.
+    """
+    cfg = job.config or {}
+    if job.status is not JobStatus.RUNNING or not is_live_retry_chain(cfg):
+        return None
+    attempt = f"retry {cfg.get('retry_attempt', 0)} of {cfg.get('retry_max_attempts', 0)}"
+    if cfg.get("last_outcome") == "running":
+        return {**job.progress.to_dict(), "percent": 0, "current_item": f"Running {attempt}"}
+    label = f"Waiting for {attempt}"
+    eta = job.progress.retry_eta
+    if eta:
+        try:
+            remaining = int((datetime.fromisoformat(eta) - datetime.now(UTC)).total_seconds())
+        except (TypeError, ValueError):
+            remaining = 0
+        if remaining > 0:
+            label += f" · starts in {_short_duration(remaining)}"
+    return {**job.progress.to_dict(), "percent": 0, "current_item": label}
+
+
 # Config key: the last time a job was seen waiting for a gate slot. Both runners write it as they start waiting and
 # refresh it while they wait (``JobManager.note_slot_wait``), so a restart ages a job queued behind a long scan by the
 # downtime only (``JobManager.requeue_interrupted_jobs``).
@@ -496,7 +536,7 @@ class Job:
             "server_name": self.server_name,
             "server_type": self.server_type,
             "publishers": list(self.publishers or []),
-            "progress": self.progress.to_dict(),
+            "progress": chain_waiting_progress(self) or self.progress.to_dict(),
             "error": self.error,
             "config": self.config,
             "paused": self.paused,
@@ -677,7 +717,7 @@ class JobStorage:
                     int(d["priority"]),
                     1 if d["paused"] else 0,
                     d["error"],
-                    json.dumps(d["progress"]),
+                    json.dumps(job.progress.to_dict()),
                     json.dumps(d["config"]),
                     json.dumps(d["publishers"]),
                     d.get("parent_schedule_id") or "",
@@ -2178,9 +2218,18 @@ class JobManager:
             job = self._jobs.get(job_id)
             if not job:
                 return None
+            previous = job.priority
             job.priority = priority
             self._persist_job(job)
             self._emit_event("job_updated", job.to_dict())
+        if previous != priority:
+            logger.info(
+                "Job {} ({}) priority changed: {} -> {}",
+                job_id[:8],
+                job.library_name or "(all)",
+                PRIORITY_LABELS[previous].title(),
+                PRIORITY_LABELS[priority].title(),
+            )
         return job
 
     def start_job(self, job_id: str) -> Job | None:
@@ -2370,7 +2419,7 @@ class JobManager:
                     {
                         "job_id": job_id,
                         "kind": job.kind,
-                        "progress": job.progress.to_dict(),
+                        "progress": chain_waiting_progress(job) or job.progress.to_dict(),
                         "publishers": list(job.publishers or []),
                     },
                 )
@@ -3326,6 +3375,7 @@ class JobManager:
             self._persist_job(job)
             self._emit_event("job_paused", {"job_id": job_id, "paused": True})
         self.add_log(job_id, f"INFO - {reason.title()} pause requested; no new tasks will start.")
+        self._log_pause_change(job, f"paused ({reason})")
         return True
 
     def request_resume(self, job_id: str, *, only_paused_by_schedule: bool = False) -> bool:
@@ -3343,7 +3393,15 @@ class JobManager:
             self._persist_job(job)
             self._emit_event("job_paused" if job.paused else "job_resumed", {"job_id": job_id, "paused": job.paused})
         self.add_log(job_id, f"INFO - {reason.title()} pause cleared.")
+        self._log_pause_change(job, f"resumed ({reason} pause cleared)")
         return True
+
+    @staticmethod
+    def _log_pause_change(job: Job, what: str) -> None:
+        """One app-log line for a job pause/resume; kept out of the job's own log, which already has its line."""
+        from ..jobs.worker import JOB_LOG_SKIP
+
+        logger.bind(**{JOB_LOG_SKIP: True}).info("Job {} ({}) {}", job.id[:8], job.library_name or "(all)", what)
 
     def is_pause_requested(self, job_id: str) -> bool:
         """Read persistent ownership too, including a job revived before it has a runner."""

@@ -293,6 +293,26 @@ class TestStdlibLogging:
 
         return run
 
+    def test_a_per_file_job_log_line_reaches_no_app_sink_below_debug_but_a_warning_does(self, start):
+        from media_preview_generator.markers.job_log import write_line
+
+        read = start("INFO")
+        write_line("Accused S04E05 · Checking chapters… none")
+        write_line("Accused S04E05 · Failed: unreadable", "WARNING")
+
+        for text in read():
+            assert "Checking chapters" not in text
+            assert "Failed: unreadable" in text
+
+    def test_a_per_file_job_log_line_is_written_when_the_app_logs_at_debug(self, start):
+        from media_preview_generator.markers.job_log import write_line
+
+        read = start("DEBUG")
+        write_line("Accused S04E05 · Checking chapters… none")
+
+        for text in read():
+            assert "Checking chapters" in text
+
     @pytest.fixture
     def stdlib_logger(self, request):
         """``stdlib_logger(suffix)``: a logger of this test's own, left without handlers afterwards."""

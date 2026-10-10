@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from loguru import logger
 from PIL import Image
 from requests import RequestException
 
@@ -64,7 +65,26 @@ class ChapterDecoderCompatibilityError(RuntimeError):
     """FFmpeg could not initialize the source's HEVC parameter sets."""
 
 
+class ChapterDiagnosticFloodError(ChapterExtractionStalledError):
+    """FFmpeg was killed for exceeding the stderr cap; the same bytes will flood it again."""
+
+
 SeekFailure = ChapterSourceCorruptionError | ChapterExtractionStalledError | ChapterDecoderCompatibilityError
+
+
+def _repeatable_reason(exc: Exception) -> str | None:
+    """Short reason when this failure will repeat identically on the same file, else None.
+
+    Timeouts, watchdog stops, signals, cancellation, Plex/ffprobe errors and generic FFmpeg exits are never
+    repeatable: a plain exit 1 also covers a flaky mount or low memory.
+    """
+    if isinstance(exc, ChapterDiagnosticFloodError):
+        return "FFmpeg produced excessive diagnostic output"
+    if isinstance(exc, ChapterSourceCorruptionError):
+        return "damaged container data"
+    if isinstance(exc, ChapterDecoderCompatibilityError):
+        return "HEVC parameters could not be initialized"
+    return None
 
 
 def _check_fatal_extraction(returncode: int, stderr: list[str], start_ms: int) -> None:
@@ -83,7 +103,7 @@ def _check_fatal_extraction(returncode: int, stderr: list[str], start_ms: int) -
             "Check decoder compatibility or the source metadata before retrying."
         )
     if DIAGNOSTIC_LIMIT_LINE in stderr:
-        raise ChapterExtractionStalledError(
+        raise ChapterDiagnosticFloodError(
             f"Chapter extraction at {start_ms}ms produced excessive diagnostic output; remaining chapter attempts stopped."
         )
     if STALL_WATCHDOG_LINE in stderr or ACTIVE_TIMEOUT_LINE in stderr:
@@ -176,7 +196,7 @@ def prepare_chapters(
     Args:
         trust_server_hash: Bulk scans only. Use Plex's hash for the part at this exact path
             when its byte size matches, instead of reading the file (the same rule as BIF paths).
-        regenerate: Ignore a stored "unsupported source" stamp so an explicit regeneration retries the file.
+        regenerate: Ignore a stored "unsupported source" or "failed before" stamp so an explicit regeneration retries the file.
     """
     from ..servers.plex_chapters import ChapterError, resolve_chapter_target
 
@@ -236,13 +256,21 @@ def prepare_chapters(
 
 
 def _unsupported_stamp(plan: ChapterPlan) -> str | None:
-    """Return the stored reason when this exact file and profile were already found unsupported."""
+    """Return the skip message when this exact file and profile were already found unsupported or failing."""
     try:
         manifest = json.loads(plan.manifest_path.read_text())
         if manifest.get("source") != list(plan.source_fingerprint) or manifest.get("profile") != plan.profile:
             return None
         reason = manifest.get("unsupported")
-        return reason if isinstance(reason, str) and reason else None
+        if isinstance(reason, str) and reason:
+            return reason
+        failed = manifest.get("failed")
+        if isinstance(failed, str) and failed:
+            return (
+                f"Chapter thumbnails skipped: this file failed before ({failed}); "
+                "it will be retried when the file changes"
+            )
+        return None
     except (OSError, ValueError, TypeError, AttributeError):
         return None
 
@@ -336,11 +364,18 @@ def chapter_work_needed(plan: ChapterPlan, *, regenerate: bool = False) -> bool:
 
 
 def _write_manifest(
-    plan: ChapterPlan, images: dict[str, dict], *, verified: bool = False, unsupported: str | None = None
+    plan: ChapterPlan,
+    images: dict[str, dict],
+    *,
+    verified: bool = False,
+    unsupported: str | None = None,
+    failed: str | None = None,
 ) -> None:
     payload = {"source": list(plan.source_fingerprint), "profile": plan.profile, "images": images}
     if unsupported:
         payload["unsupported"] = unsupported
+    if failed:
+        payload["failed"] = failed
     if verified:
         payload["verified"] = _registration_key(plan, images)
     fd, name = tempfile.mkstemp(prefix=".mpg-chapters-", suffix=".json", dir=plan.folder)
@@ -503,7 +538,8 @@ def extract_chapter_frame(
         raise _past_end_error(start_ms, source_duration_ms)
     if rc != 0:
         detail = "; source ended prematurely" if premature_end else ""
-        raise RuntimeError(f"Chapter extraction failed at {start_ms}ms (FFmpeg exit {rc}){detail}")
+        message = f"Chapter extraction failed at {start_ms}ms (FFmpeg exit {rc}){detail}"
+        raise RuntimeError(message)
     if not output.exists():
         detail = "; source ended prematurely" if premature_end else ""
         raise ValueError(
@@ -511,6 +547,14 @@ def extract_chapter_frame(
             "Check the source chapter metadata and video timeline."
         )
     _revision(output)
+
+
+def _remember_failure(plan: ChapterPlan, images: dict[str, dict], reason: str) -> None:
+    """Stamp the manifest so later scans skip this file until its fingerprint changes."""
+    try:
+        _write_manifest(plan, images, failed=reason)
+    except OSError as exc:
+        logger.warning("Could not remember chapter failure for {}: {}", plan.canonical_path, exc)
 
 
 def publish_chapters(
@@ -675,6 +719,9 @@ def publish_chapters(
                 len(images),
                 total,
             )
+            reasons = [_repeatable_reason(error) for error in errors]
+            if reasons and all(reasons):
+                _remember_failure(plan, images, cast("str", reasons[0]))
             if outcome.status == "skipped" and isinstance(errors[0], UnsupportedChapterFormatError):
                 _write_manifest(plan, images, unsupported=outcome.message)
             report(outcome.status if outcome.status == "skipped" else "failed")
@@ -709,6 +756,9 @@ def publish_chapters(
         raise
     except (PublishError, OSError, ValueError, RuntimeError) as exc:
         outcome = _failure(exc, len(images), total)
+        reason = _repeatable_reason(exc)
+        if reason:
+            _remember_failure(plan, images, reason)
         report("skipped" if outcome.status == "skipped" else "failed")
         return outcome
     finally:

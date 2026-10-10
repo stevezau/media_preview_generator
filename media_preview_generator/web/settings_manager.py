@@ -564,7 +564,13 @@ class SettingsManager:
                 updates={"processing_pause_reasons": new_reasons, "processing_paused": bool(reasons)},
                 deletes=[_AUTO_PAUSED_KEY],
             )
-            return previous != bool(reasons)
+            changed = previous != bool(reasons)
+            hold = f"{reason} hold {'added' if active else 'cleared'}"
+            if changed:
+                logger.info("Processing {} ({})", "paused" if reasons else "resumed", hold)
+            elif reasons:
+                logger.info("Processing stays paused ({}; still held by {})", hold, ", ".join(new_reasons))
+            return changed
 
     @property
     def processing_auto_paused(self) -> bool:

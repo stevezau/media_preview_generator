@@ -85,6 +85,46 @@ def test_check_settles_a_missing_file_and_a_file_nobody_owns(ctx, tmp_path):
         assert job.check_item(_item(__file__), ctx=ctx).outcome_key == job.NO_OWNERS
 
 
+def test_a_missing_file_a_newer_one_replaced_is_skipped_not_retried(ctx, tmp_path):
+    gone = str(tmp_path / "media" / "Anna Pigeon S01E10 720p.mkv")
+    with (
+        patch.object(
+            job, "source_replaced_reason", return_value="Skipped: replaced by a newer file (S01E10 1080p.mkv)"
+        ) as reason,
+        patch.object(job, "write_line") as write_line,
+    ):
+        outcome = job.check_item(_item(gone), ctx=ctx)
+    reason.assert_called_once_with(gone, ctx.registry)
+    assert outcome.outcome_key == job.SOURCE_GONE
+    assert outcome.message == "Skipped: replaced by a newer file (S01E10 1080p.mkv)"
+    assert "Skipped: replaced by a newer file (S01E10 1080p.mkv)" in write_line.call_args.args[0]
+
+
+def test_a_date_named_file_replaced_in_its_folder_is_skipped_not_retried(tmp_path):
+    """The real helper end to end: the same air date, another release, in the same folder."""
+    folder = tmp_path / "Dateline NBC (1992)" / "Season 2026"
+    folder.mkdir(parents=True)
+    (folder / "Dateline NBC (1992) - 2026-10-09 - Heartless -RAWR.mkv").write_bytes(b"x")
+    gone = folder / "Dateline NBC (1992) - 2026-10-09 - Heartless -EDITH.mkv"
+    registry = MagicMock()
+    with (
+        patch("media_preview_generator.processing.multi_server.disk_roots", return_value=[str(tmp_path)]),
+        patch("media_preview_generator.processing.multi_server.gone_from_disk", return_value=True),
+        patch("media_preview_generator.processing.multi_server._in_movie_library", return_value=False),
+        patch.object(job, "write_line"),
+    ):
+        ctx = job.LoudnessContext(registry=registry, ffmpeg="ffmpeg")
+        outcome = job.check_item(_item(str(gone)), ctx=ctx)
+    assert outcome.outcome_key == job.SOURCE_GONE
+    assert "Heartless -RAWR.mkv" in outcome.message
+
+
+def test_a_missing_file_nothing_replaced_is_still_not_found(ctx, tmp_path):
+    with patch.object(job, "source_replaced_reason", return_value=None):
+        outcome = job.check_item(_item(str(tmp_path / "gone.mkv")), ctx=ctx)
+    assert outcome.outcome_key == job.FILE_NOT_FOUND
+
+
 def test_worker_analyses_each_stream_once_and_writes_it(ctx, db, media):  # noqa: F811
     with patch.object(job.analyze, "run", return_value=FIELDS) as run:
         outcome = job.process_item(_item(media), ctx=ctx, gpu="intel")
@@ -261,6 +301,37 @@ def test_a_file_plex_hasnt_added_waits_for_the_retry(ctx, tmp_path):
     other.write_bytes(b"x")
     assert job.check_item(_item(str(other)), ctx=ctx).outcome_key == job.NOT_IN_LIBRARY
     assert job.process_item(_item(str(other)), ctx=ctx).outcome_key == job.NOT_IN_LIBRARY
+
+
+def test_a_file_plex_hasnt_added_asks_plex_to_scan_its_folder_once_per_folder(ctx, tmp_path):
+    server = MagicMock()
+    ctx.registry.get.return_value = server
+    first, second = tmp_path / "media" / "New 1.mkv", tmp_path / "media" / "New 2.mkv"
+    for f in (first, second):
+        f.write_bytes(b"x")
+    with patch.object(job, "write_line"):
+        assert job.check_item(_item(str(first)), ctx=ctx).outcome_key == job.NOT_IN_LIBRARY
+        assert job.check_item(_item(str(second)), ctx=ctx).outcome_key == job.NOT_IN_LIBRARY
+    ctx.registry.get.assert_called_once_with("plex1")
+    server.trigger_refresh.assert_called_once_with(item_id=None, remote_path=str(first))
+
+
+def test_a_file_already_in_plex_triggers_no_scan(ctx, media):
+    assert job.check_item(_item(media), ctx=ctx) is None
+    ctx.registry.get.assert_not_called()
+
+
+def test_a_scan_request_that_does_not_take_leaves_the_file_waiting_and_is_logged_as_a_request(ctx, tmp_path):
+    """``trigger_refresh`` logs per-path failures itself and never raises, so the job log can only say it asked."""
+    ctx.registry.get.return_value.trigger_refresh.return_value = None
+    new = tmp_path / "media" / "New.mkv"
+    new.write_bytes(b"x")
+    with patch.object(job, "write_line") as write_line:
+        outcome = job.check_item(_item(str(new)), ctx=ctx)
+    assert outcome.outcome_key == job.NOT_IN_LIBRARY
+    ctx.registry.get.return_value.trigger_refresh.assert_called_once_with(item_id=None, remote_path=str(new))
+    assert "requested a scan of its folder from" in str(write_line.call_args)
+    assert "asked" not in str(write_line.call_args)
 
 
 def test_an_item_that_cant_be_marked_fails_the_file(ctx, db, media):  # noqa: F811

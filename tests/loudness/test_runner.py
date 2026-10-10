@@ -193,6 +193,34 @@ def test_loudness_callback_preserves_shared_preview_chapter_progress(run, tmp_pa
         manager.close()
 
 
+def test_an_attempt_that_only_waits_and_queued_a_retry_completes_with_a_warning(run):
+    run["outcomes"] = {"/m/b.mkv": job.NOT_IN_LIBRARY}
+    job.run_loudness_job("j1")
+    assert len(run["retries"]) == 1
+    kwargs = run["jm"].complete_job.call_args.kwargs
+    assert kwargs["error"] is None
+    assert "1 file(s) still waiting for Plex or the disk" in kwargs["warning"]
+
+
+def test_an_attempt_with_a_truly_failed_file_fails_even_with_a_retry_queued(run):
+    run["outcomes"] = {"/m/a.mkv": job.FAILED, "/m/b.mkv": job.NOT_IN_LIBRARY}
+    run["publisher_rows"] = {"/m/a.mkv": [{"server_id": "p", "status": job.FAILED, "retryable": True, "message": "x"}]}
+    job.run_loudness_job("j1")
+    assert len(run["retries"]) == 1
+    kwargs = run["jm"].complete_job.call_args.kwargs
+    assert kwargs["error"] and kwargs["warning"] is None
+
+
+def test_a_missing_file_nothing_retries_fails_the_attempt_even_with_a_waiting_file_queued(run):
+    run["jm"].get_job.return_value.config["source"] = "manual"
+    run["outcomes"] = {"/m/a.mkv": job.NOT_IN_LIBRARY, "/m/b.mkv": job.FILE_NOT_FOUND}
+    job.run_loudness_job("j1")
+    assert len(run["retries"]) == 1
+    assert run["retries"][0]["file_paths"] == ["/m/a.mkv"]
+    kwargs = run["jm"].complete_job.call_args.kwargs
+    assert kwargs["error"] and kwargs["warning"] is None
+
+
 def test_a_last_retry_queues_no_more(run):
     run["jm"].get_job.return_value.config["retry_attempt"] = 3
     run["outcomes"] = {"/m/b.mkv": job.NOT_IN_LIBRARY}

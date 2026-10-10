@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import time
 import unicodedata
@@ -1010,6 +1011,10 @@ def _probe_sibling_mounts(canonical_path: str, registry) -> tuple[str | None, li
     return None, tried
 
 
+# A full air date; a bare year or a partial date never matches. Valid month/day only, so a build number doesn't pass.
+_AIR_DATE_RE = re.compile(r"(?<!\d)(\d{4})[-._](0[1-9]|1[0-2])[-._](0[1-9]|[12]\d|3[01])(?!\d)")
+
+
 def _entry_mtime(entry: os.DirEntry) -> float:
     try:
         return entry.stat().st_mtime
@@ -1030,12 +1035,46 @@ def _in_movie_library(canonical_path: str, configs: list[ServerConfig]) -> bool:
     return bool(kinds) and kinds <= _MOVIE_LIBRARY_KINDS
 
 
+def _air_date(file_name: str) -> tuple[str, str, str] | None:
+    """The (year, month, day) of the first full YYYY-MM-DD date in a file name (``.`` and ``_`` also split it)."""
+    match = _AIR_DATE_RE.search(file_name)
+    return match.groups() if match else None  # type: ignore[return-value]
+
+
+def _date_title(file_name: str) -> str:
+    """The episode title after the air date, lowercase alphanumerics only (``""`` when the name has none).
+
+    Quality tags start at the first ``[``; without any, a trailing ``-GROUP`` is dropped.
+    """
+    stem = os.path.splitext(file_name)[0]
+    match = _AIR_DATE_RE.search(stem)
+    if match is None:
+        return ""
+    rest = stem[match.end() :]
+    if "[" in rest:
+        rest = rest.split("[", 1)[0]
+    else:
+        rest = re.sub(r"-[^-\s]+$", "", rest)
+    return re.sub(r"[^a-z0-9]", "", rest.lower())
+
+
+def _same_dated_episode(name: str, air_date: tuple[str, str, str], videos: list[os.DirEntry]) -> list[os.DirEntry]:
+    """Other videos that are the same dated episode: same date and title, since a sports night has several events."""
+    dated = [entry for entry in videos if _air_date(entry.name) == air_date]
+    title = _date_title(name)
+    if title:
+        return [entry for entry in dated if _date_title(entry.name) == title]
+    return dated if len(dated) == 1 and not _date_title(dated[0].name) else []
+
+
 def _replacement_video(canonical_path: str, *, movie_library: bool) -> str | None:
     """Name the video that took a missing file's place in its folder, or ``None`` when there's no clear one.
 
-    Outside a movie library a replacement is another video of the same SxxEyy (the newest, when there are several);
-    a name without one (anime absolute numbering, a daily show's date) can't be matched, since the video next to it
-    is usually another episode. In a movie library it's the one other feature video in the movie's folder; extras
+    Outside a movie library a replacement is another video of the same SxxEyy (the newest, when there are several).
+    A name without one but with a full air date (a daily show) matches another video with the same date and the same
+    title after it (several events can share a date); with no title on either side, the one other video of that date.
+    A bare year or anime absolute numbering can't be matched, since the video next to it is usually another episode.
+    In a movie library it's the one other feature video in the movie's folder; extras
     don't count, and several candidates are too ambiguous to call. A file whose name matches the missing one after
     Unicode normalisation and case folding is the same file under another spelling of its name, not a replacement.
 
@@ -1062,14 +1101,17 @@ def _replacement_video(canonical_path: str, *, movie_library: bool) -> str | Non
         features = [entry for entry in videos if not is_extra(entry.path)]
         return features[0].name if len(features) == 1 and not is_extra(canonical_path) else None
     ids = ids_from_path(canonical_path)
-    if not ids.is_episode:
+    if ids.is_episode:
+        same_episode = [
+            entry
+            for entry in videos
+            if (other := ids_from_path(entry.path)).is_episode
+            and (other.season, other.episode) == (ids.season, ids.episode)
+        ]
+    elif (air_date := _air_date(name)) is not None:
+        same_episode = _same_dated_episode(name, air_date, videos)
+    else:
         return None
-    same_episode = [
-        entry
-        for entry in videos
-        if (other := ids_from_path(entry.path)).is_episode
-        and (other.season, other.episode) == (ids.season, ids.episode)
-    ]
     return max(same_episode, key=_entry_mtime).name if same_episode else None
 
 

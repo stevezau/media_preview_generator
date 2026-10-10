@@ -26,6 +26,7 @@ from ..jobs.group_runtime import admission_options, runtime_capacity, wait_for_c
 from ..jobs.orchestrator import _build_multi_server_registry, fold_publisher_rows_into_aggregate
 from ..jobs.parking import JobParked, park_if_unavailable
 from ..jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread, unregister_job_thread
+from ..markers.job_log import display_name, write_line
 from ..markers.job_runner import (
     build_items,
     hold_pause_from_before_restart,
@@ -42,6 +43,7 @@ from ..markers.publishers.base import Capability, DatabaseBusyError, PublishErro
 from ..markers.publishers.plex_db import BUSY_TIMEOUT_S, LocalPlexDb
 from ..output.plex_hash import calculate_plex_hash
 from ..processing.generator import clear_failures, failure_scope, set_file_result_callback
+from ..processing.multi_server import source_replaced_reason
 from ..processing.retry_queue import retry_policy, scaled_backoff_delay
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig, ServerType
@@ -107,6 +109,27 @@ class LoudnessContext:
     # One lock per server: a busy Plex database doesn't hold up the others' checks.
     _locks: dict[str, threading.Lock] = field(default_factory=dict)
     _locks_lock: threading.Lock = field(default_factory=threading.Lock)
+    # (server id, folder) pairs Plex was already asked to scan in this job.
+    _scan_requested: set[tuple[str, str]] = field(default_factory=set)
+
+    def request_plex_scan(self, cfg: ServerConfig, path: str) -> None:
+        """Ask Plex to scan the file's folder, once per folder in the job, so a file it hasn't added yet turns up before
+        the retry instead of whenever Plex's own scan gets to it. A failure is logged and never fails the file."""
+        key = (cfg.id, os.path.dirname(path))
+        with self._locks_lock:
+            if key in self._scan_requested:
+                return
+            self._scan_requested.add(key)
+        try:
+            server = self.registry.get(cfg.id)
+            if server is None:
+                return
+            server.trigger_refresh(item_id=None, remote_path=path)
+            write_line(
+                f"{display_name(path)}: Plex hasn't added this file yet; requested a scan of its folder from {cfg.name}"
+            )
+        except Exception as exc:
+            logger.warning("Couldn't ask {} to scan the folder of {}: {}", cfg.name, path, exc)
 
     def db(self, cfg: ServerConfig) -> tuple[LocalPlexDb, str]:
         """The server's Plex database, and "" when it can be written or why not.
@@ -194,13 +217,29 @@ def _lookup(
     return None, streams, needed
 
 
+def _not_on_disk(path: str, ctx: LoudnessContext) -> ItemOutcome:
+    """The outcome of a file not on disk, by previews' rule (``source_replaced_reason``): one a newer file replaced in
+    its folder is gone for good and queues no retry; any other may still be copying in, so a webhook's job retries it."""
+    replaced = source_replaced_reason(path, ctx.registry)
+    if replaced is None:
+        return ItemOutcome(FILE_NOT_FOUND, "Not on disk")
+    logger.bind(**{JOB_LOG_SKIP: True}).info(
+        "Source file {} is no longer on disk and a newer file took its place ({}); skipping without a retry. "
+        "The newer file gets its own loudness run from its own webhook or the next scan.",
+        path,
+        replaced.removeprefix("Skipped: "),
+    )
+    write_line(f"{display_name(path)}: {replaced}")
+    return ItemOutcome(SOURCE_GONE, replaced)
+
+
 def check_item(item: ProcessableItem, *, ctx: LoudnessContext) -> ItemOutcome | None:
     """Check stage: settle a file with nothing to analyse; None sends it to a worker."""
     path = item.canonical_path
     if not os.path.isfile(path):
         if os.path.normpath(path) in ctx.deleted_paths:
             return ItemOutcome(SOURCE_GONE, "Skipped: import webhook confirmed this absent source was deleted")
-        return ItemOutcome(FILE_NOT_FOUND, "Not on disk")
+        return _not_on_disk(path, ctx)
     servers = owners(path, ctx.registry, ctx.server_id)
     if not servers:
         return ItemOutcome(NO_OWNERS, "No Plex server has loudness on for its library")
@@ -209,6 +248,8 @@ def check_item(item: ProcessableItem, *, ctx: LoudnessContext) -> ItemOutcome | 
         row, streams, todo = _lookup(ctx, cfg, path)
         if row is not None:
             rows.append(row)
+            if row["status"] == NOT_IN_LIBRARY:
+                ctx.request_plex_scan(cfg, path)
         elif todo or not all(s.item_marked for s in streams):
             # Analysis to do, or an item analysed but not yet marked (Plex would analyse it again).
             return None
@@ -806,7 +847,8 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 retried = bool(to_retry) and _queue_retry(job, cfg, to_retry, sender_paths, retry_previous)
                 if to_retry and not retried:
                     warnings.append(f"{len(set(to_retry))} file(s) still waiting for Plex or the disk; not tried again")
-                _finish(jm, job_id, outcome, warnings)
+                missing_not_queued = 0 if retry_missing else outcome.get(FILE_NOT_FOUND, 0)
+                _finish(jm, job_id, outcome, warnings, retry_queued=bool(retried), unretried=missing_not_queued)
                 if chain_head:
                     if not retried:
                         _finish_chain(
@@ -1082,15 +1124,20 @@ def _completion(outcome: dict[str, int], warnings: list[str]) -> tuple[int, str 
     return successes, " ".join(details) or None
 
 
-def _finish(jm, job_id: str, outcome: dict[str, int], warnings: list[str]) -> None:
-    """Settle one attempt, leaving a scheduled chain's lifecycle to the shared manager."""
+def _finish(
+    jm, job_id: str, outcome: dict[str, int], warnings: list[str], *, retry_queued: bool = False, unretried: int = 0
+) -> None:
+    """Settle one attempt, leaving a scheduled chain's lifecycle to the shared manager.
+
+    Files still waiting for Plex or the disk with a retry queued for them are not a failure: the attempt completes with
+    a warning. A file that truly failed, or one nothing will retry (``unretried``: unresolved files not queued, such as
+    a missing file when missing files aren't retried), fails it.
+    """
     successes, reason = _completion(outcome, warnings)
     unresolved = sum(outcome.get(key, 0) for key in (FAILED, FILE_NOT_FOUND, WAITING, NOT_IN_LIBRARY))
-    jm.complete_job(
-        job_id,
-        error=reason if unresolved and not successes else None,
-        warning=reason if not unresolved or successes else None,
-    )
+    only_waiting = retry_queued and not outcome.get(FAILED, 0) and not unretried
+    failed = bool(unresolved) and not successes and not only_waiting
+    jm.complete_job(job_id, error=reason if failed else None, warning=None if failed else reason)
 
 
 def _finish_chain(
