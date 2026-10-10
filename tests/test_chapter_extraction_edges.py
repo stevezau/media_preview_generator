@@ -159,7 +159,7 @@ def test_no_retry_for_truncation_early_seek_or_other_filter_failure(extraction, 
 def test_endpoint_fallback_only_runs_once(extraction):
     _, factory, extract, _, _ = extraction
     factory.return_value = lambda **kwargs: (234, 0, "", ["No filtered frames"])
-    with pytest.raises(RuntimeError):
+    with pytest.raises(chapters.ChapterPastEndError):
         extract()
     assert factory.call_count == 2
 
@@ -183,3 +183,33 @@ def test_invalid_image_does_not_trigger_endpoint_fallback(extraction):
     with pytest.raises(ValueError, match="1280px"):
         extract()
     assert factory.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "video_duration,container_duration,start,seeks",
+    [
+        # Where Eagles Dare: video ends at 9306.80s, MediaInfo reports 9308.43s, the last chapter starts at 9307.88s.
+        ("9308433", "9308427", 9307881, [9307881, 9306881]),
+        # Sweden vs Tunisia: no video duration, video ends at 6705.92s, container 6706.52s, chapter at 6706.10s.
+        (None, "6706520", 6706100, [6706100]),
+    ],
+)
+def test_final_chapter_after_last_video_frame_is_past_end(extraction, video_duration, container_duration, start, seeks):
+    track, factory, _, _, output = extraction
+    track.duration = video_duration
+    factory.return_value = lambda **kwargs: (234, 0, "", ["No filtered frames"])
+    media = SimpleNamespace(video_tracks=[track], general_tracks=[SimpleNamespace(duration=container_duration)])
+    config = SimpleNamespace(tonemap_algorithm="hable", ffmpeg_threads=2, thumbnail_quality=2)
+    with pytest.raises(chapters.ChapterPastEndError, match="after the last video frame"):
+        chapters.extract_chapter_frame("movie.mkv", start, output, config, media_info=media)
+    assert [call.kwargs["chapter_start_ms"] for call in factory.call_args_list] == seeks
+
+
+def test_no_frame_before_the_final_second_stays_a_failure(extraction):
+    track, factory, _, _, output = extraction
+    track.duration = None
+    factory.return_value = lambda **kwargs: (234, 0, "", ["No filtered frames"])
+    media = SimpleNamespace(video_tracks=[track], general_tracks=[SimpleNamespace(duration="6706520")])
+    config = SimpleNamespace(tonemap_algorithm="hable", ffmpeg_threads=2, thumbnail_quality=2)
+    with pytest.raises(RuntimeError, match="FFmpeg exit 234"):
+        chapters.extract_chapter_frame("movie.mkv", 6705400, output, config, media_info=media)

@@ -372,9 +372,13 @@ def _source_duration_ms(media_info) -> float:
 
 
 def _past_end_error(start_ms: int, source_duration_ms: float) -> ChapterPastEndError:
+    where = (
+        f"is outside the current video's duration ({source_duration_ms:.0f}ms)"
+        if start_ms > source_duration_ms
+        else f"is after the last video frame (duration {source_duration_ms:.0f}ms)"
+    )
     return ChapterPastEndError(
-        f"Chapter timestamp {start_ms}ms is outside the current video's duration ({source_duration_ms:.0f}ms); "
-        "no frame exists at that position. Check the source chapter metadata."
+        f"Chapter timestamp {start_ms}ms {where}; no frame exists at that position. Check the source chapter metadata."
     )
 
 
@@ -485,7 +489,18 @@ def extract_chapter_frame(
             runner = create_ffmpeg_runner(**runner_options, chapter_start_ms=fallback_ms)
             rc, _, _, stderr = runner(use_skip=False)
             _check_fatal_extraction(rc, stderr, fallback_ms)
-            premature_end = "file ended prematurely" in "\n".join(stderr).lower()
+            stderr_text = "\n".join(stderr).lower()
+            premature_end = "file ended prematurely" in stderr_text
+            no_frame = "no filtered frames" in stderr_text or (rc == 0 and not output.exists())
+    # The video stream can end before the container duration MediaInfo reports, so a final chapter in
+    # the last second may have no frame even after the fallback seek.
+    if (
+        no_frame
+        and not premature_end
+        and 0 < source_duration_ms < float("inf")
+        and source_duration_ms - 1000 < start_ms
+    ):
+        raise _past_end_error(start_ms, source_duration_ms)
     if rc != 0:
         detail = "; source ended prematurely" if premature_end else ""
         raise RuntimeError(f"Chapter extraction failed at {start_ms}ms (FFmpeg exit {rc}){detail}")
@@ -649,8 +664,9 @@ def publish_chapters(
         real_images = {index: entry for index, entry in images.items() if _has_image(entry)}
         if len(images) == total and not real_images:
             all_past_end = (
-                "The only chapter starts" if total == 1 else f"All {total} chapters start"
-            ) + " after the video ends; no frame exists for any of them. Check the source chapter metadata."
+                ("The only chapter starts" if total == 1 else f"All {total} chapters start")
+                + f" after the video ends; no frame exists for {'it' if total == 1 else 'any of them'}. Check the source chapter metadata."
+            )
             report("failed")
             return ChapterOutcome("failed", 0, total, all_past_end, False)
         if len(images) != total:

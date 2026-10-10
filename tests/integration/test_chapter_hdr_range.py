@@ -139,7 +139,7 @@ def test_hdr_chapter_beyond_video_ends_with_specific_metadata_error(hdr_movie, t
     [
         (True, 75000, "outside the current video's duration"),
         (False, 75000, "No video frame was available"),
-        (True, 2500, "No video frame was available"),
+        (True, 2500, "outside the current video's duration"),
     ],
 )
 def test_missing_video_duration_never_turns_empty_output_into_missing_source_retry(

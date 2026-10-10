@@ -891,6 +891,20 @@ def test_every_chapter_past_end_still_fails(plan, config, extraction):
     register.assert_not_called()
 
 
+def test_single_past_end_chapter_message_is_singular(plan, config, extraction):
+    run, register = extraction
+    run.side_effect = chapters.ChapterPastEndError("Chapter timestamp is after the last video frame")
+    plan = replace(plan, target=replace(plan.target, chapters=plan.target.chapters[:1]))
+
+    result = chapters.publish_chapters(plan, config)
+
+    assert result.status == "failed"
+    assert result.message == (
+        "The only chapter starts after the video ends; no frame exists for it. Check the source chapter metadata."
+    )
+    register.assert_not_called()
+
+
 def test_all_past_end_fails_with_a_clear_message_on_every_scan(plan, config, extraction):
     run, register = extraction
     run.side_effect = chapters.ChapterPastEndError("Chapter timestamp is outside the current video's duration")
