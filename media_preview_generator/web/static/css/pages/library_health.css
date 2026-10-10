@@ -3,6 +3,7 @@
 
 .lh {
     --lh-hatch: repeating-linear-gradient(45deg, var(--faint) 0 2px, transparent 2px 5px);
+    --lh-hatch-intro: repeating-linear-gradient(45deg, var(--t-intro) 0 2px, transparent 2px 4px);
     display: grid;
     gap: 1rem;
 }
@@ -74,9 +75,7 @@
     vertical-align: -0.05rem;
 }
 
-.lh-sw-has { background: var(--muted); }
-.lh-sw-none { background: var(--lh-hatch); border: 1px solid var(--faint); }
-.lh-sw-todo { background: var(--inset); border: 1px solid var(--line-strong); }
+.lh-sw-none { background: var(--lh-hatch-intro); }
 .lh-sw-previews { background: var(--t-previews); }
 .lh-sw-loudness { background: var(--t-loud); }
 .lh-sw-intro,
@@ -212,6 +211,8 @@
 .lh-bar-loudness .lh-fill { background: var(--t-loud); }
 .lh-bar-intro .lh-fill,
 .lh-bar-credits .lh-fill { background: var(--t-intro); }
+.lh-bar-intro .lh-hatch,
+.lh-bar-credits .lh-hatch { background: var(--lh-hatch-intro); }
 .lh-bar-run .lh-fill { background: var(--run); transition: width 0.4s ease; }
 
 .lh-foot { color: var(--muted); font-size: 0.8rem; margin: 0; }

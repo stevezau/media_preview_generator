@@ -14,12 +14,11 @@
     const FEATURES = ['previews', 'loudness', 'intro', 'credits'];
     const FEATURE_LABEL = { previews: 'Previews', loudness: 'Loudness', intro: 'Intro', credits: 'Credits' };
     const JOB_LABEL = { previews: 'preview', loudness: 'loudness', intro: 'intro & credits', credits: 'intro & credits' };
-    const TODO_WORD = { previews: 'to do', loudness: 'to do', intro: 'not checked', credits: 'not checked' };
     const HEADER_TIP = {
         previews: 'A preview counts as made when its file is in the server\'s preview folder for that video.',
         loudness: 'Counts loudness measured by this app or by Plex itself. Files where Plex\'s own loudness data is incomplete need Plex\'s own analysis; a loudness job here leaves them alone, so they stay on the to-do list.',
-        intro: 'Counts intros from the server\'s own detection and from this app. Some shows have no intro, so "not checked" means nobody has looked yet, not that it is missing.',
-        credits: 'Counts credits from the server\'s own detection and from this app. "Not checked" means nobody has looked yet.',
+        intro: 'Counts intros from the server\'s own detection and from this app. Some shows have no intro, so "to do" means nobody has looked yet, not that it is missing.',
+        credits: 'Counts credits from the server\'s own detection and from this app. "To do" means nobody has looked yet.',
     };
     const DONE_TEXT = { previews: 'All made', loudness: 'All measured', intro: 'All checked', credits: 'All checked' };
     const HAVE_TEXT = { intro: 'have an intro', credits: 'have credits' };
@@ -32,6 +31,8 @@
         files: null,
         filesSeq: 0,
         filterTimer: null,
+        // The dashboard's "Review & fix" links here with ?fix=<server_id>; open that dialog once the data arrives.
+        pendingFix: new URLSearchParams(window.location.search).get('fix'),
     };
     const rendered = {};
 
@@ -176,7 +177,7 @@
 
     function renderLegend() {
         setHtml('lhLegend', servers().length
-            ? `<div class="lh-legend"><span><i class="lh-sw lh-sw-has"></i>Has it</span><span><i class="lh-sw lh-sw-none"></i>Checked, nothing found</span><span><i class="lh-sw lh-sw-todo"></i>Still to do</span><span>Numbers in bold are files still to do; click one to list them.</span></div>`
+            ? '<div class="lh-legend"><span>Numbers in bold are files still to do; click one to list them.</span><span><i class="lh-sw lh-sw-none" aria-hidden="true"></i>Striped: checked, nothing found</span></div>'
             : '');
     }
 
@@ -198,7 +199,7 @@
             if (!cell.total) return failure;
             // The runner keeps the last good numbers on a failed cell, so the to-do count stays usable.
             const lastKnown = cell.todo > 0
-                ? `<span class="lh-big">${cellButton(server, lib, feature, `<span class="lh-num">${n(cell.todo)}</span> <small>${TODO_WORD[feature]}</small>`, false, 'lh-todo')}</span>`
+                ? `<span class="lh-big">${cellButton(server, lib, feature, `<span class="lh-num">${n(cell.todo)}</span> <small>to do</small>`, false, 'lh-todo')}</span>`
                 : `<span class="lh-na">${n(cell.done)} done</span>`;
             return `${lastKnown}${failure}<span class="lh-note">Numbers from the last check that worked</span>`;
         }
@@ -208,7 +209,7 @@
         const donePct = total ? (cell.done / total) * 100 : 0;
         const nonePct = total ? (cell.nothing_found / total) * 100 : 0;
         const head = cell.todo > 0
-            ? `<span class="lh-big">${cellButton(server, lib, feature, `<span class="lh-num">${n(cell.todo)}</span> <small>${TODO_WORD[feature]}</small>`, false, 'lh-todo')}</span>`
+            ? `<span class="lh-big">${cellButton(server, lib, feature, `<span class="lh-num">${n(cell.todo)}</span> <small>to do</small>`, false, 'lh-todo')}</span>`
             : `<span class="lh-done"><i class="bi bi-check2" aria-hidden="true"></i> ${DONE_TEXT[feature]}</span>`;
         const bar = `<div class="lh-bar lh-bar-${feature}" aria-hidden="true"><i class="lh-fill" style="width:${donePct.toFixed(2)}%"></i><i class="lh-hatch" style="width:${nonePct.toFixed(2)}%"></i></div>`;
         let note = '';
@@ -217,12 +218,32 @@
         } else if (cell.todo > 0) {
             const pct = Math.min(99, Math.round(donePct));
             note = `${n(cell.done)} of ${n(total)} done · ${pct}%`;
+        } else {
+            // Keeps a done cell as tall as a to-do one, so "not showing in Plex" sits on the same line in every row.
+            note = `${n(cell.done)} done`;
         }
         const noteHtml = note ? `<span class="lh-note">${note}</span>` : '';
         const warn = feature === 'previews' && server.type === 'plex' && cell.not_showing > 0
             ? cellButton(server, lib, feature, `${n(cell.not_showing)} not showing in Plex`, true, 'lh-warn-note')
             : '';
         return `${head}${bar}${noteHtml}${warn}`;
+    }
+
+    function bothMarkersOff(lib) {
+        const intro = lib.cells && lib.cells.intro;
+        const credits = lib.cells && lib.cells.credits;
+        return !!(intro && credits && intro.state === 'off' && credits.state === 'off' && intro.reason === credits.reason);
+    }
+
+    // Intro and credits are switched off together, so one notice spans both columns instead of repeating.
+    function rowCells(server, lib) {
+        const merge = bothMarkersOff(lib);
+        return FEATURES.map(function (f) {
+            if (merge && f === 'credits') return '';
+            const span = merge && f === 'intro' ? ' colspan="2"' : '';
+            const label = merge && f === 'intro' ? 'Intro &amp; credits' : FEATURE_LABEL[f];
+            return `<td data-label="${label}"${span}><div class="lh-cell">${renderCell(server, lib, f)}</div></td>`;
+        }).join('');
     }
 
     function renderServer(server) {
@@ -239,7 +260,7 @@
             const fileLine = lib.total > 0
                 ? `<div class="lh-sub">${n(lib.total)} files</div>`
                 : (counted ? '<div class="lh-sub">No files</div>' : '');
-            const cells = FEATURES.map(function (f) { return `<td data-label="${FEATURE_LABEL[f]}"><div class="lh-cell">${renderCell(server, lib, f)}</div></td>`; }).join('');
+            const cells = rowCells(server, lib);
             return `<tr><th scope="row" class="lh-lib"><b>${escapeHtml(lib.name)}</b>${fileLine}</th>${cells}</tr>`;
         }).join('');
         return `<section class="lh-server" aria-label="${escapeHtml(server.name)}">
@@ -291,6 +312,7 @@
         try {
             state.data = await request('GET', '/api/library-health');
             render();
+            openPendingFix();
             setHtml('lhPollNote', '');
         } catch (err) {
             console.error('Library health refresh failed', err);
@@ -347,6 +369,17 @@
         start.dataset.server = serverId;
         start.disabled = false;
         modalFor('lhFixModal').show();
+    }
+
+    function openPendingFix() {
+        const serverId = state.pendingFix;
+        if (!serverId) return;
+        state.pendingFix = null;
+        const url = new URL(window.location.href);
+        url.searchParams.delete('fix');
+        window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+        const server = findServer(serverId);
+        if (server && !state.data.running && notShowingByLibrary(server).length) openFix(serverId);
     }
 
     async function startReread() {

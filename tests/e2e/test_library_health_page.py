@@ -157,6 +157,74 @@ class TestLibraryHealthPage:
         expect(dialog.get_by_role("button", name="Start")).to_be_visible()
         expect(dialog.get_by_role("button", name="Cancel")).to_be_visible()
 
+    def test_intro_and_credits_off_together_show_one_notice(
+        self, authed_page: Page, app_url: str, seeded_health: HealthStore
+    ) -> None:
+        result = _result()
+        off = "Intro & credits are off for this library"
+        result.libraries.append(
+            LibraryResult(
+                library_id="2",
+                name="Sports",
+                kind="show",
+                total=4,
+                cells={
+                    Feature.PREVIEWS: Cell(CellState.COUNTED, total=4, done=4),
+                    Feature.LOUDNESS: Cell(CellState.COUNTED, total=4, done=4),
+                    Feature.INTRO: Cell(CellState.OFF, reason=off),
+                    Feature.CREDITS: Cell(CellState.OFF, reason=off),
+                },
+            )
+        )
+        result.libraries.append(
+            LibraryResult(
+                library_id="3",
+                name="TV Shows",
+                kind="show",
+                total=5,
+                cells={
+                    Feature.PREVIEWS: Cell(CellState.COUNTED, total=5, done=5),
+                    Feature.LOUDNESS: Cell(CellState.COUNTED, total=5, done=5),
+                    Feature.INTRO: Cell(CellState.COUNTED, total=5, done=2, nothing_found=1),
+                    Feature.CREDITS: Cell(CellState.COUNTED, total=5, done=5),
+                },
+            )
+        )
+        seeded_health.replace_server(result)
+
+        authed_page.goto(f"{app_url}/library-health")
+
+        sports = authed_page.locator(".lh-table tbody tr", has_text="Sports")
+        expect(sports.get_by_text(off)).to_have_count(1)
+        expect(sports.get_by_role("link", name="Change in Servers")).to_have_count(1)
+        expect(sports.locator("td[colspan='2']")).to_have_count(1)
+        expect(sports).to_contain_text("4 done")
+        tv = authed_page.locator(".lh-table tbody tr", has_text="TV Shows")
+        expect(tv.get_by_role("button", name="2 to do")).to_be_visible()
+        expect(tv).not_to_contain_text("not checked")
+        expect(authed_page.locator("#lhLegend")).to_contain_text("Striped: checked, nothing found")
+        expect(authed_page.locator("#lhLegend")).not_to_contain_text("Has it")
+
+    def test_fix_link_from_the_dashboard_opens_the_dialog(self, authed_page: Page, app_url: str, seeded_health) -> None:
+        authed_page.goto(f"{app_url}/library-health?fix=e2e-plex")
+
+        expect(authed_page.locator("#lhFixModal")).to_be_visible()
+        expect(authed_page.locator("#lhFixTitle")).to_have_text("Ask Plex to show 3 previews")
+        assert "fix=" not in authed_page.url
+
+    def test_dashboard_strip_links_to_review_and_fix(self, authed_page: Page, app_url: str, seeded_health) -> None:
+        authed_page.goto(f"{app_url}/")
+
+        strip = authed_page.locator("#libraryHealthStrip")
+        expect(strip).to_contain_text("3 previews are made but Plex isn't showing them")
+        expect(strip.get_by_role("link", name="Review & fix")).to_have_attribute("href", "/library-health?fix=e2e-plex")
+
+    def test_dashboard_strip_hidden_when_nothing_to_act_on(self, authed_page: Page, app_url: str) -> None:
+        with authed_page.expect_response(re.compile(r".*/api/library-health$")):
+            authed_page.goto(f"{app_url}/")
+
+        expect(authed_page.locator("#libraryHealthStrip")).to_be_hidden()
+
     def test_no_servers_shows_the_empty_state(self, authed_page: Page, app_url: str) -> None:
         authed_page.goto(f"{app_url}/library-health")
 

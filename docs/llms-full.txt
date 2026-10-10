@@ -2106,8 +2106,9 @@ system temp folder; nothing is written next to your media.
 or Intro & Credits. There is one card per server and one row per library, with the columns **Previews**,
 **Loudness**, **Intro** and **Credits**.
 
-- **The number.** The bold number is how many files still have work to do. Intro and Credits say **not checked**
-  instead, because many shows have no intro. **Nothing found** means the app looked and found none.
+- **The number.** The bold number is how many files still have work to do. For Intro and Credits, **to do** means
+  nobody has looked yet; many shows have no intro. **Nothing found** (the striped part of the bar) means the app
+  looked and found none.
 - **Other cell text.** **Off for this library** means the feature is turned off in Servers. **Not used for films**
   is Intro on a movie library. **Plex only** is Loudness on Emby or Jellyfin.
 - **Click a number** to list those files. From the list you can open a file in the Inspector, or start the matching
@@ -2121,7 +2122,7 @@ or Intro & Credits. There is one card per server and one row per library, with t
   runs, they show the last check's numbers.
 - **"N previews are made but Plex isn't showing them."** The preview file exists, but Plex hasn't re-read the video
   since. **Review & fix** asks Plex to re-read those videos, a couple per second, in the background. Nothing new is
-  made.
+  made. The Dashboard shows the same line at the top, and only when there's something to fix or a check failed.
 
 ### Production Server
 
