@@ -190,11 +190,9 @@ def _own_chapter_starts(extra_data: Any) -> list[int] | None:
 
 def _chapters_match(own_starts: list[int] | None, shared_rows: list[tuple]) -> bool:
     """True when a part's own chapters are the shared rows (starts within 1s, rounding aside)."""
-    return (
-        bool(own_starts)
-        and len(own_starts) == len(shared_rows)
-        and all(abs(own - row[1]) <= 1000 for own, row in zip(own_starts, shared_rows, strict=True))
-    )
+    if not own_starts or len(own_starts) != len(shared_rows):
+        return False
+    return all(abs(own - row[1]) <= 1000 for own, row in zip(own_starts, shared_rows, strict=True))
 
 
 class LocalChapters:
