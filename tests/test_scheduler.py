@@ -642,6 +642,56 @@ class TestQuietHoursMultiWindow:
         assert qh_ids == ["__qh_recheck"]
 
 
+class TestLibraryHealthNightly:
+    """The internal 03:00 library-health job."""
+
+    def test_registered_at_three_am_and_hidden_from_user_schedules(self, scheduler_manager):
+        from apscheduler.triggers.cron import CronTrigger
+
+        job = scheduler_manager.scheduler.get_job("__library_health_nightly")
+        assert job is not None
+        assert isinstance(job.trigger, CronTrigger)
+        fields = {f.name: str(f) for f in job.trigger.fields}
+        assert (fields["hour"], fields["minute"]) == ("3", "0")
+        assert all(s["id"] != "__library_health_nightly" for s in scheduler_manager.get_all_schedules())
+
+    def test_runs_one_at_a_time_and_coalesces_missed_runs(self, scheduler_manager):
+        job = scheduler_manager.scheduler.get_job("__library_health_nightly")
+        assert job.coalesce is True
+        assert job.max_instances == 1
+        assert "__library_health_nightly" not in [s["id"] for s in scheduler_manager.get_all_schedules()]
+
+    def test_registering_twice_keeps_one_job(self, scheduler_manager):
+        scheduler_manager._register_library_health_nightly()
+        ids = [j.id for j in scheduler_manager.scheduler.get_jobs() if j.id == "__library_health_nightly"]
+        assert ids == ["__library_health_nightly"]
+
+    def test_start_survives_a_failed_nightly_import(self, tmp_path, monkeypatch):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def failing_import(name, *args, **kwargs):
+            if name.endswith("library_health.runner"):
+                raise ImportError("boom")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", failing_import)
+        manager = ScheduleManager(config_dir=str(tmp_path / "config"), run_job_callback=None)
+        try:
+            manager.start()
+            assert manager.scheduler.running
+            assert manager.scheduler.get_job("__library_health_nightly") is None
+        finally:
+            manager.stop()
+
+    def test_job_next_run_reports_the_fire_time(self, scheduler_manager):
+        from media_preview_generator.web.scheduler import job_next_run
+
+        assert job_next_run("__library_health_nightly") is not None
+        assert job_next_run("missing") is None
+
+
 class TestExecuteScheduleStop:
     """D20 — the stop handler pauses the right jobs and ignores others."""
 
@@ -2166,13 +2216,16 @@ class TestPausedIntroCreditsJobsAfterAScheduleChanges:
 
 
 def test_nothing_is_scheduled_after_a_fresh_start(tmp_path):
-    """Check servers runs only on a schedule the user saves: a new install has no schedule and no built-in job."""
+    """Check servers runs only on a schedule the user saves: a new install has no schedule and no built-in job.
+
+    The internal ``__`` library-health nightly is not a user schedule and is the only job allowed.
+    """
     manager = ScheduleManager(config_dir=str(tmp_path / "config"), run_job_callback=None)
     manager.start()
     try:
         manager.apply_quiet_hours({})
         assert manager.get_all_schedules() == []
-        assert manager.scheduler.get_jobs() == []
+        assert [j.id for j in manager.scheduler.get_jobs()] == ["__library_health_nightly"]
     finally:
         manager.stop()
 

@@ -1,0 +1,17 @@
+import sqlite3, os, collections
+PMS = "/config/plex/Library/Application Support/Plex Media Server"
+c = sqlite3.connect(f"file:{PMS}/Plug-in Support/Databases/com.plexapp.plugins.library.db?mode=ro", uri=True, timeout=30)
+rows = c.execute("""SELECT mi.id, mp.hash, mp.extra_data, mp.updated_at FROM metadata_items mi
+JOIN media_items mdi ON mdi.metadata_item_id=mi.id AND mdi.deleted_at IS NULL
+JOIN media_parts mp ON mp.media_item_id=mdi.id AND mp.deleted_at IS NULL
+WHERE mi.library_section_id IN (1,2,12) AND mi.metadata_type IN (1,4) AND mi.deleted_at IS NULL AND COALESCE(mdi.proxy_type,0)=0""").fetchall()
+def bif(h): return f"{PMS}/Media/localhost/{h[0]}/{h[1:]}.bundle/Contents/Indexes/index-sd.bif"
+cnt = collections.Counter(); sample = []
+for iid, h, ed, upd in rows:
+    if not h or not os.path.exists(bif(h)): continue
+    flagged = '"mi:indexes":"sd"' in (ed or "")
+    newer = os.stat(bif(h)).st_mtime > (upd or 0)
+    cnt[(flagged, "bif newer than Plex's last part update" if newer else "Plex updated part after bif")] += 1
+    if not flagged and not newer and len(sample) < 3: sample.append(iid)
+for k, v in sorted(cnt.items()): print(k, v)
+print("unflagged, Plex touched after bif, sample item ids:", sample)

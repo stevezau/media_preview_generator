@@ -1,0 +1,267 @@
+/* Library health: one card per server, one row per library. Scoped to .lh and the two modals; colours come from the
+ * app's shared tokens in style.css (--t-* per feature, --ok/--warn/--bad/--run, --line, --inset). */
+
+.lh {
+    --lh-hatch: repeating-linear-gradient(45deg, var(--faint) 0 2px, transparent 2px 5px);
+    display: grid;
+    gap: 1rem;
+}
+
+.lh > :empty { display: none; }
+.lh .info-icon { margin-left: 0.3rem; }
+.lh-big { display: block; }
+
+.lh .page-header { margin-bottom: 0; }
+.lh .page-header > div:first-child { flex: 1 1 24rem; }
+
+.lh-side {
+    flex: 0 1 auto;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem 1rem;
+}
+
+.lh-when {
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.lh-when b { color: var(--bs-body-color); font-weight: 600; }
+
+.lh-progress {
+    border: 1px solid var(--line);
+    background: var(--run-soft);
+    border-radius: var(--radius-card);
+    padding: 0.75rem 1rem;
+    display: grid;
+    gap: 0.5rem;
+}
+
+.lh-progress-text { display: flex; align-items: center; gap: 0.5rem; }
+
+.lh-attn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    border: 1px solid var(--warn);
+    background: var(--warn-soft);
+    border-radius: var(--radius-card);
+    padding: 0.75rem 1rem;
+}
+
+.lh-attn + .lh-attn { margin-top: 0.5rem; }
+.lh-attn-detail { display: block; color: var(--muted); font-size: 0.85rem; margin-top: 0.15rem; max-width: 80ch; }
+.lh-attn-server { color: var(--muted); }
+
+.lh-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.lh-sw {
+    display: inline-block;
+    width: 0.7rem;
+    height: 0.7rem;
+    border-radius: 2px;
+    margin-right: 0.35rem;
+    vertical-align: -0.05rem;
+}
+
+.lh-sw-has { background: var(--muted); }
+.lh-sw-none { background: var(--lh-hatch); border: 1px solid var(--faint); }
+.lh-sw-todo { background: var(--inset); border: 1px solid var(--line-strong); }
+.lh-sw-previews { background: var(--t-previews); }
+.lh-sw-loudness { background: var(--t-loud); }
+.lh-sw-intro,
+.lh-sw-credits { background: var(--t-intro); }
+
+.lh-server,
+.lh-empty {
+    border: 1px solid var(--line);
+    background: var(--inset);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+}
+
+.lh-empty { padding: 2rem; text-align: center; }
+.lh-empty h2 { font-size: 1.15rem; }
+.lh-empty p { color: var(--muted); }
+
+.lh-server-h {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.lh-server-h h2 { font-size: 1.05rem; font-weight: 600; margin: 0; }
+.lh-meta { color: var(--muted); font-size: 0.85rem; }
+.lh-server-chips { margin-left: auto; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+
+.lh-logo {
+    display: grid;
+    place-items: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: var(--radius-xs);
+    font-weight: 800;
+    font-size: 0.8rem;
+    color: #111;
+    background: var(--accent);
+}
+
+.lh-logo-emby { background: #52b54b; }
+.lh-logo-jellyfin { background: #8b6fe0; color: #fff; }
+
+.lh-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.1rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    border: 1px solid var(--line-strong);
+}
+
+.lh-chip-ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.lh-chip-bad { color: var(--bad); background: var(--bad-soft); border-color: transparent; }
+.lh-chip-warn { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+.lh-chip-muted { color: var(--muted); }
+
+.lh-table { width: 100%; margin: 0; border-collapse: collapse; }
+
+.lh-table th,
+.lh-table td {
+    padding: 0.7rem 1rem;
+    vertical-align: top;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    font-weight: 400;
+}
+
+.lh-table thead th {
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+
+.lh-table tbody tr:last-child > * { border-bottom: 0; }
+.lh-table td { min-width: 11rem; }
+.lh-lib b { font-weight: 600; }
+.lh-sub { color: var(--muted); font-size: 0.8rem; }
+
+.lh-cell { display: grid; gap: 0.3rem; justify-items: start; }
+.lh-todo {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--bs-body-color);
+    font-variant-numeric: tabular-nums;
+}
+
+.lh-todo .lh-num {
+    font-size: 1.05rem;
+    font-weight: 700;
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+}
+
+.lh-todo:hover .lh-num { text-decoration-color: currentColor; }
+.lh-todo small { color: var(--muted); font-size: 0.8rem; }
+.lh-done { color: var(--ok); font-weight: 600; }
+.lh-na { color: var(--faint); font-size: 0.85rem; }
+.lh-err { color: var(--bad); font-size: 0.85rem; }
+.lh-note { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+
+.lh-warn-note {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--warn);
+    font-size: 0.8rem;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.lh-link { font-size: 0.85rem; }
+
+.lh-bar {
+    display: flex;
+    width: 100%;
+    min-width: 7rem;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--line);
+    overflow: hidden;
+}
+
+.lh-fill { display: block; height: 100%; background: var(--muted); }
+.lh-hatch { display: block; height: 100%; background: var(--lh-hatch); }
+.lh-bar-previews .lh-fill { background: var(--t-previews); }
+.lh-bar-loudness .lh-fill { background: var(--t-loud); }
+.lh-bar-intro .lh-fill,
+.lh-bar-credits .lh-fill { background: var(--t-intro); }
+.lh-bar-run .lh-fill { background: var(--run); transition: width 0.4s ease; }
+
+.lh-foot { color: var(--muted); font-size: 0.8rem; margin: 0; }
+
+/* File list modal */
+.lh-files { display: grid; }
+
+.lh-file {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.lh-file-text { display: grid; min-width: 0; }
+.lh-file-name { overflow-wrap: anywhere; }
+.lh-file-folder { color: var(--muted); font-size: 0.78rem; overflow-wrap: anywhere; }
+.lh-file .lh-link { white-space: nowrap; }
+.lh-confirm-text { margin-right: auto; font-weight: 600; }
+
+.lh-kv {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.25rem 1.5rem;
+    background: var(--inset);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-ctl);
+    padding: 0.6rem 0.9rem;
+    margin-bottom: 1rem;
+}
+
+.lh-kv dt { font-weight: 400; color: var(--muted); }
+.lh-kv dd { margin: 0; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Phone: the table's columns stack under each library, each cell labelled by its column. */
+@media (max-width: 640px) {
+    .lh-table thead { display: none; }
+    .lh-table tr,
+    .lh-table th,
+    .lh-table td { display: block; }
+    .lh-table td { min-width: 0; border-bottom: 0; padding-block: 0.4rem; }
+    .lh-table td::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--muted);
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .lh-table tbody tr { border-bottom: 1px solid var(--line); padding-bottom: 0.5rem; }
+}

@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Library health - Media Preview Generator{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/library_health.css') }}">
+{% endblock %}
+
+{% block content %}
+{# Drawn by static/js/library_health.js from GET /api/library-health; the two dialogs below are filled in by it. #}
+<div class="lh" id="lhApp">
+    <header class="page-header">
+        <div>
+            <h1 class="page-title">Library health</h1>
+            <p class="page-subtitle">What's done and what's left in each library. Checking only reads; it never changes your servers or files.</p>
+        </div>
+        <div class="lh-side" id="lhSide"></div>
+    </header>
+
+    <div id="lhProgress" aria-live="polite"></div>
+    <div id="lhError"></div>
+    <div id="lhPollNote" aria-live="polite"></div>
+    <div id="lhAttention"></div>
+    <div id="lhLegend"></div>
+    <div id="lhServers" aria-live="polite"></div>
+    <p class="lh-foot" id="lhFoot" hidden>Counts follow your settings: libraries and features that are off, and excluded folders, are left out.</p>
+</div>
+
+<div class="modal fade" id="lhFixModal" tabindex="-1" aria-labelledby="lhFixTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title fs-5" id="lhFixTitle"></h2>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="lhFixBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="lhFixStart">Start</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="lhFilesModal" tabindex="-1" aria-labelledby="lhFilesTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title fs-5" id="lhFilesTitle"></h2>
+                <span class="lh-chip lh-chip-warn ms-2" id="lhFilesCount"></span>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <label for="lhFilesQuery" class="visually-hidden">Filter by file name or folder</label>
+                <input id="lhFilesQuery" type="search" class="form-control form-control-sm mb-3" autocomplete="off"
+                       placeholder="Filter by file name or folder">
+                <div id="lhFilesList" class="lh-files"></div>
+                <div class="text-center mt-2"><button type="button" class="btn btn-sm btn-outline-secondary" id="lhFilesMore" hidden>Show more</button></div>
+                <p class="lh-note mt-3 mb-0" id="lhFilesNote"></p>
+            </div>
+            <div class="modal-footer" id="lhFilesFooter">
+                <span class="lh-confirm-text" id="lhFilesConfirmText" hidden></span>
+                <button type="button" class="btn btn-outline-secondary" id="lhFilesBack" hidden>Back</button>
+                <button type="button" class="btn btn-primary" id="lhFilesStart"></button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/library_health.js') }}"></script>
+{% endblock %}

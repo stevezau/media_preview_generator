@@ -1,0 +1,104 @@
+"""Read-only timing probe for a Library health count on a real Plex install. Opens every database read-only."""
+import json, os, sqlite3, sys, time
+from concurrent.futures import ThreadPoolExecutor
+
+PMS = "/config/plex/Library/Application Support/Plex Media Server"
+DB = PMS + "/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+MDB = "/config/plex-generate-previews/markers.db"
+SECTIONS = (1, 2, 12)
+THREADS = int(sys.argv[1]) if len(sys.argv) > 1 else 16
+import builtins; _p=builtins.print; print=lambda *a, **k: _p(*a, **k, flush=True)
+
+def ro(path):
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+
+t0 = time.time()
+c = ro(DB)
+parts = c.execute(f"""
+SELECT mi.library_section_id, mi.id, mi.metadata_type, mp.id, mp.file, mp.hash
+FROM metadata_items mi
+JOIN media_items mdi ON mdi.metadata_item_id = mi.id AND mdi.deleted_at IS NULL
+JOIN media_parts mp ON mp.media_item_id = mdi.id AND mp.deleted_at IS NULL
+WHERE mi.library_section_id IN ({','.join('?'*len(SECTIONS))}) AND mi.metadata_type IN (1, 4) AND mi.deleted_at IS NULL
+  AND COALESCE(mdi.proxy_type, 0) = 0
+""", SECTIONS).fetchall()
+t_parts = time.time() - t0
+
+t0 = time.time()
+loud_parts = {r[0] for r in c.execute(f"""
+SELECT DISTINCT ms.media_part_id FROM media_streams ms
+JOIN media_parts mp ON mp.id = ms.media_part_id JOIN media_items mdi ON mdi.id = mp.media_item_id
+JOIN metadata_items mi ON mi.id = mdi.metadata_item_id
+WHERE ms.stream_type_id = 2 AND ms.extra_data LIKE '%ln:%' AND mi.library_section_id IN ({','.join('?'*len(SECTIONS))})
+""", SECTIONS)}
+t_loud = time.time() - t0
+
+t0 = time.time()
+plex_markers = {}
+for item_id, text in c.execute("""
+SELECT tg.metadata_item_id, tg.text FROM taggings tg JOIN tags t ON t.id = tg.tag_id
+WHERE t.tag_type = 12 AND tg.text IN ('intro', 'credits')"""):
+    plex_markers.setdefault(item_id, set()).add(text)
+t_mark = time.time() - t0
+c.close()
+
+def bif_path(h):
+    return f"{PMS}/Media/localhost/{h[0]}/{h[1:]}.bundle/Contents/Indexes/index-sd.bif"
+
+def quick(p):
+    h = p[5]
+    if not h:
+        return "nohash"
+    try:
+        return "yes" if os.stat(bif_path(h)).st_size > 0 else "empty"
+    except OSError:
+        return "no"
+
+t0 = time.time()
+with ThreadPoolExecutor(THREADS) as ex:
+    quick_res = list(ex.map(quick, parts))
+t_bif = time.time() - t0
+
+def exact(p):
+    """What the scan's skip check reads on top: the source's stat and the BIF's .meta."""
+    try:
+        st = os.stat(p[4])
+    except OSError:
+        return "source_missing"
+    try:
+        with open(bif_path(p[5]) + ".meta") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return "no_meta"
+    srcs = data.get("sources") or []
+    fp = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+    ok = any(s.get("source_fingerprint") == fp or (s.get("mtime") == st.st_mtime_ns // 10**9 and s.get("size") == st.st_size) for s in srcs if isinstance(s, dict))
+    return "match" if ok else "mismatch"
+
+with_bif = [p for p, r in zip(parts, quick_res) if r == "yes"][:0] if "--quick" in sys.argv else [p for p, r in zip(parts, quick_res) if r == "yes"]
+t0 = time.time()
+with ThreadPoolExecutor(THREADS) as ex:
+    exact_res = list(ex.map(exact, with_bif))
+t_exact = time.time() - t0
+
+t0 = time.time()
+m = ro(MDB)
+decided = {}
+for path, typ, status in m.execute("SELECT f.canonical_path, d.type, d.status FROM files f JOIN decisions d ON d.file_id = f.id"):
+    decided.setdefault(path, {})[typ] = status
+pub = dict(m.execute("SELECT status, COUNT(*) FROM publish_state GROUP BY status").fetchall())
+t_mdb = time.time() - t0
+
+from collections import Counter
+print(f"threads={THREADS}")
+print(f"parts={len(parts)} items={len({p[1] for p in parts})}  query {t_parts:.2f}s")
+for s in SECTIONS:
+    sp = [p for p in parts if p[0] == s]
+    q = Counter(r for p, r in zip(parts, quick_res) if p[0] == s)
+    items = {p[1] for p in sp}
+    print(f"  section {s}: parts={len(sp)} bif={dict(q)} loud={sum(1 for p in sp if p[3] in loud_parts)} "
+          f"plex_intro={sum(1 for i in items if 'intro' in plex_markers.get(i, ()))} plex_credits={sum(1 for i in items if 'credits' in plex_markers.get(i, ()))} "
+          f"app_checked={sum(1 for p in sp if p[4] in decided)}")
+print(f"loudness query {t_loud:.2f}s  plex markers query {t_mark:.2f}s  markers.db read {t_mdb:.2f}s (publish_state={pub})")
+print(f"BIF existence stats {t_bif:.2f}s for {len(parts)}")
+print(f"exact check (source stat + .meta) {t_exact:.2f}s for {len(with_bif)}: {dict(Counter(exact_res))}")

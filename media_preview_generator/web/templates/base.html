@@ -144,14 +144,15 @@
                     {# Tools groups the diagnostic pages, keeping the main bar to configuration. "Run setup again"
                        lets users re-onboard after swapping servers. #}
                     <li class="nav-item dropdown nav-hover-menu">
-                        <a class="nav-link dropdown-toggle {% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.inspector') %}active{% endif %}"
-                           href="{{ url_for('main.inspector') }}" id="navToolsDropdown" data-nav-menu-toggle{% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.inspector') %} aria-current="page"{% endif %}
+                        <a class="nav-link dropdown-toggle {% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.inspector','main.library_health') %}active{% endif %}"
+                           href="{{ url_for('main.inspector') }}" id="navToolsDropdown" data-nav-menu-toggle{% if request.endpoint in ('main.logs_page','main.webhook_activity_page','main.inspector','main.library_health') %} aria-current="page"{% endif %}
                            aria-haspopup="true" aria-expanded="false" aria-controls="navToolsMenu">
                             <i class="bi bi-wrench-adjustable me-1"></i>Tools
                         </a>
                         <ul class="dropdown-menu" id="navToolsMenu" aria-labelledby="navToolsDropdown">
                             {# One page for a file's preview frames and its intro & credits. #}
                             <li>{{ menu_item(url_for('main.inspector'), 'film', 'Inspector', "A file's preview frames and markers", active=request.endpoint == 'main.inspector') }}</li>
+                            <li>{{ menu_item(url_for('main.library_health'), 'clipboard2-pulse', 'Library health', "What's done and what's left in each library", active=request.endpoint == 'main.library_health') }}</li>
                             <li>{{ menu_item(url_for('main.logs_page'), 'terminal', 'Logs', 'Live application log', active=request.endpoint == 'main.logs_page') }}</li>
                             <li>{{ menu_item(url_for('main.webhook_activity_page'), 'clock-history', 'Webhook Activity', 'History of incoming webhooks', active=request.endpoint == 'main.webhook_activity_page') }}</li>
                             <li><hr class="dropdown-divider"></li>

@@ -203,6 +203,19 @@ class TestPageRoutes:
         assert b'id="settings-sidebar"' in body, "settings page must include the sidebar nav"
         assert b'id="section-processing"' in body, "settings page must include the Processing section"
 
+    def test_library_health_requires_auth(self, client):
+        resp = client.get("/library-health", follow_redirects=False)
+        assert resp.status_code == 302
+        assert "/login" in resp.headers.get("Location", "")
+
+    def test_library_health_page_renders(self, authed_client):
+        resp = authed_client.get("/library-health")
+        assert resp.status_code == 200
+        body = resp.data
+        assert b"Library health" in body
+        assert b'id="lhApp"' in body, "page missing the container the JS renders into"
+        assert b"js/library_health.js" in body
+
     def test_webhook_activity_requires_auth(self, client):
         resp = client.get("/webhook-activity", follow_redirects=False)
         assert resp.status_code == 302

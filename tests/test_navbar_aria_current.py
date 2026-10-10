@@ -58,6 +58,7 @@ class TestNavbarAriaCurrent:
             ("/logs", [("navToolsDropdown", "/inspector"), ("", "/logs")]),
             ("/webhook-activity", [("navToolsDropdown", "/inspector"), ("", "/webhook-activity")]),
             ("/inspector", [("navToolsDropdown", "/inspector"), ("", "/inspector")]),
+            ("/library-health", [("navToolsDropdown", "/inspector"), ("", "/library-health")]),
         ],
     )
     def test_marks_only_current_page_when_page_is_visited(self, authenticated_client, path, expected):

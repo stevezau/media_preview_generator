@@ -176,7 +176,8 @@ _VIDEO_EXTS: frozenset[str] = frozenset(
 )
 
 # Library kinds that hold movies: Plex's section METADATA_TYPE and Emby/Jellyfin's CollectionType.
-_MOVIE_LIBRARY_KINDS: frozenset[str] = frozenset({"movie", "movies"})
+MOVIE_LIBRARY_KINDS: frozenset[str] = frozenset({"movie", "movies"})
+_MOVIE_LIBRARY_KINDS = MOVIE_LIBRARY_KINDS
 
 
 def _adapter_for_server(server_config: ServerConfig) -> OutputAdapter | None:

@@ -132,6 +132,13 @@ def inspector():
     return render_template("inspector.html")
 
 
+@main.route("/library-health")
+@login_required
+def library_health():
+    """Library health: what's done and what's left in each library, per server, from the last check."""
+    return render_template("library_health.html")
+
+
 @main.route("/bif-viewer")
 @login_required
 def bif_viewer():

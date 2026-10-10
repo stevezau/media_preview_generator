@@ -1,0 +1,26 @@
+"""Read-only timing probe: list every item per Emby/Jellyfin library with the app's own client, then check sidecars."""
+import json, os, subprocess, sys, time
+from concurrent.futures import ThreadPoolExecutor
+from loguru import logger
+logger.remove()
+from media_preview_generator.servers.registry import ServerRegistry
+
+PORTS = {"mlab-jellyfin:8096": "127.0.0.1:18097", "mlab-emby:8096": "127.0.0.1:18096", "mlab-emby49:8096": "127.0.0.1:18099"}
+raw = json.loads(subprocess.check_output(["docker", "run", "--rm", "-v", "mlab_app_config:/c:ro", "alpine", "cat", "/c/settings.json"]))
+servers = []
+for s in raw["media_servers"]:
+    if s["type"] not in ("emby", "jellyfin"):
+        continue
+    for k, v in PORTS.items():
+        if k in s["url"]:
+            s["url"] = s["url"].replace(k, v)
+            servers.append(s)
+reg = ServerRegistry.from_settings(servers)
+for cfg in servers:
+    srv = reg.get(cfg["id"]) if hasattr(reg, "get") else reg._servers[cfg["id"]]
+    print(f"== {cfg['type']} {cfg['name']}  mappings={[(m.get('remote_prefix'), m.get('local_prefix')) for m in cfg.get('path_mappings') or []]}")
+    for lib in srv.list_libraries():
+        t = time.time()
+        items = list(srv.list_items(lib.id))
+        dt = time.time() - t
+        print(f"   {lib.name!r}: {len(items)} items, list {dt:.2f}s, sample={items[0].remote_path if items else None}")

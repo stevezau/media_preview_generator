@@ -1,0 +1,15 @@
+import json, os, subprocess, time
+from loguru import logger
+logger.remove()
+from media_preview_generator.servers.registry import ServerRegistry
+raw = json.loads(subprocess.check_output(["docker", "run", "--rm", "-v", "mlab_app_config:/c:ro", "alpine", "cat", "/c/settings.json"]))
+s = next(s for s in raw["media_servers"] if "mlab-jellyfin:8096" in s["url"]); s["url"] = s["url"].replace("mlab-jellyfin:8096", "127.0.0.1:18097")
+srv = ServerRegistry.from_settings([s])._servers[s["id"]]
+for name, lid in {l.name: l.id for l in srv.list_libraries()}.items():
+    if name not in ("Open Films", "tv", "movies"): continue
+    t = time.time()
+    r = srv._request("GET", "/Items", params={"ParentId": lid, "Recursive": "true", "IncludeItemTypes": "Movie,Episode", "Fields": "Trickplay,Path"})
+    items = r.json()["Items"]; dt = time.time() - t
+    with_tp = [i for i in items if i.get("Trickplay")]
+    on_disk = sum(1 for i in items if os.path.isdir(i["Path"].replace("/media/openfilms", "/home/data/mlab-openfilms").rsplit(".", 1)[0] + ".trickplay")) if name == "Open Films" else "n/a"
+    print(f"{name}: {len(items)} items in {dt:.2f}s, Trickplay field set on {len(with_tp)}, trickplay dir on disk={on_disk}")

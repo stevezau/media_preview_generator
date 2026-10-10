@@ -1,0 +1,31 @@
+import json, subprocess, time
+from loguru import logger
+logger.remove()
+from media_preview_generator.servers.registry import ServerRegistry
+PORTS = {"mlab-jellyfin:8096": "127.0.0.1:18097", "mlab-emby:8096": "127.0.0.1:18096"}
+raw = json.loads(subprocess.check_output(["docker", "run", "--rm", "-v", "mlab_app_config:/c:ro", "alpine", "cat", "/c/settings.json"]))
+servers = [s for s in raw["media_servers"] if any(k in s["url"] for k in PORTS)]
+for s in servers:
+    for k, v in PORTS.items(): s["url"] = s["url"].replace(k, v)
+reg = ServerRegistry.from_settings(servers)
+for cfg in servers:
+    srv = reg._servers[cfg["id"]]
+    libs = {l.name: l.id for l in srv.list_libraries()}
+    lib = libs.get("tv")
+    if cfg["type"] == "emby":
+        t = time.time()
+        r = srv._request("GET", "/Items", params={"ParentId": lib, "Recursive": "true", "IncludeItemTypes": "Episode", "Fields": "Chapters,Path"})
+        items = r.json()["Items"]; dt = time.time() - t
+        kinds = {}
+        for it in items:
+            for ch in it.get("Chapters") or []:
+                kinds[ch.get("MarkerType")] = kinds.get(ch.get("MarkerType"), 0) + 1
+        print(f"emby bulk Fields=Chapters: {len(items)} episodes in {dt:.2f}s, chapter MarkerTypes={kinds}, with intro={sum(1 for it in items if any(c.get('MarkerType')=='IntroStart' for c in it.get('Chapters') or []))}")
+    else:
+        ids = [i.id for i in srv.list_items(lib)][:200]
+        t = time.time(); found = 0
+        for i in ids:
+            r = srv._request("GET", f"/MediaSegments/{i}")
+            if r.status_code == 200 and r.json().get("Items"): found += 1
+        dt = time.time() - t
+        print(f"jellyfin per-item /MediaSegments: {len(ids)} in {dt:.2f}s -> {len(ids)/dt:.0f}/s, with segments={found}")
