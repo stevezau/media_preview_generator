@@ -7,66 +7,59 @@ time to rebuild. `docs/design/` is excluded from the site build, so this page ne
 All state lives in named Docker volumes (`mlab_*`), so a container can be removed and recreated
 without losing its config — but see the warning below before doing that.
 
-## Containers (2026-09-24)
+## Containers (2026-10-10)
 
 Every container's name starts `mlab-`. Ports bind to `127.0.0.1` only.
 
 | Container | Image | Host -> container port | Volumes | Notes |
 |---|---|---|---|---|
-| `mlab-plex` | `plexinc/pms-docker:latest` | 32402 -> 32400 | `mlab_plex_config`, `mlab_plex_transcode` | Claimed lab Plex; the intro/credits matrix and the docs-site screenshots both use it |
-| `mlab-emby` | `emby/embyserver:4.10.0.40` | 18096 -> 8096 | `mlab_emby_config` | Lab Emby for the intro/credits matrix and the docs-site screenshots |
-| `mlab-emby49` | `emby/embyserver:4.9.1.90` | 18099 -> 8096 | `mlab_emby49_config` | Older Emby, for the version-matrix rows |
-| `mlab-jellyfin` | `jellyfin/jellyfin:10.11` | 18097 -> 8096 | `mlab_jf_config`, `mlab_jf_cache` | Lab Jellyfin for the intro/credits matrix and the docs-site screenshots |
-| `mlab-jf12` | `jellyfin/jellyfin:12.0` | 18098 -> 8096 | `mlab_jf12_config`, `mlab_jf12_cache` | Newer Jellyfin, for the version-matrix rows |
-| `mlab-app` | `plex-previews:phase4-lab` | 18080 -> 8080 | `mlab_app_config`, `mlab_plex_config` (at `/plexcfg`) | The app, wired to the servers above (`up.sh`, `app.sh`) |
-| `mlab-plex-nopass` | `plexinc/pms-docker:latest` | 32403 -> 32400 | `mlab_plex_nopass_config`, `mlab_plex_nopass_transcode` | Unclaimed Plex (no Plex Pass), no library, for Setup Health's Plex Pass checks |
-| `mlab-plex-nopass-proxy` | `nginx:alpine` | shares `mlab-plex-nopass`'s network namespace, listens on 32499 | none | Strips `X-Plex-Token` so the app's tokened requests still reach the unclaimed Plex |
-| `mlab-app-health` | `plex-previews:phase4-lab` | 18082 -> 8080 | `mlab_app_health_config`, `mlab_plex_nopass_config` (at `/plexnp`), `mlab_p4h_plexcopy` | Sees `mlab-plex-nopass`'s config at `/plexnp` and a copy of `mlab-plex`'s database at `/plexcopy`, for Setup Health's "database not on this machine" case |
-| `mlab-plex-agent` | `plex-marker-agent:phase4-lab` | 19494 -> 9494 | `mlab_plex_config` (at `/plexcfg`) | The Plex marker agent, next to `mlab-plex`'s config |
-| `mlab-app-remote` | `plex-previews:phase4-lab` | 18081 -> 8080 | `mlab_app_remote_config`, `mlab_app_remote_plexcfg` | App with no access to `mlab-plex`'s config volume, so it must reach Plex through `mlab-plex-agent` |
-| `mlab-site-app` | `plex-previews:site-lab` | 18083 -> 8080 | `mlab_site_app_config`, `mlab_plex_config` (at `/plexcfg`) | Generates the open-films previews for the docs-site screenshots and the benchmark; separate config volume and image from `mlab-app` |
-| `mlab-plex-pre-openfilms` | `plexinc/pms-docker:latest` | 32402 -> 32400 (same as `mlab-plex`; exited, so no conflict today) | `mlab_plex_config`, `mlab_plex_transcode` | Stopped snapshot, kept for rollback. **Shares `mlab-plex`'s volumes and host port** — never start it while `mlab-plex` is running |
-| `mlab-jellyfin-pre-openfilms` | `jellyfin/jellyfin:10.11` | 18097 -> 8096 (same as `mlab-jellyfin`; exited) | `mlab_jf_config`, `mlab_jf_cache` | Same pattern, shares `mlab-jellyfin`'s volumes and host port |
-| `mlab-emby-pre-openfilms` | `emby/embyserver:4.10.0.40` | 18096 -> 8096 (same as `mlab-emby`; exited) | `mlab_emby_config` | Same pattern, shares `mlab-emby`'s volume and host port |
+| `mlab-plex` | `plexinc/pms-docker:latest` | 32402 -> 32400 | `mlab_plex_config`, `mlab_plex_transcode` | Claimed lab Plex |
+| `mlab-emby` | `emby/embyserver:4.10.0.40` | 18096 -> 8096 | `mlab_emby_config` | Lab Emby, with the Media Preview Bridge plugin and an "Open Films" library |
+| `mlab-emby49` | `emby/embyserver:4.9.1.90` | 18099 -> 8096 | `mlab_emby49_config` | Older Emby, for version checks |
+| `mlab-jellyfin` | `jellyfin/jellyfin:10.11` | 18097 -> 8096 | `mlab_jf_config`, `mlab_jf_cache` | Lab Jellyfin 10.11, with the plugin and "Open Films" |
+| `mlab-jf12` | `jellyfin/jellyfin:12.0` | 18098 -> 8096 | `mlab_jf12_config`, `mlab_jf12_cache` | Jellyfin 12 with the 12.x plugin; its libraries are the real library `:ro`, no "Open Films" |
+| `mlab-app` | `plex-previews:captions` | 18080 -> 8080 | `mlab_app_config_captions`, `mlab_plex_config` (at `/plexcfg`) | The app, wired to the servers above |
+| `mlab-app-remote` | `plex-previews:final-dd911c0` | 18081 -> 8080 | `mlab_app_remote_config`, `mlab_app_remote_plexcfg` | App with no access to `mlab-plex`'s config, so it reaches Plex through `mlab-plex-agent` |
+| `mlab-plex-agent` | `plex-marker-agent:release-check` | 19494 -> 9494 | `mlab_plex_config` (at `/plexcfg`) | The Plex marker agent, next to `mlab-plex`'s config |
+| `mlab-plex-nopass` | `plexinc/pms-docker:latest` | 32403 -> 32400 | `mlab_plex_nopass_config`, `mlab_plex_nopass_transcode` | Unclaimed Plex (no Plex Pass), for Setup Health's Plex Pass checks. Stopped |
+| `mlab-plex-nopass-proxy` | `nginx:alpine` | shares `mlab-plex-nopass`'s network, listens on 32499 | none | Strips `X-Plex-Token` so tokened requests reach the unclaimed Plex. Stopped |
+| `mlab-app-health` | `plex-previews:phase4-lab` | 18082 -> 8080 | `mlab_app_health_config`, `mlab_plex_nopass_config` (at `/plexnp`), `mlab_p4h_plexcopy` | Setup Health's "database not on this machine" case. Stopped |
+| `mlab-site-app` | `plex-previews:site-lab` | 18083 -> 8080 | `mlab_site_app_config`, `mlab_plex_config` (at `/plexcfg`) | Generated the docs-site screenshots and benchmark. Stopped |
 
-## Which lab uses which containers
+For a one-off proof, start a new app container (name it `mlab-<purpose>-<date>`) with its own new
+config volume, and remove it and its volume when the proof is done. Real-library mounts are `:ro`.
 
-- **Intro & Credits lab** (`docs/design/intro-credits/evidence/lab/`, see `up.sh` and the
-  `phase*.sh`/`phase*.py` scripts there): `mlab-plex`, `mlab-emby`, `mlab-emby49`,
-  `mlab-jellyfin`, `mlab-jf12`, `mlab-app`, plus the Setup Health and marker-agent extras
-  (`mlab-plex-nopass`, `mlab-plex-nopass-proxy`, `mlab-app-health`, `mlab-plex-agent`,
-  `mlab-app-remote`) from `phase4_health_up.sh` and `phase4_row12_up.sh`.
-- **Docs-site screenshots** (`docs/design/site-redesign-lab/`, see `lab_setup.py` and
-  `site_app.sh`): reuses `mlab-plex`, `mlab-jellyfin` and `mlab-emby` with an added "Open Films"
-  library, plus its own `mlab-site-app`. The films live at `/home/data/mlab-openfilms/Movies`, a
-  symlink to `/home/data/lab-media/open-films`. Capture and comparison scripts are in
-  `tests/e2e/snapshots/` (e.g. `lab_players.py`) and `scripts/` (e.g. `benchmark_previews.py`).
+## Media
+
+- **Open Films** (`/home/data/lab-media/open-films`, also at `/home/data/mlab-openfilms/Movies`):
+  sample films that `mlab-plex`, `mlab-emby` and `mlab-jellyfin` have as a library. It is the only
+  writable media in the lab, so Emby BIFs and Jellyfin trickplay can be written next to the videos.
+- **Real library** (`/data_16tb*`): always mounted `:ro`, used for Intro & Credits on real episodes.
+- **Docs-site screenshots:** `docs/design/site-redesign-lab/lab_setup.py` and `tests/e2e/snapshots/` drive
+  `mlab-site-app` against the Open Films library.
+- The synthetic clips (`docs/design/intro-credits/evidence/lab/synth/`) and the lab scripts
+  (`up.sh`, `app.sh`, `phase*`) were removed in #378. `mlab-app`, `mlab-app-remote` and
+  `mlab-app-health` still bind-mount the old synth paths, so starting them makes Docker create empty
+  root-owned folders there; delete those afterwards. To read an old script:
+  `git show b758a022^:docs/design/intro-credits/evidence/lab/<file>`.
 
 ## Tokens
 
-Every generated token (app tokens, the marker agent token, Plex claim state) lives in
-`docs/design/intro-credits/evidence/lab/env`, which is gitignored and `chmod 600`. Both labs read
-from that same file. Never copy a token out of it into a commit, a doc, or chat output.
+Each app's server keys and tokens live in its own `settings.json` (for example in the
+`mlab_app_config_captions` and `mlab_app_config` volumes). Read them from a read-only mount, e.g.
+`docker run --rm -v mlab_app_config:/c:ro alpine cat /c/settings.json`, inside a script. Never
+print a token or copy one into a commit, a doc, or chat output.
 
 ## Starting and stopping
 
 ```bash
-# Stop, keep volumes. Excludes the -pre-openfilms set: see the warning below before touching those.
-docker stop mlab-plex mlab-emby mlab-emby49 mlab-jellyfin mlab-jf12 mlab-app mlab-plex-nopass mlab-plex-nopass-proxy mlab-app-health mlab-plex-agent mlab-app-remote mlab-site-app
+# Stop, keep volumes.
+docker stop mlab-plex mlab-emby mlab-emby49 mlab-jellyfin mlab-jf12 mlab-app mlab-app-remote mlab-plex-agent
 
-# Start again. mlab-plex-nopass before mlab-plex-nopass-proxy: the proxy shares its network namespace.
-docker start mlab-plex mlab-emby mlab-emby49 mlab-jellyfin mlab-jf12 mlab-app mlab-plex-nopass mlab-plex-nopass-proxy mlab-app-health mlab-plex-agent mlab-app-remote mlab-site-app
+# Start again. The Setup Health extras: mlab-plex-nopass before mlab-plex-nopass-proxy (shared network).
+docker start mlab-plex mlab-emby mlab-emby49 mlab-jellyfin mlab-jf12 mlab-app mlab-app-remote mlab-plex-agent
 ```
 
-**Never `docker rm` these containers.** Their named volumes hold a claimed Plex server, each
-server's library setup, and (for the `-pre-openfilms` set) state shared with a live container.
-Removing a container is fine if its replacement reuses the same volume names deliberately (as
-`up.sh` and the `phase4_*` scripts do); removing one without checking what shares its volumes is
-not.
-
-## The real library
-
-Every bind mount of the real library (paths under `/data_16tb*`) is `:ro` in every lab container.
-The only read-write media mount in the lab is `mlab-site-app`'s open-films folder, which is
-sample content, not the user's library — Emby and Jellyfin write their BIFs/trickplay next to the
-video there, exactly as they would in production.
+**Never `docker rm -v` these containers or remove their volumes.** The named volumes hold a
+claimed Plex server and each server's library and plugin setup. Several containers share
+`mlab_plex_config`, so check what shares a volume before replacing a container.

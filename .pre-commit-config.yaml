@@ -9,8 +9,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # A patch's whitespace is part of its context lines, and Google's site-verification file must stay
+      # byte-for-byte; "fixing" either breaks the FFmpeg build or the domain check.
       - id: trailing-whitespace
+        exclude: &verbatim ^(docker/ffmpeg-loudness/.*\.patch|docs/[0-9a-f]{32}\.txt)$
       - id: end-of-file-fixer
+        exclude: *verbatim
       - id: check-yaml
       - id: check-json
         # A Liquid template (front matter + loops) that Jekyll renders into the search index.
