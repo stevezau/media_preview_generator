@@ -1806,3 +1806,78 @@ class TestMasterSwitchGatesRouter:
         assert response.status_code == 202
         assert proc.call_args.kwargs["canonical_path"] == "/data/tv/Show/S01E01.mkv"
         assert proc.call_args.kwargs["server_id_filter"] == "emby-1"
+
+
+_VENDOR_PAYLOADS = {
+    "plex": {"event": "library.new", "Metadata": {"ratingKey": "42", "title": "Foo", "type": "movie"}},
+    "emby": {"Event": "library.new", "Item": {"Id": "42"}, "Server": {"Id": "vendor-server-id"}},
+    "jellyfin": {"NotificationType": "ItemAdded", "ItemId": "42", "ItemType": "Movie"},
+}
+
+
+def _vendor_server(vendor: str, server_id: str, local_prefix: str) -> dict:
+    return {
+        "id": server_id,
+        "type": vendor,
+        "name": server_id,
+        "enabled": True,
+        "url": f"http://{server_id}:8096",
+        "auth": {"token": "tok"} if vendor == "plex" else {"method": "api_key", "api_key": "k"},
+        "libraries": [{"id": "1", "name": "Movies", "remote_paths": ["/em/movies"], "enabled": True}],
+        "path_mappings": [{"remote_prefix": "/em", "local_prefix": local_prefix}],
+    }
+
+
+def _post_vendor_payload(client, auth_headers, url: str, vendor: str):
+    payload = _VENDOR_PAYLOADS[vendor]
+    if vendor == "plex":
+        return client.post(
+            url, headers=auth_headers, data={"payload": json.dumps(payload)}, content_type="multipart/form-data"
+        )
+    return client.post(url, headers={**auth_headers, "Content-Type": "application/json"}, data=json.dumps(payload))
+
+
+@pytest.fixture
+def _resolve_every_vendor_item(monkeypatch):
+    from media_preview_generator.servers.emby import EmbyServer
+    from media_preview_generator.servers.jellyfin import JellyfinServer
+    from media_preview_generator.servers.plex import PlexServer
+
+    for server_class in (PlexServer, EmbyServer, JellyfinServer):
+        monkeypatch.setattr(
+            server_class, "resolve_item_to_remote_paths", lambda self, item_id: [(item_id, "/em/movies/Foo.mkv")]
+        )
+
+
+@pytest.mark.usefixtures("_resolve_every_vendor_item")
+class TestPerServerUrlMatrix:
+    """The per-server URL names our own server id: it must pick that server for every vendor, and refuse a payload
+    from another vendor, whatever the vendor-reported identity says."""
+
+    @pytest.mark.parametrize("vendor", ["plex", "emby", "jellyfin"])
+    def test_picks_the_named_server_of_two_with_the_same_vendor(self, client, auth_headers, vendor):
+        _seed_servers([_vendor_server(vendor, f"{vendor}-1", "/one"), _vendor_server(vendor, f"{vendor}-2", "/two")])
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job", return_value="job-fake-12345678"
+        ) as proc:
+            response = _post_vendor_payload(client, auth_headers, f"/api/webhooks/server/{vendor}-2", vendor)
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        proc.assert_called_once()
+        assert proc.call_args.kwargs["server_id_filter"] == f"{vendor}-2"
+        assert proc.call_args.kwargs["canonical_path"] == "/two/movies/Foo.mkv"
+
+    @pytest.mark.parametrize(
+        ("payload_vendor", "url_vendor"),
+        [(p, u) for p in ("plex", "emby", "jellyfin") for u in ("plex", "emby", "jellyfin") if p != u],
+    )
+    def test_ignores_a_payload_from_another_vendor(self, client, auth_headers, payload_vendor, url_vendor):
+        _seed_servers([_vendor_server(url_vendor, "target", "/one")])
+
+        with patch("media_preview_generator.web.webhook_router.create_vendor_webhook_job") as proc:
+            response = _post_vendor_payload(client, auth_headers, "/api/webhooks/server/target", payload_vendor)
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        assert response.get_json()["status"] == "ignored"
+        proc.assert_not_called()
