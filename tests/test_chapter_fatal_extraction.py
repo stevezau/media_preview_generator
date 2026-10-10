@@ -241,7 +241,7 @@ def test_container_duration_does_not_enable_video_endpoint_fallback(extraction, 
     runner = MagicMock(return_value=lambda **_kwargs: (0, 0, "", ["No filtered frames"]))
     monkeypatch.setattr(chapters, "create_ffmpeg_runner", runner)
 
-    with pytest.raises(ValueError, match="No video frame was available"):
+    with pytest.raises(chapters.ChapterPastEndError, match="after the last video frame"):
         chapters.extract_chapter_frame(plan.canonical_path, 10000, plan.folder / "frame.jpg", config, media_info=media)
 
     assert [call.kwargs["chapter_start_ms"] for call in runner.call_args_list] == [10000]
