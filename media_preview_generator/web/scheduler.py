@@ -59,6 +59,7 @@ _QUIET_HOURS_RESUME_JOB_ID = "__quiet_hours_resume"
 _QUIET_HOURS_PAUSE_PREFIX = "__qh_pause_"
 _QUIET_HOURS_RESUME_PREFIX = "__qh_resume_"
 _QUIET_HOURS_RECHECK = "__qh_recheck"
+_LIBRARY_HEALTH_NIGHTLY = "__library_health_nightly"
 
 # APScheduler day_of_week names (Mon-first). Order matters for cron
 # strings — keep these literal so a typo in the JS payload can't slip
@@ -1185,6 +1186,24 @@ class ScheduleManager:
         if not self.scheduler.running:
             self.scheduler.start()
             logger.info("Scheduler started")
+            self._register_library_health_nightly()
+
+    def _register_library_health_nightly(self) -> None:
+        """Add the internal 03:00 library-health check; hidden from user schedules by its ``__`` id."""
+        try:
+            from ..library_health.runner import nightly_check
+
+            self.scheduler.add_job(
+                nightly_check,
+                CronTrigger(hour=3, minute=0),
+                id=_LIBRARY_HEALTH_NIGHTLY,
+                replace_existing=True,
+                coalesce=True,
+                max_instances=1,
+                misfire_grace_time=3600,
+            )
+        except Exception:
+            logger.warning("Could not register the nightly library health check", exc_info=True)
 
     def apply_quiet_hours(self, settings_dict: dict | None, *, drain: bool = True) -> None:
         """Re-evaluate quiet hours now and (re)register the per-minute recheck.
@@ -1598,6 +1617,22 @@ def get_schedule_manager(config_dir: str | None = None, run_job_callback: Callab
         elif run_job_callback and _schedule_manager.run_job_callback is None:
             _schedule_manager.set_run_job_callback(run_job_callback)
         return _schedule_manager
+
+
+def job_next_run(job_id: str) -> datetime | None:
+    """When an internal scheduler job next fires, without creating a manager.
+
+    Args:
+        job_id: The APScheduler job id.
+
+    Returns:
+        A timezone-aware datetime; None when no scheduler is running or the job is absent.
+    """
+    manager = _schedule_manager
+    if manager is None or not manager.scheduler.running:
+        return None
+    job = manager.scheduler.get_job(job_id)
+    return getattr(job, "next_run_time", None) if job else None
 
 
 def schedule_name(schedule_id: str) -> str | None:

@@ -1671,7 +1671,7 @@ which server library owns the file. Use **Setup Health** and a one-file job to v
 
 The version you're running shows under the app's name in the top bar, on every page. A dot beside it means a newer version is out; click the version for the release notes.
 
-The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **Tools**. Hover over **Automation**, **Settings** or **Tools** to see what's inside and jump straight there (or focus it and press the Down arrow). **Automation** and **Settings** open their page when clicked; **Tools** opens the Inspector and also holds **Logs**, **Webhook Activity** and **Run setup again**. On a phone, tap one in the menu to list what's inside.
+The top bar has **Dashboard**, **Servers**, **Automation**, **Settings** and **Tools**. Hover over **Automation**, **Settings** or **Tools** to see what's inside and jump straight there (or focus it and press the Down arrow). **Automation** and **Settings** open their page when clicked; **Tools** opens the Inspector and also holds **Library health**, **Logs**, **Webhook Activity** and **Run setup again**. On a phone, tap one in the menu to list what's inside.
 
 ### Dashboard Features
 
@@ -2099,6 +2099,29 @@ server's library that Intro & Credits has seen, or that a server lists), with ff
 most two at a time, and each read stops after 30 seconds. HDR10 and HLG frames are tone-mapped like the previews;
 Dolby Vision Profile 5 frames aren't, so their colours look off. The frames are kept in a size-capped folder under the
 system temp folder; nothing is written next to your media.
+
+### Library health
+
+**Tools → Library health** shows, for every library on every server, how many files still need previews, loudness
+or Intro & Credits. There is one card per server and one row per library, with the columns **Previews**,
+**Loudness**, **Intro** and **Credits**.
+
+- **The number.** The bold number is how many files still have work to do. Intro and Credits say **not checked**
+  instead, because many shows have no intro. **Nothing found** means the app looked and found none.
+- **Other cell text.** **Off for this library** means the feature is turned off in Servers. **Not used for films**
+  is Intro on a movie library. **Plex only** is Loudness on Emby or Jellyfin.
+- **Click a number** to list those files. From the list you can open a file in the Inspector, or start the matching
+  job (previews, loudness, or Intro & Credits) for exactly those files. Past 1,000 files, the job covers the whole
+  library.
+- **Checking only reads.** It never changes your servers or your files.
+- **When it runs.** **Check now** runs it. It also runs every night at 3:00 AM.
+- **How long it takes.** Plex with access to its database takes seconds, even for 100,000+ files. Without that
+  access (for example, Plex reached through the marker helper), only previews are counted. Jellyfin Intro and
+  Credits and Emby previews take longer, because they need one request or one folder read per file. While a check
+  runs, they show the last check's numbers.
+- **"N previews are made but Plex isn't showing them."** The preview file exists, but Plex hasn't re-read the video
+  since. **Review & fix** asks Plex to re-read those videos, a couple per second, in the background. Nothing new is
+  made.
 
 ### Production Server
 

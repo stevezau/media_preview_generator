@@ -66,6 +66,7 @@ TOOLS = {
     "page": "/inspector",
     "items": [
         ("Inspector", "/inspector", None),
+        ("Library health", "/library-health", None),
         ("Logs", "/logs", None),
         ("Webhook Activity", "/webhook-activity", None),
         ("Run setup again", "/setup?rerun=1", None),
@@ -380,7 +381,7 @@ class TestKeyboard:
         _open(nav_page, app_url)
         nav_page.locator(TOOLS["toggle"]).focus()
 
-        for key in ("ArrowDown", "ArrowDown", "Enter"):
+        for key in ("ArrowDown", "ArrowDown", "ArrowDown", "Enter"):
             nav_page.keyboard.press(key)
 
         nav_page.wait_for_url(f"{app_url}/logs")

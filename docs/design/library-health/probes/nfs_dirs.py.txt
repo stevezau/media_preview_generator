@@ -1,0 +1,24 @@
+import os, random, sqlite3, time
+from concurrent.futures import ThreadPoolExecutor
+DB = "/config/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+c = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=30)
+files = [r[0] for r in c.execute("""SELECT mp.file FROM metadata_items mi JOIN media_items mdi ON mdi.metadata_item_id=mi.id AND mdi.deleted_at IS NULL
+JOIN media_parts mp ON mp.media_item_id=mdi.id AND mp.deleted_at IS NULL WHERE mi.library_section_id IN (1,2,12) AND mi.metadata_type IN (1,4) AND mi.deleted_at IS NULL""")]
+dirs = sorted({os.path.dirname(f) for f in files})
+print(f"files={len(files)} folders={len(dirs)} -> {len(files)/len(dirs):.1f} files per folder")
+random.seed(11); sample = random.sample(dirs, 300)
+def scan(d):
+    n = 0
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                if e.name.endswith((".mkv", ".mp4", ".avi", ".m4v", ".ts")):
+                    e.stat(); n += 1
+    except OSError:
+        pass
+    return n
+for th, part in ((1, sample[:60]), (8, sample[60:300])):
+    t = time.time()
+    with ThreadPoolExecutor(th) as ex: n = sum(ex.map(scan, part))
+    w = time.time() - t
+    print(f"threads={th}: {len(part)} folders ({n} videos stat'd) in {w:.1f}s -> {len(part)/w:.1f} folders/s, {n/w:.0f} videos/s")

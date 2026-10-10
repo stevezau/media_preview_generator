@@ -521,7 +521,7 @@ class TestNavbarMenus:
         expect(page.locator("#navSettingsMenu .dropdown-header")).to_have_text(["Processing", "System"])
         page.locator("#navToolsDropdown").hover()
         expect(page.locator("#navToolsMenu .dropdown-item b")).to_have_text(
-            ["Inspector", "Logs", "Webhook Activity", "Run setup again"]
+            ["Inspector", "Library health", "Logs", "Webhook Activity", "Run setup again"]
         )
         expect(page.locator('#navToolsMenu a[href="/setup?rerun=1"]')).to_be_visible()
 
@@ -542,7 +542,7 @@ class TestNavbarMenus:
         for toggle, menu, count in (
             ("#navAutomationDropdown", "#navAutomationMenu", 2),
             ("#navSettingsDropdown", "#navSettingsMenu", 8),
-            ("#navToolsDropdown", "#navToolsMenu", 4),
+            ("#navToolsDropdown", "#navToolsMenu", 5),
         ):
             page.locator(toggle).click()
             expect(page.locator(f"{menu} .dropdown-item")).to_have_count(count)
