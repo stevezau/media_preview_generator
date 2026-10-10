@@ -102,6 +102,8 @@ def _is_known_notification_id(notification_id: str) -> bool:
     from ...jobs.gpu_fallback import is_gpu_notification_id
     from ..notifications import (
         DEPRECATED_IMAGE_ID,
+        LIBRARY_HEALTH_CHECK_FAILED_ID,
+        LIBRARY_HEALTH_NOT_SHOWING_ID,
         MEDIA_MOUNT_UNHEALTHY_ID,
         SCHEMA_MIGRATION_ID,
         TIMEZONE_MISCONFIGURED_ID,
@@ -110,6 +112,8 @@ def _is_known_notification_id(notification_id: str) -> bool:
 
     fixed = {
         DEPRECATED_IMAGE_ID,
+        LIBRARY_HEALTH_CHECK_FAILED_ID,
+        LIBRARY_HEALTH_NOT_SHOWING_ID,
         MEDIA_MOUNT_UNHEALTHY_ID,
         SCHEMA_MIGRATION_ID,
         TIMEZONE_MISCONFIGURED_ID,

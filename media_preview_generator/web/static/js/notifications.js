@@ -120,6 +120,15 @@ function renderNotifications(notifications) {
 
         var actions = document.createElement('div');
         actions.className = 'd-flex gap-2 mt-2';
+        // An optional in-app link shown as a button, so the fix isn't hidden behind "Show details".
+        var action = notif.action;
+        if (action && typeof action.href === 'string' && action.href.charAt(0) === '/' && action.href.charAt(1) !== '/') {
+            var go = document.createElement('a');
+            go.className = 'btn btn-sm btn-outline-warning';
+            go.href = action.href;
+            go.textContent = action.label || 'Open';
+            actions.appendChild(go);
+        }
         if (notif.dismissable !== false) {
             var dismiss = document.createElement('button');
             dismiss.type = 'button';

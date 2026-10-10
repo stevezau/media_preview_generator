@@ -212,18 +212,16 @@ class TestLibraryHealthPage:
         expect(authed_page.locator("#lhFixTitle")).to_have_text("Ask Plex to show 3 previews")
         assert "fix=" not in authed_page.url
 
-    def test_dashboard_strip_links_to_review_and_fix(self, authed_page: Page, app_url: str, seeded_health) -> None:
+    def test_bell_notice_links_to_review_and_fix(self, authed_page: Page, app_url: str, seeded_health) -> None:
         authed_page.goto(f"{app_url}/")
+        authed_page.locator("#notificationBellBtn").click()
 
-        strip = authed_page.locator("#libraryHealthStrip")
-        expect(strip).to_contain_text("3 previews are made but Plex isn't showing them")
-        expect(strip.get_by_role("link", name="Review & fix")).to_have_attribute("href", "/library-health?fix=e2e-plex")
+        notice = authed_page.locator("#notificationList")
+        expect(notice).to_contain_text("3 previews are made but Plex isn't showing them")
+        notice.get_by_role("link", name="Review & fix").click()
 
-    def test_dashboard_strip_hidden_when_nothing_to_act_on(self, authed_page: Page, app_url: str) -> None:
-        with authed_page.expect_response(re.compile(r".*/api/library-health$")):
-            authed_page.goto(f"{app_url}/")
-
-        expect(authed_page.locator("#libraryHealthStrip")).to_be_hidden()
+        expect(authed_page.locator("#lhFixModal")).to_be_visible()
+        expect(authed_page.locator("#lhFixTitle")).to_have_text("Ask Plex to show 3 previews")
 
     def test_no_servers_shows_the_empty_state(self, authed_page: Page, app_url: str) -> None:
         authed_page.goto(f"{app_url}/library-health")

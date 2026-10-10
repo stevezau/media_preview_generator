@@ -14,6 +14,8 @@ Current sources:
   explicit TZ env var, sourced from ``api_system._get_timezone_info``.
 - ``gpu_keeps_failing_<device>`` — one per GPU whose last files all ran on
   the CPU, sourced from ``jobs.gpu_fallback``.
+- ``library_health_not_showing`` / ``library_health_check_failed`` — from the
+  last Library health check (stored results; nothing is re-counted here).
 
 Session-only dismissals live in ``_SESSION_DISMISSED`` (process memory,
 cleared on restart); permanent dismissals live in ``settings.json``.
@@ -34,10 +36,12 @@ TIMEZONE_MISCONFIGURED_ID = "timezone_misconfigured"
 SCHEMA_MIGRATION_ID = "schema_migration_completed"
 DEPRECATED_IMAGE_ID = "deprecated_docker_image_name"
 MEDIA_MOUNT_UNHEALTHY_ID = "media_mount_unhealthy"
+LIBRARY_HEALTH_NOT_SHOWING_ID = "library_health_not_showing"
+LIBRARY_HEALTH_CHECK_FAILED_ID = "library_health_check_failed"
 
 # Cards that can be hidden until the next restart but never for good: the problem they report comes and goes, and a
 # permanent dismissal would hide the next occurrence too. An id stored by an older version is ignored.
-SESSION_ONLY_DISMISSAL_IDS = frozenset({MEDIA_MOUNT_UNHEALTHY_ID})
+SESSION_ONLY_DISMISSAL_IDS = frozenset({MEDIA_MOUNT_UNHEALTHY_ID, LIBRARY_HEALTH_CHECK_FAILED_ID})
 
 
 def is_session_only_dismissal(notification_id_value: str) -> bool:
@@ -333,6 +337,91 @@ def _build_gpu_keeps_failing_notifications() -> list[dict[str, Any]]:
     return cards
 
 
+def _not_showing_by_plex_server() -> dict[str, int]:
+    """Previews Plex isn't showing, per Plex server id, from the last stored check."""
+    from ..library_health.models import CellState, Feature
+    from ..library_health.store import default_store
+
+    counts: dict[str, int] = {}
+    for server in default_store().load():
+        if server.type != "plex":
+            continue
+        total = sum(
+            cell.not_showing
+            for lib in server.libraries
+            if (cell := lib.cells.get(Feature.PREVIEWS)) is not None and cell.state is CellState.COUNTED
+        )
+        if total > 0:
+            counts[server.server_id] = total
+    return counts
+
+
+def _build_library_health_not_showing_notification() -> dict[str, Any] | None:
+    """Previews made on disk that Plex hasn't flagged, so it doesn't show them; links to Review & fix.
+
+    Hidden while Library health is already asking Plex to re-read them. The body names no libraries or files because
+    the notifications endpoint is readable before login.
+    """
+    from urllib.parse import quote
+
+    from ..library_health.runner import get_runner
+
+    try:
+        progress = get_runner().progress()
+        if progress is not None and progress.kind == "reread":
+            return None
+        counts = _not_showing_by_plex_server()
+    except Exception as exc:
+        logger.debug("library-health notification skipped: {}", exc)
+        return None
+    if not counts:
+        return None
+
+    total = sum(counts.values())
+    href = f"/library-health?fix={quote(next(iter(counts)), safe='')}" if len(counts) == 1 else "/library-health"
+    body = (
+        "<p class='mb-0'>The preview files are on disk, but Plex hasn't re-read those videos since, so it doesn't "
+        "know about them. Review &amp; fix asks Plex to re-read them; nothing new is made.</p>"
+    )
+    return {
+        "id": LIBRARY_HEALTH_NOT_SHOWING_ID,
+        "severity": "warning",
+        "title": f"{total:,} previews are made but Plex isn't showing them",
+        "body_html": body,
+        "action": {"label": "Review & fix", "href": href},
+        "dismissable": True,
+        "source": "library_health",
+    }
+
+
+def _build_library_health_check_failed_notification() -> dict[str, Any] | None:
+    """The latest Library health check failed, for the whole run or for a server.
+
+    Session-only dismissal: the next check that works clears it anyway. The error text stays on the Library health
+    page, which needs login.
+    """
+    from ..library_health.runner import get_runner
+
+    try:
+        runner = get_runner()
+        failed = bool(runner.last_error() or runner.failed_servers())
+    except Exception as exc:
+        logger.debug("library-health failure notification skipped: {}", exc)
+        return None
+    if not failed:
+        return None
+    return {
+        "id": LIBRARY_HEALTH_CHECK_FAILED_ID,
+        "severity": "warning",
+        "title": "Library health check failed",
+        "body_html": "<p class='mb-0'>The last check couldn't finish. Library health shows why.</p>",
+        "action": {"label": "Open Library health", "href": "/library-health"},
+        "dismissable": True,
+        "permanent_dismissable": False,
+        "source": "library_health",
+    }
+
+
 def _notification_sources() -> list[dict[str, Any] | None]:
     """All notification builders.  Add new sources here as they arrive."""
     return [
@@ -341,6 +430,8 @@ def _notification_sources() -> list[dict[str, Any] | None]:
         _build_schema_migration_notification(),
         _build_deprecated_image_notification(),
         _build_unhealthy_media_mounts_notification(),
+        _build_library_health_not_showing_notification(),
+        _build_library_health_check_failed_notification(),
         *_build_gpu_keeps_failing_notifications(),
     ]
 

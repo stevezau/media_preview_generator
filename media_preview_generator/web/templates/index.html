@@ -38,9 +38,6 @@
     </div>
 </div>
 
-<!-- Library health: only when the last check found previews Plex isn't showing, or a failed check. -->
-<div id="libraryHealthStrip" class="lh-strip" hidden></div>
-
 <div class="dashboard-summary-row">
     <!-- System card: servers, a read-only line per worker group and the build version. The header pill is the one status. -->
     <section class="card dash-card dashboard-system-card" aria-labelledby="systemCardTitle">
@@ -345,7 +342,6 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/newmanual_jobs.js') }}"></script>
-<script src="{{ url_for('static', filename='js/library_health_strip.js') }}"></script>
 <script>
     // Initialize dashboard on load
     document.addEventListener('DOMContentLoaded', function() {
