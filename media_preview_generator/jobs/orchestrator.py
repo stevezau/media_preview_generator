@@ -328,7 +328,7 @@ def _chapter_result_bucket(row: dict) -> str | None:
             ):
                 return "updated"
             return "ready"
-        if status in {"none", "waiting", "failed"}:
+        if status in {"none", "skipped", "waiting", "failed"}:
             return status
         if status == "pending":
             return "incomplete"

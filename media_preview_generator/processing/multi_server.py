@@ -2458,6 +2458,7 @@ def process_canonical_path(
                     item_id_hint=bare_hint,
                     cancel_check=cancel_check,
                     trust_server_hash=_is_bulk_scan(source, config),
+                    regenerate=force,
                 )
             except CancellationError:
                 raise
@@ -2550,6 +2551,7 @@ def process_canonical_path(
                         item_id_hint=plan.target.rating_key if plan.target else None,
                         cancel_check=cancel_check,
                         trust_server_hash=_is_bulk_scan(source, config),
+                        regenerate=force,
                     )
                     had_work = chapter_work_needed(plan, regenerate=force)
                     outcome = publish_chapters(

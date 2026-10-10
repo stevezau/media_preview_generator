@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import sqlite3
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
@@ -21,8 +24,10 @@ from media_preview_generator.markers.publishers.plex_chapters import (
     chapter_url,
     target_from_json,
     target_to_json,
+    verify_chapters,
 )
 from media_preview_generator.markers.publishers.plex_remote import error_from_json, error_to_json
+from media_preview_generator.processing.chapters import _failure
 
 VERSION = "1.43.4.10903-e5521bd8c"
 MACHINE = "synthetic-server"
@@ -45,7 +50,7 @@ def backend(tmp_path, monkeypatch):
                 "index" INTEGER,time_offset INTEGER,end_time_offset INTEGER,thumb_url TEXT,extra_data TEXT);
             CREATE TABLE media_items(id INTEGER PRIMARY KEY,metadata_item_id INTEGER,deleted_at INTEGER,proxy_type INTEGER);
             CREATE TABLE media_parts(id INTEGER PRIMARY KEY,media_item_id INTEGER,file TEXT,hash TEXT,size INTEGER,
-                updated_at INTEGER,deleted_at INTEGER);
+                updated_at INTEGER,deleted_at INTEGER,extra_data TEXT);
             INSERT INTO tags VALUES(9,9);
             INSERT INTO tags VALUES(12,12);
             INSERT INTO media_items VALUES(10,1,NULL,NULL);
@@ -53,7 +58,10 @@ def backend(tmp_path, monkeypatch):
             INSERT INTO taggings VALUES(2,1,9,2,10000,20000,'','chapter data');
             INSERT INTO taggings VALUES(3,1,12,0,500,5000,'','marker data');
         """)
-        conn.execute("INSERT INTO media_parts VALUES(20,10,?,?,65536,100,NULL)", (SOURCE, HASH))
+        conn.execute(
+            "INSERT INTO media_parts(id,media_item_id,file,hash,size,updated_at,deleted_at) VALUES(20,10,?,?,65536,100,NULL)",
+            (SOURCE, HASH),
+        )
         conn.commit()
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text("36 25 0:32 / / rw,relatime - ext4 /dev/sda1 rw\n")
@@ -235,19 +243,121 @@ def test_readiness_explains_missing_media_symlink_mount(backend, tmp_path):
     assert "Mount its target" in report.message
 
 
+def pv_chapters(*starts, as_dict=False):
+    """A part's extra_data as Plex writes it: pv:chapters is itself a JSON string."""
+    chapter = [{"name": f"c{n}", "start": start, "end": start + 1.0} for n, start in enumerate(starts)]
+    if not chapter:
+        inner = {"Chapters": {}}
+    else:
+        inner = {"Chapters": {"Chapter": chapter[0] if as_dict else chapter}}
+    return json.dumps({"pv:chapters": json.dumps(inner)})
+
+
+OWN_CHAPTERS = pv_chapters(0.0, 10.004)
+
+
+def add_second_version(backend, *, first=OWN_CHAPTERS, second=None):
+    """Version 10 (the fixture's) gets ``first`` as its own chapters; version 11 gets ``second``."""
+    mutate(backend, "UPDATE media_parts SET extra_data=? WHERE id=20", (first,))
+    mutate(backend, "INSERT INTO media_items VALUES(11,1,NULL,NULL)")
+    mutate(
+        backend,
+        "INSERT INTO media_parts(id,media_item_id,file,hash,size,updated_at,deleted_at,extra_data) "
+        "VALUES(21,11,'/media/version2.mkv',?,65536,100,NULL,?)",
+        ("b" * 40, second),
+    )
+
+
+def test_version_split_into_multiple_files_is_unsupported_source(backend):
+    mutate(
+        backend,
+        "INSERT INTO media_parts(id,media_item_id,file,hash,size,updated_at,deleted_at) "
+        "VALUES(21,10,'/media/part2.mkv','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',65536,100,NULL)",
+    )
+    with pytest.raises(ChapterError, match="split into multiple files") as caught:
+        read(backend)
+    assert caught.value.code == "unsupported_source"
+
+
+def test_multi_version_without_chapters_is_no_chapters(backend):
+    add_second_version(backend)
+    mutate(backend, "DELETE FROM taggings")
+    with pytest.raises(ChapterError) as caught:
+        read(backend)
+    assert caught.value.code == "no_chapters"
+
+
+def test_multi_version_thumbs_from_other_live_version_is_other_version(backend):
+    add_second_version(backend)
+    mutate(backend, "UPDATE taggings SET thumb_url='/library/media/11/chapterImages/1?mpgChapter=x' WHERE id=1")
+    with pytest.raises(ChapterError) as caught:
+        read(backend)
+    assert caught.value.code == "other_version"
+
+
+def test_multi_version_with_empty_thumbs_and_matching_own_chapters_claims(backend):
+    add_second_version(backend)
+    target = read(backend)
+    assert target.media_id == 10
+    assert len(target.chapters) == 2
+
+
+def test_multi_version_single_chapter_dict_form_matches(backend):
+    mutate(backend, "DELETE FROM taggings WHERE id=2")
+    add_second_version(backend, first=pv_chapters(0.0, as_dict=True))
+    assert read(backend).media_id == 10
+
+
 @pytest.mark.parametrize(
-    "extra",
+    "own",
     [
-        "INSERT INTO media_parts VALUES(21,10,'/media/part2.mkv','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',65536,100,NULL)",
-        "INSERT INTO media_items VALUES(11,1,NULL,NULL)",
+        pv_chapters(),
+        pv_chapters(0.0, 20.0),
+        pv_chapters(0.0, 10.0, 20.0),
+        None,
+        "not json",
+        json.dumps({"pv:chapters": "not json"}),
+        json.dumps({"pv:chapters": json.dumps({"Chapters": {"Chapter": [{"name": "x"}]}})}),
     ],
 )
-def test_multipart_and_multiple_versions_fail_closed(backend, extra):
-    mutate(backend, extra)
-    if "media_items" in extra:
-        mutate(backend, "INSERT INTO media_parts VALUES(21,11,'/media/version2.mkv',?,65536,100,NULL)", ("b" * 40,))
-    with pytest.raises(ChapterError, match="multiple versions or multipart"):
+def test_multi_version_not_matching_shared_rows_is_other_version(backend, own):
+    add_second_version(backend, first=own)
+    with pytest.raises(ChapterError) as caught:
         read(backend)
+    assert caught.value.code == "other_version"
+
+
+def test_multi_version_thumbs_at_this_version_proceed_even_if_own_chapters_differ(backend):
+    add_second_version(backend, first=pv_chapters(0.0, 99.0))
+    mutate(backend, "UPDATE taggings SET thumb_url='/library/media/10/chapterImages/1?mpgChapter=x' WHERE id=1")
+    assert read(backend).media_id == 10
+
+
+def test_multi_version_thumbs_from_deleted_version_claims_when_chapters_match(backend):
+    add_second_version(backend)
+    mutate(backend, "INSERT INTO media_items VALUES(12,1,100,NULL)")
+    mutate(backend, "UPDATE taggings SET thumb_url='/library/media/12/chapterImages/1?mpgChapter=x' WHERE id=1")
+    assert read(backend).media_id == 10
+
+
+def test_register_refuses_when_another_version_claimed_the_rows_meanwhile(backend):
+    add_second_version(backend)
+    target = read(backend)
+    _folder, revisions = images(backend)
+    mutate(backend, "UPDATE taggings SET thumb_url='/library/media/11/chapterImages/1?mpgChapter=x' WHERE id=1")
+    mutate(backend, "UPDATE taggings SET thumb_url='/library/media/11/chapterImages/2?mpgChapter=x' WHERE id=2")
+    before = rows(backend)
+    with pytest.raises(ChapterError) as caught:
+        backend.register(target, revisions, VERSION, deadline=time.monotonic() + 3)
+    assert caught.value.code == "other_version"
+    assert rows(backend) == before
+
+
+@pytest.mark.parametrize("code", ["unsupported_source", "other_version", "no_chapters"])
+def test_new_codes_survive_the_agent_error_codec(code):
+    rebuilt = error_from_json(error_to_json(ChapterError("refused", code=code)))
+    assert isinstance(rebuilt, ChapterError) and rebuilt.code == code
+    assert _failure(rebuilt).status == {"no_chapters": "none"}.get(code, "skipped")
 
 
 def test_chapterless_is_distinct_from_unindexed_and_requires_no_marker_tag(backend):
@@ -455,3 +565,87 @@ def test_agent_typed_requests_and_auth(backend, monkeypatch):
     assert client.post("/v1/chapters/register", json=body, headers=headers).status_code == 409
     body["revisions"][1]["index"] = body["revisions"][0]["index"]
     assert client.post("/v1/chapters/register", json=body, headers=headers).status_code == 400
+
+
+def test_register_subset_updates_only_revised_chapters(backend):
+    target = read(backend)
+    _, revisions = images(backend)
+    before = rows(backend)
+    backend.register(target, {1: revisions[1]}, VERSION, deadline=time.monotonic() + 3)
+    after = rows(backend)
+    assert after[0][6] == chapter_url(10, 1, revisions[1])
+    assert after[1:] == before[1:]
+
+
+@pytest.mark.parametrize("revisions", [{}, {3: "a" * 64}, {1: "a" * 64, 7: "b" * 64}])
+def test_register_rejects_empty_or_unknown_chapter_indexes(backend, revisions):
+    target = read(backend)
+    images(backend)
+    before = rows(backend)
+    with pytest.raises(ChapterError) as caught:
+        backend.register(target, revisions, VERSION, deadline=time.monotonic() + 3)
+    assert caught.value.code == "registration"
+    assert rows(backend) == before
+
+
+def _plex_answering(observed):
+    from xml.etree import ElementTree
+
+    plex = MagicMock()
+    chapters = "".join(f'<Chapter index="{i}" thumb="{thumb}"/>' for i, thumb in observed.items())
+    plex.query.side_effect = lambda path: (
+        {"machineIdentifier": MACHINE} if path == "/identity" else ElementTree.fromstring(f"<R>{chapters}</R>")
+    )
+    return SimpleNamespace(_connect=lambda: plex)
+
+
+def test_verify_checks_only_the_revised_chapters(backend):
+    target = read(backend)
+    _, revisions = images(backend)
+    only_first = {1: revisions[1]}
+    server = _plex_answering({1: chapter_url(10, 1, revisions[1]), 2: ""})
+    verify_chapters(server, target, only_first)
+    with pytest.raises(ChapterError):
+        verify_chapters(_plex_answering({1: "", 2: chapter_url(10, 2, revisions[2])}), target, only_first)
+
+
+def test_register_clears_only_our_own_stale_reference_for_chapters_without_an_image(backend):
+    target_before = read(backend)
+    _, revisions = images(backend)
+    mutate(backend, "UPDATE taggings SET thumb_url='/library/media/10/chapterImages/2?mpgChapter=old' WHERE id=2")
+    backend.register(read(backend), {1: revisions[1]}, VERSION, deadline=time.monotonic() + 3)
+    assert rows(backend)[1][6] == ""
+    assert target_before.chapters[1].thumb_url == ""
+
+    for native in (
+        "/library/metadata/1/thumb/5",
+        "/library/media/10/chapterImages/2",
+        "/library/media/99/chapterImages/2?mpgChapter=x",
+    ):
+        mutate(backend, "UPDATE taggings SET thumb_url=? WHERE id=2", (native,))
+        backend.register(read(backend), {1: revisions[1]}, VERSION, deadline=time.monotonic() + 3)
+        assert rows(backend)[1][6] == native
+
+
+def test_agent_validates_a_subset_of_chapter_revisions(backend, monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plex-marker-agent"))
+    import plex_marker_agent
+
+    monkeypatch.setattr(plex_marker_agent, "LocalChapters", lambda *_a, **_kw: backend)
+    client = plex_marker_agent.create_app(config_dir=str(backend.folder), token="synthetic-key").test_client()
+    headers = {"Authorization": "Bearer synthetic-key", "X-Marker-Agent-Protocol": "1"}
+    body = {"machine_identifier": MACHINE, "pms_version": VERSION, "deadline_s": 3, "source_path": SOURCE}
+    snapshot = client.post("/v1/chapters/read", json=body, headers=headers).json["result"]["target"]
+    _, revisions = images(backend)
+    body["target"] = snapshot
+
+    def register(revision_list):
+        body["revisions"] = revision_list
+        return client.post("/v1/chapters/register", json=body, headers=headers).status_code
+
+    first = {"index": 1, "sha256": revisions[1]}
+    assert register([]) == 400
+    assert register([first, {"index": 2, "sha256": revisions[2]}, {"index": 3, "sha256": revisions[2]}]) == 400
+    assert register([{"index": True, "sha256": revisions[1]}]) == 400
+    assert register([{"index": 7, "sha256": revisions[1]}]) == 409
+    assert register([first]) == 200

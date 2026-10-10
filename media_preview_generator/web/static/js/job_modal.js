@@ -546,7 +546,7 @@ async function showLogsModal(jobId) {
     const _hdr = document.getElementById('logsModalPublishers');
     if (_hdr) {
         _disposeBootstrapTooltips(_hdr);
-        _hdr.innerHTML = _job ? _renderPublishersBlock(_job) : '';
+        _hdr.innerHTML = _job ? _renderPublishersBlock(_job, { filterLinks: true }) : '';
         _initBootstrapTooltips(_hdr);
     }
     const resultDetails = document.getElementById('jobServerResults');
@@ -615,7 +615,7 @@ async function showLogsModal(jobId) {
     var _ofSel = document.getElementById('fileOutcomeFilter');
     if (_ofSel) {
         _ofSel.value = '';
-        _showFileOutcomesForKind(_ofSel, _job ? _job.kind : '');
+        _showFileOutcomesForKind(_ofSel, _job ? _job.kind : '', _job);
     }
     var pFooter = document.getElementById('filePaginationFooter');
     if (pFooter) pFooter.classList.add('d-none');
@@ -1663,12 +1663,51 @@ function _fileOutcomeMeta(key) {
 }
 
 // Each job kind has its own outcomes; options tagged with another kind are hidden (untagged ones are shared).
-function _showFileOutcomesForKind(select, kind) {
+function _showFileOutcomesForKind(select, kind, job) {
     var current = kind === 'intro_credits' || kind === 'loudness' ? kind : 'previews';
+    _syncChapterOutcomeOptions(select, current === 'previews' && _jobHasChapterResults(job));
     Array.prototype.forEach.call(select.querySelectorAll('option, optgroup'), function (opt) {
         var other = !!opt.dataset.kind && opt.dataset.kind !== current;
         opt.hidden = other;
         opt.disabled = other;
+    });
+}
+
+// The chapter filters exist only for jobs with chapter results, so other jobs never carry their labels.
+function _syncChapterOutcomeOptions(select, wanted) {
+    var group = select.querySelector('optgroup[data-chapters]');
+    if (!wanted) {
+        if (group) group.remove();
+        return;
+    }
+    if (group) return;
+    group = document.createElement('optgroup');
+    group.label = 'Chapter thumbnails';
+    group.dataset.kind = 'previews';
+    group.dataset.chapters = '1';
+    [['chapters_failed', 'Chapters failed'], ['chapters_waiting', 'Chapters waiting for Plex'],
+     ['chapters_skipped', 'Chapters skipped']].forEach(function (o) {
+        var opt = document.createElement('option');
+        opt.value = o[0];
+        opt.textContent = o[1];
+        opt.dataset.kind = 'previews';
+        group.appendChild(opt);
+    });
+    var previews = select.querySelector('optgroup[data-kind="previews"]');
+    select.insertBefore(group, previews ? previews.nextSibling : null);
+}
+
+// Same evidence the Results-by-server block uses to show chapter counts, plus the older per-status counts.
+function _jobHasChapterResults(job) {
+    var rows = job && Array.isArray(job.publishers) ? job.publishers : [];
+    return rows.some(function (entry) {
+        if (!entry || typeof entry !== 'object') return false;
+        var chapters = entry.chapter_counts;
+        if (chapters && typeof chapters === 'object' && Object.keys(chapters).length) {
+            return Object.values(chapters).some(function (n) { return Number.isInteger(n) && n > 0; });
+        }
+        var counts = entry.counts && typeof entry.counts === 'object' ? entry.counts : {};
+        return counts.published_chapters_failed > 0 || counts.published_pending_chapters > 0;
     });
 }
 
@@ -1904,7 +1943,7 @@ function _renderFileServerNotes(servers, showMessages) {
             var bifStatus = (artifacts.bif || {}).status;
             var bifReady = bifStatus === 'published' || bifStatus === 'skipped_output_exists';
             // Older jobs used pending for both waiting and failed extraction, so only an explicit waiting is Plex's wait.
-            var labels = { ready: 'Ready', waiting: 'Waiting for Plex', pending: 'Incomplete', failed: 'Failed', none: 'No chapters' };
+            var labels = { ready: 'Ready', waiting: 'Waiting for Plex', pending: 'Incomplete', failed: 'Failed', none: 'No chapters', skipped: 'Skipped' };
             var chapterText = labels[chapter.status] || 'Incomplete';
             if (Number.isFinite(chapter.total) && chapter.total > 0 && Number.isFinite(chapter.completed)) {
                 chapterText += ' (' + Math.max(0, Math.floor(chapter.completed))
@@ -2065,6 +2104,19 @@ function changeFilePerPage(value) {
     _filePerPage = [50, 100, 250, 500].includes(selected) ? selected : 100;
     _filePage = 1;
     localStorage.setItem('filePerPage', String(_filePerPage));
+    refreshFileResults();
+}
+
+// Count rows in Results by server jump to the Files tab with that outcome selected.
+function openFilesWithOutcome(outcome) {
+    var select = document.getElementById('fileOutcomeFilter');
+    var tab = document.getElementById('filesTab');
+    if (!select || !tab) return;
+    select.value = outcome;
+    _fileResultsActiveFilter = select.value || '';
+    _filePage = 1;
+    _fileResultsLoaded = false;
+    new bootstrap.Tab(tab).show();
     refreshFileResults();
 }
 

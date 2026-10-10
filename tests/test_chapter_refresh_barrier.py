@@ -166,7 +166,12 @@ def test_delayed_analyze_then_fresh_registration_reuses_all_jpegs(plan, config, 
             result = future.result(timeout=2)
         assert result.publishers[0].artifacts["chapters"]["status"] == "ready"
         assert prepare.call_count == 2
-        assert prepare.call_args.kwargs == {"item_id_hint": 1, "cancel_check": cancel_check, "trust_server_hash": True}
+        assert prepare.call_args.kwargs == {
+            "item_id_hint": 1,
+            "cancel_check": cancel_check,
+            "trust_server_hash": True,
+            "regenerate": False,
+        }
         extract.assert_not_called()
         assert register.call_args.args[:2] == (plan.server, current[0])
         assert set(register.call_args.args[2]) == {1, 2}

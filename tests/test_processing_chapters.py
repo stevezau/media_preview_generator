@@ -1,5 +1,6 @@
 """Chapter artifact lifecycles, separate from an already completed BIF."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -334,7 +335,9 @@ def test_rejected_image_reports_actual_dimensions(tmp_path):
         (FileNotFoundError("Missing source"), "failed", False),
         (RuntimeError("Decoder failed"), "failed", False),
         (ValueError("Wrong image dimensions"), "failed", False),
-        (chapters.UnsupportedChapterFormatError("Unsupported Dolby Vision"), "failed", False),
+        (chapters.UnsupportedChapterFormatError("Unsupported Dolby Vision"), "skipped", False),
+        (ChapterError("Split version", code="unsupported_source"), "skipped", False),
+        (ChapterError("Other version", code="other_version"), "skipped", False),
     ],
 )
 def test_chapter_failure_and_retry_eligibility_are_independent(error, status, retryable):
@@ -385,6 +388,22 @@ def test_dv_without_compatible_base_fails_without_starting_unselected_gpu(tmp_pa
             "movie.mkv", 0, tmp_path / "frame.jpg", config, media_info=SimpleNamespace(video_tracks=[track])
         )
     factory.assert_not_called()
+
+
+def test_no_chapters_code_maps_to_none_outcome():
+    result = chapters._failure(ChapterError("No chapters", code="no_chapters"), completed=2, total=3)
+
+    assert result.status == "none"
+    assert result.message == "No chapters"
+    assert result.retryable is False
+
+
+def test_no_video_stream_is_unsupported_source(tmp_path, config):
+    with pytest.raises(chapters.UnsupportedChapterFormatError, match="No video stream"):
+        chapters.extract_chapter_frame(
+            "movie.mkv", 0, tmp_path / "frame.jpg", config, media_info=SimpleNamespace(video_tracks=[])
+        )
+    assert chapters._failure(chapters.UnsupportedChapterFormatError("No video stream")).status == "skipped"
 
 
 def _registry(plan, enabled=True):
@@ -749,3 +768,179 @@ def test_waiting_for_chapter_lock_reports_no_attempts_and_can_cancel(plan, confi
     lock.acquire.assert_called_once_with(timeout=0.1)
     lock.release.assert_not_called()
     extraction[0].assert_not_called()
+
+
+def _prepare_for(plan, config, monkeypatch, **kwargs):
+    plan.server.path_mappings = []
+    monkeypatch.setattr(
+        "media_preview_generator.servers.plex_chapters.resolve_chapter_target", lambda *_a, **_k: plan.target
+    )
+    plex_config = Path(plan.canonical_path).parent / "plex"
+    return chapters.prepare_chapters(
+        plan.server,
+        SimpleNamespace(output={"plex_config_folder": str(plex_config)}),
+        plan.canonical_path,
+        config,
+        **kwargs,
+    )
+
+
+def test_unsupported_format_is_stamped_and_next_prepare_skips_all_work(plan, config, extraction, monkeypatch):
+    run, register = extraction
+    run.side_effect = chapters.UnsupportedChapterFormatError("Chapter thumbnails do not yet support Dolby Vision")
+    plan.folder = _prepare_for(plan, config, monkeypatch).folder
+
+    first = chapters.publish_chapters(plan, config)
+
+    assert first.status == "skipped"
+    assert first.retryable is False
+    register.assert_not_called()
+    again = _prepare_for(plan, config, monkeypatch)
+    assert again.target is None
+    assert again.outcome.status == "skipped"
+    assert "Dolby Vision" in again.outcome.message
+    assert chapters.chapter_work_needed(again) is False
+
+
+def test_unsupported_stamp_is_ignored_by_regenerate_and_by_a_changed_file(plan, config, extraction, monkeypatch):
+    run, _register = extraction
+    run.side_effect = chapters.UnsupportedChapterFormatError("Unsupported Dolby Vision")
+    plan.folder = _prepare_for(plan, config, monkeypatch).folder
+    chapters.publish_chapters(plan, config)
+
+    assert _prepare_for(plan, config, monkeypatch, regenerate=True).target is not None
+    Path(plan.canonical_path).write_bytes(b"different, longer video bytes")
+    plan.target = replace(plan.target, source_size=Path(plan.canonical_path).stat().st_size)
+    assert _prepare_for(plan, config, monkeypatch).outcome.status != "skipped"
+
+
+def test_unsupported_format_reports_skipped_stage_without_counting_failures(plan, config, extraction):
+    run, _register = extraction
+    run.side_effect = chapters.UnsupportedChapterFormatError("Unsupported Dolby Vision")
+    events = []
+
+    chapters.publish_chapters(plan, config, chapter_progress_callback=events.append)
+
+    assert events[-1]["stage"] == "skipped"
+    assert events[-1]["failed"] == 0
+
+
+def _past_end_on_second_chapter(run):
+    def extract(_source, start_ms, path, *_args, **_kw):
+        if start_ms == 1000:
+            raise chapters.ChapterPastEndError("Chapter timestamp 1000ms is outside the current video's duration")
+        _image(path)
+
+    run.side_effect = extract
+
+
+def test_past_end_chapter_gets_no_thumbnail_and_the_rest_register(plan, config, extraction):
+    run, register = extraction
+    _past_end_on_second_chapter(run)
+    events = []
+
+    result = chapters.publish_chapters(plan, config, chapter_progress_callback=events.append)
+
+    assert result.status == "ready"
+    assert "1 chapter starts after the video ends and has no thumbnail" in result.message
+    assert events[-1]["failed"] == 0
+    assert list(register.call_args.args[2]) == [1]
+    manifest = json.loads(plan.manifest_path.read_text())
+    assert manifest["images"]["2"] == {"start_ms": 1000, "end_ms": 2000, "past_end": True}
+    assert "sha256" in manifest["images"]["1"]
+    assert manifest["verified"]["images"].keys() == {"1"}
+
+
+def test_second_publish_does_not_seek_a_past_end_chapter_again(plan, config, extraction):
+    run, register = extraction
+    _past_end_on_second_chapter(run)
+    chapters.publish_chapters(plan, config)
+    register_after_first = register.call_count
+    run.reset_mock()
+    plan.target = replace(
+        plan.target,
+        chapters=(
+            replace(
+                plan.target.chapters[0],
+                thumb_url=f"/library/media/2/chapterImages/1?mpgChapter={_manifest_sha(plan, '1')}",
+            ),
+            plan.target.chapters[1],
+        ),
+    )
+
+    assert chapters.chapter_work_needed(plan) is False
+    result = chapters.publish_chapters(plan, config)
+
+    assert result.status == "ready"
+    run.assert_not_called()
+    assert register.call_count == register_after_first
+
+
+def _manifest_sha(plan, index):
+    return json.loads(plan.manifest_path.read_text())["images"][index]["sha256"]
+
+
+def test_every_chapter_past_end_still_fails(plan, config, extraction):
+    run, register = extraction
+    run.side_effect = chapters.ChapterPastEndError("Chapter timestamp is outside the current video's duration")
+
+    result = chapters.publish_chapters(plan, config)
+
+    assert result.status == "failed"
+    assert "All 2 chapters start after the video ends" in result.message
+    register.assert_not_called()
+
+
+def test_all_past_end_fails_with_a_clear_message_on_every_scan(plan, config, extraction):
+    run, register = extraction
+    run.side_effect = chapters.ChapterPastEndError("Chapter timestamp is outside the current video's duration")
+    first = chapters.publish_chapters(plan, config)
+    run.reset_mock()
+
+    second = chapters.publish_chapters(plan, config)
+
+    assert first.status == second.status == "failed"
+    assert second.message == first.message
+    assert second.message.startswith("All 2 chapters start after the video ends")
+    assert second.retryable is False
+    run.assert_not_called()
+    register.assert_not_called()
+
+
+def test_past_end_chapter_removes_its_stale_image(plan, config, extraction):
+    run, _register = extraction
+    _past_end_on_second_chapter(run)
+    plan.folder.mkdir(parents=True)
+    stale = plan.folder / "chapter2.jpg"
+    _image(stale)
+
+    chapters.publish_chapters(plan, config)
+
+    assert not stale.exists()
+    assert (plan.folder / "chapter1.jpg").exists()
+
+
+def test_corrupt_index_with_past_end_chapter_is_ready_with_note(plan, config, extraction, monkeypatch):
+    run, register = extraction
+    monkeypatch.setattr(chapters, "inspect_seek_index", lambda *a, **kw: "Invalid Cues")
+    track = SimpleNamespace(duration=1500)
+    monkeypatch.setattr(chapters.MediaInfo, "parse", lambda _path: SimpleNamespace(video_tracks=[track]))
+    plan.target = replace(
+        plan.target, chapters=(plan.target.chapters[0], replace(plan.target.chapters[1], start_ms=9000))
+    )
+    recovered = []
+
+    def recover(_plan, chapter, staged):
+        recovered.append(chapter.index)
+        _image(staged)
+        return {"timestamp_ms": 0}
+
+    monkeypatch.setattr(chapters, "recover_bif_frame", recover)
+
+    result = chapters.publish_chapters(plan, config)
+
+    assert result.status == "ready"
+    assert "starts after the video ends" in result.message
+    assert recovered == [1]
+    run.assert_not_called()
+    assert list(register.call_args.args[2]) == [1]

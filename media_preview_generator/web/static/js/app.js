@@ -96,6 +96,15 @@ function renderChapterNotice() {
         : `${_chapterWarningCount.toLocaleString()} ${_chapterWarningCount === 1 ? 'job ended' : 'jobs ended'} with chapter issues. Review the saved results before running those jobs again.`;
 }
 
+async function dismissChapterWarnings() {
+    try {
+        await apiPost('/api/jobs/chapter-warnings/dismiss', {});
+        await loadJobs({ force: true });
+    } catch (error) {
+        showToast('Error', 'Failed to dismiss chapter warnings: ' + error.message, 'danger');
+    }
+}
+
 // "Clear N jobs": N follows the ticked statuses.
 function updateClearJobsButton() {
     const text = document.getElementById('clearJobsButtonText');
@@ -2182,7 +2191,7 @@ function _renderCpuFallbackLine(count) {
         + `${files} on the CPU because the GPU failed</div>`;
 }
 
-function _renderPublishersBlock(job) {
+function _renderPublishersBlock(job, options) {
     // D12 — per-server aggregate (one row per registered server with
     // status counts), NOT per-file. Per-file × per-server attribution
     // lives in the Files panel; rendering it here on jobs with hundreds
@@ -2272,12 +2281,14 @@ function _renderPublishersBlock(job) {
                 ['already_existed', 'Chapters already existed', 'bg-secondary', 'Chapter images and their Plex references were already current for these files.'],
                 ['ready', 'Chapters ready', 'bg-success', 'Chapter images are ready; this older result does not record whether this run changed them.'],
                 ['none', 'No chapters', 'bg-secondary', 'These files have no chapters to generate images for.'],
+                ['skipped', 'Chapters skipped', 'bg-secondary', 'Chapter thumbnails are not supported for these files (for example a version split into several files, or Dolby Vision without an HDR base layer), or Plex shows another version\'s chapter thumbnails for the title. Open Files for the reason.'],
                 ['waiting', 'Chapters waiting for Plex', 'bg-warning text-dark', 'Plex has not indexed the source or analyzed its chapters yet. Open Files for the reason.'],
                 ['incomplete', 'Chapters incomplete', 'bg-warning text-dark', 'Older results do not distinguish waiting from failure. Open Files for each saved reason.'],
                 ['failed', 'Chapters failed', 'bg-danger', 'Chapter extraction or registration failed. Open Files for the reason.']
             ].forEach(function (s) {
                 if (Number.isInteger(chapters[s[0]]) && chapters[s[0]] > 0) {
-                    badgeSpecs.push({label: s[1], cls: s[2], count: chapters[s[0]], tip: s[3]});
+                    badgeSpecs.push({label: s[1], cls: s[2], count: chapters[s[0]], tip: s[3],
+                        filter: ['failed', 'waiting', 'skipped'].includes(s[0]) ? 'chapters_' + s[0] : ''});
                 }
             });
         }
@@ -2287,7 +2298,11 @@ function _renderPublishersBlock(job) {
             const suffix = b.suffix ? ` · ${escapeHtml(b.suffix)}` : '';
             const tone = b.cls.includes('danger') ? 'job-result-error' : b.cls.includes('warning') ? 'job-result-warning'
                 : b.cls.includes('success') ? 'job-result-ok' : b.cls.includes('bg-info') ? 'job-result-info' : '';
-            return `<div class="job-result-item ${tone}"${tip}><span>${escapeHtml(b.label)}${suffix}</span> <strong>× ${b.count}</strong></div>`;
+            const content = `<span>${escapeHtml(b.label)}${suffix}</span> <strong>× ${b.count}</strong>`;
+            if (b.filter && options && options.filterLinks) {
+                return `<button type="button" class="job-result-item job-result-link ${tone}"${tip} onclick="openFilesWithOutcome('${b.filter}')">${content}</button>`;
+            }
+            return `<div class="job-result-item ${tone}"${tip}>${content}</div>`;
         }).join(' ');
         return `<section class="job-server-results"><h4 class="job-detail-heading">${logo}${escapeHtml(sname)}</h4><div class="job-result-list">${badges}</div></section>`;
     }).filter(Boolean).join('');
@@ -3124,7 +3139,7 @@ function updateJobProgress(jobId, progress, publishers) {
         const checked = row.querySelector('[data-queue-checked]');
         if (checked) checked.textContent = `${Number(job.progress.processed_items || 0).toLocaleString()} / ${Number(job.progress.total_items || 0).toLocaleString()} checked`;
         const phase = row.querySelector('.queue-phase:not([data-queue-checked])');
-        if (phase) phase.textContent = job.config?.resource_wait?.reason || job.progress.current_item || '';
+        if (phase) phase.textContent = job.config?.resource_wait?.reason || _dedupeActivityCount(job.progress.current_item, job.progress.processed_items, job.progress.total_items) || '';
     }
     const detail = document.getElementById('job-detail-' + jobId);
     const activity = detail?.querySelector('.job-current-activity p');
@@ -3440,7 +3455,7 @@ function _patchWorkerCard(col, worker) {
         const stages = {
             preparing: 'Checking chapters', waiting: 'Waiting for chapter access',
             extracting: 'Generating', registering: 'Registering with Plex',
-            complete: 'Ready', failed: 'Failed',
+            complete: 'Ready', failed: 'Failed', skipped: 'Skipped',
         };
         const failures = Math.max(0, Number(chapterProgress?.failed) || 0);
         const stageLabel = stages[chapterProgress?.stage] || 'Processing chapters';

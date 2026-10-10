@@ -788,6 +788,25 @@ class JobStorage:
         )
 
 
+def chapter_artifact_statuses(servers: list[dict] | None) -> set[str]:
+    """Collect the chapter artifact statuses a file row's servers reported.
+
+    Args:
+        servers: The row's per-server attribution list.
+
+    Returns:
+        Statuses such as ``failed``, ``waiting`` or ``skipped``; empty when no server reported chapters.
+    """
+    statuses: set[str] = set()
+    for server in servers or []:
+        artifacts = server.get("artifacts") if isinstance(server, dict) else None
+        chapters = artifacts.get("chapters") if isinstance(artifacts, dict) else None
+        status = chapters.get("status") if isinstance(chapters, dict) else None
+        if isinstance(status, str):
+            statuses.add(status)
+    return statuses
+
+
 class JobManager:
     """Manages job queue and state for the web interface.
 
@@ -2088,6 +2107,26 @@ class JobManager:
             self._emit_event("job_updated", job.to_dict())
             return True
 
+    def dismiss_chapter_warning(self, job_id: str) -> bool:
+        """Hide a job's chapter warning until it completes again.
+
+        The warning check and the write share one hold of the lock, so a retry re-arming the job meanwhile can't be
+        marked. The saved value is the completion time it was dismissed at.
+
+        Args:
+            job_id: Job identifier.
+
+        Returns:
+            True when the job had a warning and is now dismissed.
+        """
+        from .job_details import job_has_chapter_warning
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or not job_has_chapter_warning(job):
+                return False
+            return self.merge_job_config(job_id, {"chapter_warning_dismissed": job.completed_at})
+
     def update_job_config_if_pending(self, job_id: str, config: dict[str, Any]) -> bool:
         """Update stored config for a job only while it is still PENDING.
 
@@ -2894,6 +2933,12 @@ class JobManager:
             for server in servers or []
         ):
             return "chapter_incomplete"
+        # A file whose scrubber already existed keeps a routine top-level outcome while its chapters failed or wait.
+        statuses = chapter_artifact_statuses(servers)
+        if statuses & {"failed", "waiting", "pending"}:
+            return "chapter_incomplete"
+        if "skipped" in statuses:
+            return "chapter_skipped"
         return outcome
 
     def record_file_result(

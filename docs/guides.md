@@ -309,10 +309,11 @@ A file is retried when the media server hasn't indexed it yet or a per-file fail
 ### Plex chapter thumbnails
 
 Chapter thumbnails are optional images for the chapters Plex already knows about. They are separate from the
-scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x**,
-with one media version and one part per item. Multiple versions and multipart items report an unsupported result.
+scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x**.
+Plex keeps one chapter list per title, so with several versions the thumbnails come from one version, as in
+Plex. A version split into several files is skipped.
 Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision
-without that base layer, such as Profile 5, reports unsupported chapters while preserving the scrubber result.
+without that base layer, such as Profile 5, is skipped while the scrubber result is preserved.
 HDR chapter images are tone-mapped to SDR and converted to full-range JPEG samples. If extraction confirms
 that no frame exists more than one second beyond the source's known duration, the result identifies an invalid
 chapter timestamp rather than repeatedly retrying it. The app preserves the source and Plex's chapter timings.

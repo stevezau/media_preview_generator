@@ -1,13 +1,16 @@
 """Register complete external chapter images using Plex's existing chapter rows.
 
 The local writer and Plex-side agent use the same guarded transaction. No chapters
-are created: chapterless, unindexed, multipart and multi-version items stay distinct.
+are created: chapterless and unindexed items stay distinct. Plex keeps one chapter list
+per title, so with several versions one owner version supplies its thumbnails; a version
+split into several files is unsupported.
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
+import json
 import re
 import sqlite3
 import time
@@ -32,6 +35,7 @@ MAX_CHAPTERS = 1000
 MAX_JPEG_BYTES = 16 * 1024 * 1024
 _HASH = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_THUMB_MEDIA_ID = re.compile(r"/library/media/(\d+)/chapterImages/")
 
 
 def _valid_bundle_hash(bundle_hash: str, source_size: int) -> bool:
@@ -173,6 +177,26 @@ def chapter_url(media_id: int, index: int, revision: str) -> str:
     return f"/library/media/{media_id}/chapterImages/{index}?mpgChapter={revision}"
 
 
+def _own_chapter_starts(extra_data: Any) -> list[int] | None:
+    """Read a part's own chapter starts (ms) from Plex's ``pv:chapters``, or None if unreadable."""
+    try:
+        chapter_list = json.loads(json.loads(extra_data)["pv:chapters"])["Chapters"].get("Chapter", [])
+        if isinstance(chapter_list, dict):
+            chapter_list = [chapter_list]
+        return [round(float(chapter["start"]) * 1000) for chapter in chapter_list]
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return None
+
+
+def _chapters_match(own_starts: list[int] | None, shared_rows: list[tuple]) -> bool:
+    """True when a part's own chapters are the shared rows (starts within 1s, rounding aside)."""
+    return (
+        bool(own_starts)
+        and len(own_starts) == len(shared_rows)
+        and all(abs(own - row[1]) <= 1000 for own, row in zip(own_starts, shared_rows, strict=True))
+    )
+
+
 class LocalChapters:
     """Chapter operations sharing the marker writer's filesystem and SQLite locks."""
 
@@ -208,7 +232,7 @@ class LocalChapters:
             "tags": {"id", "tag_type"},
             "taggings": {"id", "metadata_item_id", "tag_id", "index", "time_offset", "end_time_offset", "thumb_url"},
             "media_items": {"id", "metadata_item_id", "deleted_at", "proxy_type"},
-            "media_parts": {"id", "media_item_id", "file", "hash", "size", "updated_at", "deleted_at"},
+            "media_parts": {"id", "media_item_id", "file", "hash", "size", "updated_at", "deleted_at", "extra_data"},
         }
         for table, columns in required.items():
             present = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608 -- fixed names
@@ -266,7 +290,7 @@ class LocalChapters:
         conn: sqlite3.Connection, source_path: str, machine_identifier: str, item_id_hint: int | None
     ) -> ChapterTarget:
         rows = conn.execute(
-            "SELECT mi.metadata_item_id, mi.id, mp.id, mp.hash, mp.file, mp.size, mp.updated_at "
+            "SELECT mi.metadata_item_id, mi.id, mp.id, mp.hash, mp.file, mp.size, mp.updated_at, mp.extra_data "
             "FROM media_parts mp JOIN media_items mi ON mi.id=mp.media_item_id "
             "WHERE mp.file=? AND mp.deleted_at IS NULL AND mi.deleted_at IS NULL "
             "AND (mi.proxy_type IS NULL OR mi.proxy_type=0)",
@@ -277,17 +301,17 @@ class LocalChapters:
         if not rows:
             raise ChapterError("Plex has not indexed this source yet", code="pending_index")
         if len(rows) != 1:
-            raise ChapterError("Plex has more than one matching source", code="unsupported")
+            raise ChapterError("Plex has more than one matching source", code="unsupported_source")
         row = rows[0]
-        count = conn.execute(
-            "SELECT COUNT(*) FROM media_parts mp JOIN media_items mi ON mi.id=mp.media_item_id "
+        live_parts = conn.execute(
+            "SELECT mi.id, mp.id FROM media_parts mp JOIN media_items mi ON mi.id=mp.media_item_id "
             "WHERE mi.metadata_item_id=? AND mp.deleted_at IS NULL AND mi.deleted_at IS NULL "
             "AND (mi.proxy_type IS NULL OR mi.proxy_type=0)",
             (row[0],),
-        ).fetchone()[0]
-        if count != 1:
+        ).fetchall()
+        if sum(1 for media_id, _ in live_parts if media_id == row[1]) != 1:
             raise ChapterError(
-                "Chapter registration does not yet support multiple versions or multipart items", code="unsupported"
+                "Chapter thumbnails do not support a version split into multiple files", code="unsupported_source"
             )
         chapters = conn.execute(
             "SELECT t.\"index\", t.time_offset, t.end_time_offset, COALESCE(t.thumb_url, ''), t.id, t.tag_id "
@@ -295,6 +319,20 @@ class LocalChapters:
             'ORDER BY t."index", t.id',
             (row[0],),
         ).fetchall()
+        other_versions = {media_id for media_id, _ in live_parts if media_id != row[1]}
+        if other_versions:
+            if not chapters:
+                raise ChapterError("No chapters", code="no_chapters")
+            shown_from = {int(m.group(1)) for c in chapters if (m := _THUMB_MEDIA_ID.search(c[3]))}
+            if shown_from & other_versions:
+                raise ChapterError(
+                    "Plex shows this title's chapter thumbnails from another version", code="other_version"
+                )
+            # Plex shows the thumbnails of the version whose own chapters it picked for the shared rows.
+            if row[1] not in shown_from and not _chapters_match(_own_chapter_starts(row[7]), chapters):
+                raise ChapterError(
+                    "Plex's chapter list for this title comes from another version", code="other_version"
+                )
         try:
             target = ChapterTarget(
                 row[0],
@@ -356,13 +394,15 @@ class LocalChapters:
     def _images(
         self, target: ChapterTarget, revisions: dict[int, str], *, deadline: float
     ) -> dict[int, tuple[int, int]]:
-        """Read, hash and decode every chapter image, outside Plex's write lock (decoding up to 1000 JPEGs is slow).
+        """Read, hash and decode each revised chapter image, outside Plex's write lock (decoding up to 1000 JPEGs is slow).
+
+        Chapters that start after the video ends have no image, so ``revisions`` may be a non-empty subset.
 
         Returns:
             Each image's (size, mtime_ns) as it was read, for :meth:`_images_unchanged` inside the transaction.
         """
-        if set(revisions) != {chapter.index for chapter in target.chapters}:
-            raise ChapterError("Registration requires every chapter image", code="registration")
+        if not revisions or not set(revisions) <= {chapter.index for chapter in target.chapters}:
+            raise ChapterError("Registration requires images for existing chapters only", code="registration")
         root = self._media_root()
         seen: dict[int, tuple[int, int]] = {}
         for index, revision in revisions.items():
@@ -407,7 +447,7 @@ class LocalChapters:
                 raise ChapterError(f"Chapter {index} image is missing, invalid, or changed", code="registration")
 
     def register(self, target: ChapterTarget, revisions: dict[int, str], version: str, *, deadline: float) -> None:
-        """Compare the whole snapshot and update only thumb_url, all or nothing."""
+        """Compare the whole snapshot and update only the revised chapters' thumb_url, all or nothing."""
         target = target_from_json(target_to_json(target))
         self._guard(target.machine_identifier, version, deadline)
         seen = self._images(target, revisions, deadline=deadline)
@@ -425,7 +465,13 @@ class LocalChapters:
                             code="source_changed",
                         )
                     self._images_unchanged(target, seen)
+                    own_prefix = f"/library/media/{target.media_id}/chapterImages/"
                     for chapter in target.chapters:
+                        if chapter.index not in revisions:
+                            # Drop only our own earlier registration; Plex-native thumbs stay.
+                            if chapter.thumb_url.startswith(own_prefix) and "?mpgChapter=" in chapter.thumb_url:
+                                conn.execute("UPDATE taggings SET thumb_url='' WHERE id=?", (chapter.row_id,))
+                            continue
                         self._within_deadline(deadline)
                         desired = chapter_url(target.media_id, chapter.index, revisions[chapter.index])
                         if chapter.thumb_url != desired:
@@ -586,8 +632,8 @@ def verify_chapters(server: Any, target: ChapterTarget, revisions: dict[int, str
             raise ValueError("Connected Plex server changed")
         result = plex.query(f"/library/metadata/{target.rating_key}?includeChapters=1")
         observed = {int(c.get("index")): c.get("thumb") for c in result.findall(".//Chapter")}
-        expected = {c.index: chapter_url(target.media_id, c.index, revisions[c.index]) for c in target.chapters}
-        if observed != expected:
+        expected = {index: chapter_url(target.media_id, index, revision) for index, revision in revisions.items()}
+        if {index: observed.get(index) for index in expected} != expected:
             raise ValueError("Plex has not exposed the registered chapters")
     except Exception as exc:
         raise ChapterError("Chapter images await verification through Plex's API", code="registration") from exc

@@ -242,8 +242,8 @@ def create_app(
                 if target.machine_identifier != machine:
                     raise ValueError("Snapshot belongs to another server")
                 raw = body.get("revisions")
-                if not isinstance(raw, list) or len(raw) != len(target.chapters):
-                    raise ValueError("Expected every chapter revision")
+                if not isinstance(raw, list) or not raw or len(raw) > len(target.chapters):
+                    raise ValueError("Expected revisions for the chapters that have an image")
                 revisions = {}
                 for revision in raw:
                     index = revision["index"]

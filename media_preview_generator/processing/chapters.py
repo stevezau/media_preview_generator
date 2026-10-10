@@ -45,7 +45,11 @@ _LOCKS = tuple(threading.Lock() for _ in range(64))
 class UnsupportedChapterFormatError(RuntimeError):
     """No safe chapter color conversion is available for this source."""
 
-    code = "unsupported"
+    code = "unsupported_source"
+
+
+class ChapterPastEndError(ValueError):
+    """A chapter starts after the video ends, so no frame exists for it."""
 
 
 class ChapterExtractionStalledError(TimeoutError):
@@ -127,6 +131,10 @@ def _failure(exc: Exception, completed: int = 0, total: int = 0) -> ChapterOutco
     from ..utils import redact_secrets
 
     code = getattr(exc, "code", "")
+    if code in {"unsupported_source", "other_version"}:
+        return ChapterOutcome("skipped", completed, total, redact_secrets(str(exc)), False)
+    if code == "no_chapters":
+        return ChapterOutcome("none", message="No chapters")
     waiting = code == "pending_index"
     retryable = (
         waiting
@@ -159,6 +167,7 @@ def prepare_chapters(
     item_id_hint=None,
     cancel_check=None,
     trust_server_hash: bool = False,
+    regenerate: bool = False,
 ) -> ChapterPlan:
     """Resolve only an enabled Plex server's exact source and chapter map.
 
@@ -167,6 +176,7 @@ def prepare_chapters(
     Args:
         trust_server_hash: Bulk scans only. Use Plex's hash for the part at this exact path
             when its byte size matches, instead of reading the file (the same rule as BIF paths).
+        regenerate: Ignore a stored "unsupported source" stamp so an explicit regeneration retries the file.
     """
     from ..servers.plex_chapters import ChapterError, resolve_chapter_target
 
@@ -198,6 +208,11 @@ def prepare_chapters(
         )
         plan.folder = bif_path.parent.parent / "Chapters"
         _check_source(plan)
+        stamped = None if regenerate or not plan.target.chapters else _unsupported_stamp(plan)
+        if stamped:
+            plan.target = None
+            plan.outcome = ChapterOutcome("skipped", message=stamped)
+            return plan
         if not plan.target.chapters:
             if cancel_check and cancel_check():
                 raise CancellationError("Chapter metadata check cancelled")
@@ -218,6 +233,18 @@ def prepare_chapters(
         plan.target = None
         plan.outcome = _failure(exc)
     return plan
+
+
+def _unsupported_stamp(plan: ChapterPlan) -> str | None:
+    """Return the stored reason when this exact file and profile were already found unsupported."""
+    try:
+        manifest = json.loads(plan.manifest_path.read_text())
+        if manifest.get("source") != list(plan.source_fingerprint) or manifest.get("profile") != plan.profile:
+            return None
+        reason = manifest.get("unsupported")
+        return reason if isinstance(reason, str) and reason else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def _check_source(plan: ChapterPlan) -> None:
@@ -247,6 +274,9 @@ def _fresh_images(plan: ChapterPlan) -> dict[str, dict]:
             entry = entries.get(str(chapter.index), {})
             if entry.get("start_ms") != chapter.start_ms or entry.get("end_ms") != chapter.end_ms:
                 continue
+            if entry.get("past_end") is True:
+                fresh[str(chapter.index)] = entry
+                continue
             path = plan.folder / f"chapter{chapter.index}.jpg"
             try:
                 if entry.get("sha256") == _revision(path):
@@ -258,12 +288,18 @@ def _fresh_images(plan: ChapterPlan) -> dict[str, dict]:
         return {}
 
 
+def _has_image(entry: dict | None) -> bool:
+    """False for a chapter with no image, which starts after the video ends."""
+    return entry is not None and not entry.get("past_end")
+
+
 def _registered(plan: ChapterPlan, images: dict[str, dict]) -> bool:
     target = cast("ChapterTarget", plan.target)
     return bool(target) and all(
         chapter.thumb_url
         == f"/library/media/{target.media_id}/chapterImages/{chapter.index}?mpgChapter={images.get(str(chapter.index), {}).get('sha256', '')}"
         for chapter in target.chapters
+        if not images.get(str(chapter.index), {}).get("past_end")
     )
 
 
@@ -274,7 +310,7 @@ def _registration_key(plan: ChapterPlan, images: dict[str, dict]) -> dict:
         "item": target.rating_key,
         "media": target.media_id,
         "part": target.part_id,
-        "images": {index: entry["sha256"] for index, entry in images.items()},
+        "images": {index: entry["sha256"] for index, entry in images.items() if _has_image(entry)},
     }
 
 
@@ -293,13 +329,18 @@ def chapter_work_needed(plan: ChapterPlan, *, regenerate: bool = False) -> bool:
     return (
         regenerate
         or len(images) != len(plan.target.chapters)
+        or not any(_has_image(entry) for entry in images.values())
         or not _registered(plan, images)
         or not _verified(plan, images)
     )
 
 
-def _write_manifest(plan: ChapterPlan, images: dict[str, dict], *, verified: bool = False) -> None:
+def _write_manifest(
+    plan: ChapterPlan, images: dict[str, dict], *, verified: bool = False, unsupported: str | None = None
+) -> None:
     payload = {"source": list(plan.source_fingerprint), "profile": plan.profile, "images": images}
+    if unsupported:
+        payload["unsupported"] = unsupported
     if verified:
         payload["verified"] = _registration_key(plan, images)
     fd, name = tempfile.mkstemp(prefix=".mpg-chapters-", suffix=".json", dir=plan.folder)
@@ -311,6 +352,30 @@ def _write_manifest(plan: ChapterPlan, images: dict[str, dict], *, verified: boo
         os.replace(name, plan.manifest_path)
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+def _source_duration_ms(media_info) -> float:
+    """Video duration, else the container's: some Matroska files declare duration only on the container.
+
+    The container duration can establish that a chapter is past the end, but must not expand the
+    video-only one-second endpoint fallback in :func:`extract_chapter_frame`.
+    """
+    candidates = [*getattr(media_info, "video_tracks", ())[:1], *getattr(media_info, "general_tracks", ())]
+    for track in candidates:
+        try:
+            duration = float(track.duration)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if 0 < duration < float("inf"):
+            return duration
+    return 0
+
+
+def _past_end_error(start_ms: int, source_duration_ms: float) -> ChapterPastEndError:
+    return ChapterPastEndError(
+        f"Chapter timestamp {start_ms}ms is outside the current video's duration ({source_duration_ms:.0f}ms); "
+        "no frame exists at that position. Check the source chapter metadata."
+    )
 
 
 def extract_chapter_frame(
@@ -334,7 +399,7 @@ def extract_chapter_frame(
         raise CancellationError("Chapter extraction cancelled")
     media_info = media_info or MediaInfo.parse(video_path)
     if not media_info.video_tracks:
-        raise ValueError("No video stream for chapter extraction")
+        raise UnsupportedChapterFormatError("No video stream for chapter thumbnails")
     track = media_info.video_tracks[0]
     transfer = track.transfer_characteristics
     dv = is_dv_no_backward_compat(track.hdr_format, transfer)
@@ -402,29 +467,14 @@ def extract_chapter_frame(
         duration_ms = float(track.duration)
     except (AttributeError, TypeError, ValueError):
         duration_ms = 0
-    source_duration_ms = duration_ms
-    if not 0 < source_duration_ms < float("inf"):
-        # Some Matroska files declare duration only on the container. It can
-        # establish that a confirmed empty seek is outside the source, but
-        # must not expand the video-only one-second endpoint fallback below.
-        for general in getattr(media_info, "general_tracks", ()):
-            try:
-                candidate = float(general.duration)
-            except (AttributeError, TypeError, ValueError):
-                continue
-            if 0 < candidate < float("inf"):
-                source_duration_ms = candidate
-                break
+    source_duration_ms = _source_duration_ms(media_info)
     if (
         no_frame
         and not premature_end
         and 0 < source_duration_ms < float("inf")
         and start_ms > source_duration_ms + 1000
     ):
-        raise ValueError(
-            f"Chapter timestamp {start_ms}ms is outside the current video's duration ({source_duration_ms:.0f}ms); "
-            "no frame exists at that position. Check the source chapter metadata."
-        )
+        raise _past_end_error(start_ms, source_duration_ms)
     # Plex can round a final chapter past the last video frame. Seek at most
     # one second before the chapter; container duration can extend past video.
     if no_frame and not premature_end and 1000 <= duration_ms < float("inf") and abs(start_ms - duration_ms) <= 1000:
@@ -486,7 +536,8 @@ def publish_chapters(
         processed = len(images)
         if regenerate:
             _write_manifest(plan, images)
-        errors = []
+        errors: list[Exception] = []
+        past_end_errors: list[Exception] = []
         media_info = None
         missing = [chapter.start_ms for chapter in plan.target.chapters if str(chapter.index) not in images]
         index_defect = (
@@ -526,8 +577,16 @@ def publish_chapters(
             report("extracting")
             _check_source(plan)
             try:
-                if media_info is None and seek_failure is None:
-                    media_info = MediaInfo.parse(plan.canonical_path)
+                if media_info is None:
+                    try:
+                        media_info = MediaInfo.parse(plan.canonical_path)
+                    except (OSError, RuntimeError, ValueError):
+                        if seek_failure is None:
+                            raise
+                if seek_failure is not None and media_info is not None:
+                    duration_ms = _source_duration_ms(media_info)
+                    if 0 < duration_ms and chapter.start_ms > duration_ms + 1000:
+                        raise _past_end_error(chapter.start_ms, duration_ms)
                 with tempfile.TemporaryDirectory(prefix=".mpg-chapter-", dir=plan.folder) as temp:
                     staged = Path(temp) / "frame.jpg"
                     recovery = None
@@ -575,19 +634,35 @@ def publish_chapters(
                 failed += 1
                 processed += 1
                 raise
+            except ChapterPastEndError as exc:
+                past_end_errors.append(exc)
+                (plan.folder / f"chapter{chapter.index}.jpg").unlink(missing_ok=True)
+                images[str(chapter.index)] = {"start_ms": chapter.start_ms, "end_ms": chapter.end_ms, "past_end": True}
+                _write_manifest(plan, images)
             except (OSError, ValueError, RuntimeError) as exc:
                 errors.append(exc)
-                failed += 1
+                if not isinstance(exc, UnsupportedChapterFormatError):
+                    failed += 1
             processed += 1
             report("extracting")
         _check_source(plan)
-        if len(images) != total:
+        real_images = {index: entry for index, entry in images.items() if _has_image(entry)}
+        if len(images) == total and not real_images:
+            all_past_end = (
+                "The only chapter starts" if total == 1 else f"All {total} chapters start"
+            ) + " after the video ends; no frame exists for any of them. Check the source chapter metadata."
             report("failed")
-            return _failure(
-                errors[0] if errors else RuntimeError("Chapter images are incomplete"),
+            return ChapterOutcome("failed", 0, total, all_past_end, False)
+        if len(images) != total:
+            outcome = _failure(
+                (errors or past_end_errors or [RuntimeError("Chapter images are incomplete")])[0],
                 len(images),
                 total,
             )
+            if outcome.status == "skipped" and isinstance(errors[0], UnsupportedChapterFormatError):
+                _write_manifest(plan, images, unsupported=outcome.message)
+            report(outcome.status if outcome.status == "skipped" else "failed")
+            return outcome
         if cancel_check and cancel_check():
             raise CancellationError("Chapter processing cancelled")
         if not _registered(plan, images) or not _verified(plan, images):
@@ -595,22 +670,30 @@ def publish_chapters(
             register_chapters(
                 plan.server,
                 plan.target,
-                {int(index): entry["sha256"] for index, entry in images.items()},
+                {int(index): entry["sha256"] for index, entry in real_images.items()},
                 verify_source=lambda: _check_source(plan),
             )
             _check_source(plan)
             _write_manifest(plan, images, verified=True)
         _check_source(plan)
         report("complete")
-        recovered = sum(bool(entry.get("recovery")) for entry in images.values())
+        recovered = sum(bool(entry.get("recovery")) for entry in real_images.values())
+        past_end = total - len(real_images)
         message = "Chapter thumbnails ready"
         if recovered:
             message += f"; {recovered} recovered from lower-resolution scrubber previews"
+        if past_end:
+            message += (
+                f"; {past_end} chapter starts after the video ends and has no thumbnail"
+                if past_end == 1
+                else f"; {past_end} chapters start after the video ends and have no thumbnail"
+            )
         return ChapterOutcome("ready", total, total, message)
     except CancellationError:
         raise
     except (PublishError, OSError, ValueError, RuntimeError) as exc:
-        report("failed")
-        return _failure(exc, len(images), total)
+        outcome = _failure(exc, len(images), total)
+        report("skipped" if outcome.status == "skipped" else "failed")
+        return outcome
     finally:
         lock.release()

@@ -47,6 +47,8 @@
 .job-result-list { display: grid; gap: .375rem; }
 .job-result-item { display: flex; gap: 1rem; justify-content: space-between; align-items: baseline; line-height: 1.5; font-size: .875rem; }
 .job-result-item strong { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.job-result-link { width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.job-result-link:hover span, .job-result-link:focus-visible span { text-decoration: underline; }
 .job-result-muted { color: var(--bs-secondary-color); }
 .job-result-error { color: var(--bs-danger-text-emphasis); }
 .job-result-warning { color: var(--bs-warning-text-emphasis); }

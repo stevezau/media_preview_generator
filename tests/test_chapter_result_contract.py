@@ -88,6 +88,7 @@ def test_chapter_only_updates_are_counted_separately_from_nine_existing_scrubber
         ({"status": "waiting"}, "waiting"),
         ({"status": "failed"}, "failed"),
         ({"status": "none"}, "none"),
+        ({"status": "skipped"}, "skipped"),
     ],
 )
 def test_chain_retains_chapter_work_only_while_latest_output_is_ready(final, expected):

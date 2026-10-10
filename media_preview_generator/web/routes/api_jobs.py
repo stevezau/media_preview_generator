@@ -27,6 +27,7 @@ from ..jobs import (
     RETRY_STATE_CONFIG_KEYS,
     SLOT_WAIT_SINCE,
     JobStatus,
+    chapter_artifact_statuses,
     get_job_manager,
     is_user_visible_job,
     parse_priority,
@@ -1205,6 +1206,24 @@ def media_search() -> Any:
     return jsonify({"query": query, "results": results[:_MEDIA_SEARCH_LIMIT], "error": None})
 
 
+@api.route("/jobs/chapter-warnings/dismiss", methods=["POST"])
+@api_token_required
+def dismiss_chapter_warnings() -> Any:
+    """Hide the dashboard's chapter-issue banner for every job that raises it now.
+
+    Later jobs with chapter issues are not marked, so they raise the banner again.
+
+    Returns:
+        ``{"dismissed": n}`` with the number of jobs marked.
+    """
+    job_manager = get_job_manager()
+    dismissed = 0
+    for job in job_manager.get_all_jobs():
+        if job_manager.dismiss_chapter_warning(job.id):
+            dismissed += 1
+    return jsonify({"dismissed": dismissed})
+
+
 _BULK_CANCEL_MAX = 500
 
 
@@ -1849,7 +1868,10 @@ def get_job_file_results(job_id: str) -> Any:
     processed_total = sum((job.progress.outcome or {}).values()) if job.progress else 0
 
     filtered = all_results
-    if outcome_filter:
+    if outcome_filter.startswith("chapters_"):
+        wanted = outcome_filter[len("chapters_") :]
+        filtered = [r for r in filtered if wanted in chapter_artifact_statuses(r.get("servers"))]
+    elif outcome_filter:
         filtered = [r for r in filtered if r.get("outcome") == outcome_filter]
     if search:
         search_lower = search.lower()
@@ -2160,6 +2182,7 @@ def reprocess_job(job_id):
             _clear_pause_all_for_rerun()
         return _check_servers_answer(run_markers_reconcile(priority=job.priority))
     new_config = dict(job.config or {})
+    new_config.pop("chapter_warning_dismissed", None)
 
     # When reprocessing a retry, restore the original job's full file set
     # and library name so all files are processed again.

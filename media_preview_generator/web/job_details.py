@@ -22,12 +22,19 @@ _PATHS_FOR_LIBRARIES = 20
 LibraryIndex = list[list[tuple[str, OwnershipMatch]]]
 
 
+def _chapter_warning_dismissed(job: Job) -> bool:
+    """Tell whether the user dismissed the warning of this very completion (a re-run or retry completes anew)."""
+    dismissed_at = (job.config or {}).get("chapter_warning_dismissed")
+    return bool(dismissed_at) and dismissed_at == job.completed_at
+
+
 def job_has_chapter_warning(job: Job) -> bool:
     """Identify finished preview heads that reported incomplete chapter outputs."""
     if (
         job.kind != "previews"
         or job.status not in (JobStatus.COMPLETED, JobStatus.FAILED)
         or not is_user_visible_job(job)
+        or _chapter_warning_dismissed(job)
     ):
         return False
     for publisher in job.publishers or []:
