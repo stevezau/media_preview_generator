@@ -149,7 +149,7 @@ see when you drag the scrub bar. Plex stores them as **BIF bundles**, Emby
 reads a **BIF sidecar** next to the media file, and Jellyfin reads a folder of
 JPG tile sheets called **trickplay** next to the media file. The app writes
 the right format for each. Optional CPU generation of [Plex chapter thumbnails](guides.md#plex-chapter-thumbnails)
-is also available for Plex **1.43.4.x**, off by default. It can
+is also available for Plex **1.43.4.x or 1.43.5.x**, off by default. It can
 also send **Skip Intro / Skip Credits markers** to your servers, off until you
 turn it on per server (see the [Intro & Credits guide](guides.md#intro--credits)).
 

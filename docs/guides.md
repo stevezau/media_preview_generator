@@ -309,7 +309,7 @@ A file is retried when the media server hasn't indexed it yet or a per-file fail
 ### Plex chapter thumbnails
 
 Chapter thumbnails are optional images for the chapters Plex already knows about. They are separate from the
-scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x**.
+scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x or 1.43.5.x**.
 Plex keeps one chapter list per title, so with several versions the thumbnails come from one version, as in
 Plex. A version split into several files is skipped.
 Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision

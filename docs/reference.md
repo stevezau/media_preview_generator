@@ -117,7 +117,7 @@ Plex's `output.chapter_thumbnails` setting is a JSON boolean, default `false`.
 The API rejects strings such as `"false"` and numeric values. The **Chapter thumbnails** section in
 **Servers → Edit → Processing** controls it. It adds chapter images to existing Previews jobs and updates existing
 chapter image references in Plex's database. It requires a supported local Plex database or a compatible configured
-Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x**.
+Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x or 1.43.5.x**.
 See the [chapter thumbnail guide](guides.md#plex-chapter-thumbnails) for setup and retry behavior.
 
 > **Runtime state, not persisted.** Whether Jellyfin's Media Preview Bridge plugin is installed
@@ -906,7 +906,7 @@ off until turned on per server.
 
 | Key | Type | Notes |
 |---|---|---|
-| `enabled` | bool | Default `false`. Independent of Intro & Credits and its write confirmation. Requires a local Plex 1.43.4.x database on the same machine; the Plex helper (`markers.plex.agent.enabled`) is unsupported. Setup Health checks readiness. |
+| `enabled` | bool | Default `false`. Independent of Intro & Credits and its write confirmation. Requires a local Plex 1.43.4.x or 1.43.5.x database on the same machine; the Plex helper (`markers.plex.agent.enabled`) is unsupported. Setup Health checks readiness. |
 | `library_ids` | array of strings \| `null` | Libraries it goes to. `null` = every movie and TV library. An explicit list selects video libraries only; known music and other non-video types are refused. |
 
 ### Job kind `loudness`

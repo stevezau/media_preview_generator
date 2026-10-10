@@ -31,7 +31,7 @@ each server's API. Map the server's media paths to the paths inside this contain
 - **Emby previews:** the container needs write access beside each video for the BIF sidecar.
 - **Jellyfin trickplay:** the default writes beside the video. [Off-media mode](guides/previews-readiness.md#jellyfin-config-folder) needs a writable Jellyfin config mount and the Media Preview Bridge plugin; the media may then stay read-only.
 - **Plex markers and chapter thumbnails:** the relevant [Plex helper setup](guides.md#plex-on-another-machine-the-plex-marker-agent) supports operations that must happen beside Plex. Check each feature's requirements before enabling it.
-- **Plex loudness:** this is a same-machine exception. It requires local Plex 1.43.4.x database access; helper and network-mounted database configurations are unsupported. See [Plex loudness requirements](plex-loudness-normalization.md).
+- **Plex loudness:** this is a same-machine exception. It requires local Plex 1.43.4.x or 1.43.5.x database access; helper and network-mounted database configurations are unsupported. See [Plex loudness requirements](plex-loudness-normalization.md).
 
 Start with one file and watch both the worker's activity and each server's saved result. A network
 share, slow disk or server indexing delay can be the limit even when the GPU has spare capacity.

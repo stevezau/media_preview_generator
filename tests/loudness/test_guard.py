@@ -79,7 +79,30 @@ def test_unknown_or_different_api_identity_is_refused(guarded, machine):
             pytest.fail("Unproven database was opened")
 
 
-@pytest.mark.parametrize("version", [None, "", "1.43.3.12345", "1.44.0.1", "1.43.4", "1.43.4.12345-unexpected!"])
+@pytest.mark.parametrize("version", ["1.43.4.10903-e5521bd8c", "1.43.5.11029-6bf8af3f0", "1.43.5.11029"])
+def test_tested_versions_open(guarded, version, monkeypatch):
+    db, _, server = guarded
+    monkeypatch.setattr(db, "file_checks", MagicMock(return_value=CapabilityReport(Capability.READY, "Ready")))
+    server._connect.return_value.query.return_value = {"machineIdentifier": "plex-a", "version": version}
+    with db._database(read_only=True, deadline=1e12) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        None,
+        "",
+        "1.43.3.12345",
+        "1.43.6.1",
+        "1.44.0.1",
+        "1.43.4",
+        "1.43.5",
+        "1.43.4.12345-unexpected!",
+        "11.43.5.1",
+        "1.43.50.1",
+    ],
+)
 def test_untested_versions_are_refused(guarded, version):
     db, _, server = guarded
     server._connect.return_value.query.return_value = {"machineIdentifier": "plex-a", "version": version}

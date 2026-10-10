@@ -81,7 +81,7 @@ Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you hav
 
 ### Does it make chapter thumbnails too?<a id="does-this-generate-chapter-thumbnails"></a>
 
-Yes, optionally for Plex Media Server **1.43.4.x**. Chapter generation is off by default and uses CPU, separately from GPU-accelerated scrubber previews. It requires one media version and one part per item; see the [chapter thumbnail guide](guides.md#plex-chapter-thumbnails) for setup and limits.
+Yes, optionally for Plex Media Server **1.43.4.x or 1.43.5.x**. Chapter generation is off by default and uses CPU, separately from GPU-accelerated scrubber previews. It requires one media version and one part per item; see the [chapter thumbnail guide](guides.md#plex-chapter-thumbnails) for setup and limits.
 
 ### Do I need a GPU to use Media Preview Generator?<a id="can-i-use-this-without-a-gpu"></a>
 

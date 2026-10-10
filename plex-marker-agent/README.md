@@ -76,7 +76,7 @@ docker run -d --name plex-marker-agent --restart unless-stopped \
   -v /path/to/plex/config:/plex \
   -p 9494:9494 \
   --security-opt no-new-privileges:true --cap-drop ALL \
-  ghcr.io/stevezau/plex-marker-agent:1.1.1
+  ghcr.io/stevezau/plex-marker-agent:1.1.2
 ```
 
 | Setting | What it is |
@@ -198,7 +198,7 @@ sides, so they can't disagree about a field.
 ### Chapter capability
 
 `chapters_v1` advertises fixed authenticated `/v1/chapters/check`, `/read`, and `/register` operations.
-Chapter writes are initially verified only on Plex Media Server **1.43.4.x**, with matching database schema.
+Chapter writes are verified on Plex Media Server **1.43.4.x and 1.43.5.x**, with matching database schema.
 Other versions are refused until verified. Readiness does not require any chapter or marker rows to exist.
 
 Each request requires a positive match between the connected Plex identity and this folder's

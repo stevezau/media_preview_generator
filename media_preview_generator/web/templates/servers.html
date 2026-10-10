@@ -822,7 +822,7 @@
                                             <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Separate from scrubber images; off by default." data-explain-title="Chapter thumbnails" data-explain-template="infoEditChaptersNoteTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditChaptersNoteTpl">
     <p>Included in preview jobs for the selected preview libraries. Separate from scrubber images; off by default. Adds pictures to Plex's chapter menu and updates Plex's database. Plex may still show older cached images.</p>
-    <p>Requires Plex 1.43.4.x and supported chapter data. For Plex on another machine, configure the Plex helper in the Connection tab.</p>
+    <p>Requires Plex 1.43.4.x or 1.43.5.x and supported chapter data. For Plex on another machine, configure the Plex helper in the Connection tab.</p>
 </template>
                                         </label>
                                         <div class="sm-hint" id="editPlexChapterThumbnailsHelp">Pictures in Plex's chapter menu.</div>
@@ -902,7 +902,7 @@
                                         </label>
                                         <div class="sm-hint">Viewers on this server get Normalize Loudness sooner. <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Requirements, CPU worker group and database writes." data-explain-title="Loudness requirements" data-explain-template="infoEditLoudnessReqTpl"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditLoudnessReqTpl">
-    <p>Requires Plex 1.43.4.x on the same machine, with Plex's config folder mounted locally. Network-mounted databases are not supported. Analysis requires a CPU worker group that allows Plex loudness; configure it in <a href="/settings#section-workers">Settings → Workers</a>. It does not use GPU workers or rewrite source media. Enabling this writes loudness measurements to Plex's database. Intro &amp; Credits can stay off.</p>
+    <p>Requires Plex 1.43.4.x or 1.43.5.x on the same machine, with Plex's config folder mounted locally. Network-mounted databases are not supported. Analysis requires a CPU worker group that allows Plex loudness; configure it in <a href="/settings#section-workers">Settings → Workers</a>. It does not use GPU workers or rewrite source media. Enabling this writes loudness measurements to Plex's database. Intro &amp; Credits can stay off.</p>
 </template>
                                         </div>
                                     </div>

@@ -377,12 +377,21 @@ def test_chapterless_is_distinct_from_unindexed_and_requires_no_marker_tag(backe
         ("other", VERSION),
         (MACHINE, "1.44.0.12"),
         (MACHINE, "1.43.3.123"),
+        (MACHINE, "1.43.6.1"),
+        (MACHINE, "1.43.50.1"),
+        (MACHINE, "11.43.5.1"),
+        (MACHINE, "1.43.5"),
         (MACHINE, "1.43.4.invalid"),
         (MACHINE, ""),
     ],
 )
 def test_unknown_identity_or_version_refuses_capability(backend, machine, version):
     assert not backend.capability(machine, version, deadline=time.monotonic() + 3).ready
+
+
+@pytest.mark.parametrize("version", ["1.43.4.10903-e5521bd8c", "1.43.5.11029-6bf8af3f0"])
+def test_tested_versions_are_ready(backend, version):
+    assert backend.capability(MACHINE, version, deadline=time.monotonic() + 3).ready
 
 
 @pytest.mark.parametrize(
@@ -466,6 +475,38 @@ def test_remote_refuses_old_or_wrong_helper_before_sending_operation(capabilitie
 
     with pytest.raises(ChapterError):
         _remote(Client(), "register", MACHINE, VERSION, target={})
+
+
+@pytest.mark.parametrize(
+    "agent_version,pms_version,refused",
+    [
+        ("1.1.1", "1.43.5.11029-6bf8af3f0", True),
+        ("1.1.2", "1.43.5.11029-6bf8af3f0", False),
+        ("1.1.1", VERSION, False),
+    ],
+)
+def test_remote_names_the_helper_update_plex_1_43_5_needs(agent_version, pms_version, refused):
+    sent = []
+
+    class Client:
+        capabilities = ["chapters_v1"]
+        version = agent_version
+
+        def ping(self, *, timeout):
+            return {"machine_identifier": MACHINE}
+
+        def post(self, path, body, timeout):
+            sent.append(body["pms_version"])
+            return {"capability": "chapters_v1"}
+
+    if refused:
+        with pytest.raises(ChapterError, match="1.1.2 or newer for Plex 1.43.5") as caught:
+            _remote(Client(), "check", MACHINE, pms_version)
+        assert caught.value.state is Capability.PLUGIN_OUTDATED
+        assert sent == []
+    else:
+        _remote(Client(), "check", MACHINE, pms_version)
+        assert sent == [pms_version]
 
 
 def test_second_update_failure_rolls_back_the_first(backend, monkeypatch):

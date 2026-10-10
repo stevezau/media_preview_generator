@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -16,8 +15,10 @@ from defusedxml.common import DefusedXmlException
 from ..markers.publishers.base import Capability, CapabilityReport, PublishError
 from ..markers.publishers.plex_db import (
     BUSY_TIMEOUT_S,
+    TESTED_PMS_LABEL,
     LocalPlexDb,
     decode_extra_data,
+    is_tested_pms_version,
     plex_db_path,
     publish_error_from_sqlite,
 )
@@ -26,8 +27,6 @@ from .analyze import ANALYSIS_VERSION
 
 if TYPE_CHECKING:
     from .plex_db import AudioStream
-
-TESTED_PMS_VERSION = "1.43.4"
 
 
 class GuardedLoudnessDb(LocalPlexDb):
@@ -72,9 +71,9 @@ class GuardedLoudnessDb(LocalPlexDb):
             raise PublishError(
                 "Cannot prove this database belongs to the connected Plex server", state=Capability.MISCONFIGURED
             )
-        if not isinstance(version, str) or not re.fullmatch(r"1\.43\.4\.[0-9]+(?:-[A-Za-z0-9]+)?", version):
+        if not is_tested_pms_version(version):
             raise PublishError(
-                f"Loudness writes have only been verified with Plex {TESTED_PMS_VERSION}.x",
+                f"Loudness writes have only been verified with Plex {TESTED_PMS_LABEL}",
                 state=Capability.UNSUPPORTED_SCHEMA,
             )
         self.machine_identifier = machine

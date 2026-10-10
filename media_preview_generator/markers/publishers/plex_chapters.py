@@ -26,11 +26,17 @@ from PIL import Image
 
 from ..settings import load_server
 from .base import Capability, CapabilityReport, PublishError
-from .plex_db import LocalPlexDb, plex_db_path, publish_error_from_sqlite
-from .plex_remote import AgentClient, report_from_json
+from .plex_db import (
+    TESTED_PMS_LABEL,
+    TESTED_PMS_VERSIONS,
+    LocalPlexDb,
+    is_tested_pms_version,
+    plex_db_path,
+    publish_error_from_sqlite,
+)
+from .plex_remote import AgentClient, agent_older_than, report_from_json
 
 CHAPTER_CAPABILITY = "chapters_v1"
-TESTED_PMS_VERSION = "1.43.4"
 MAX_CHAPTERS = 1000
 MAX_JPEG_BYTES = 16 * 1024 * 1024
 _HASH = re.compile(r"[0-9a-f]{40}\Z")
@@ -217,9 +223,9 @@ class LocalChapters:
                 code="unsupported",
                 state=Capability.MISCONFIGURED,
             )
-        if not isinstance(version, str) or not re.fullmatch(r"1\.43\.4\.[0-9]+(?:-[A-Za-z0-9]+)?", version):
+        if not is_tested_pms_version(version):
             raise ChapterError(
-                f"Chapter registration has only been verified with Plex {TESTED_PMS_VERSION}",
+                f"Chapter registration has only been verified with Plex {TESTED_PMS_LABEL}",
                 code="unsupported",
                 state=Capability.UNSUPPORTED_SCHEMA,
             )
@@ -280,7 +286,7 @@ class LocalChapters:
         return CapabilityReport(
             Capability.READY,
             "Plex chapter registration is ready",
-            {"capability": CHAPTER_CAPABILITY, "supported_pms_versions": [TESTED_PMS_VERSION + ".x"]},
+            {"capability": CHAPTER_CAPABILITY, "supported_pms_versions": [f"{v}.x" for v in TESTED_PMS_VERSIONS]},
         )
 
     @staticmethod
@@ -511,11 +517,20 @@ def _context(server: Any, server_config: Any = None) -> tuple[Any, str, str, Any
     return backend, machine, version, plex
 
 
+# Helpers older than this refuse Plex 1.43.5 with a bare "only verified" message; say which update fixes it instead.
+_AGENT_FOR_PMS_1_43_5 = "1.1.2"
+
+
 def _remote(client: AgentClient, operation: str, machine: str, version: str, **body: Any) -> dict:
     identity = client.ping(timeout=5)
     if CHAPTER_CAPABILITY not in client.capabilities:
         raise ChapterError(
             "Update the Plex-side helper to version 1.1.0 or newer for chapter registration",
+            state=Capability.PLUGIN_OUTDATED,
+        )
+    if version.startswith("1.43.5.") and agent_older_than(client.version, _AGENT_FOR_PMS_1_43_5):
+        raise ChapterError(
+            f"Update the Plex-side helper to version {_AGENT_FOR_PMS_1_43_5} or newer for Plex 1.43.5",
             state=Capability.PLUGIN_OUTDATED,
         )
     if not machine or identity.get("machine_identifier") != machine:

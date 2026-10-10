@@ -30,6 +30,7 @@ import requests
 from defusedxml import ElementTree as ET
 
 from media_preview_generator.loudness.analyze import run
+from media_preview_generator.markers.publishers.plex_db import TESTED_PMS_LABEL, is_tested_pms_version
 
 FIELDS = ("loudness", "peak", "lra", "threshold", "gainOffset", "loudnessAnalysisVersion")
 
@@ -75,8 +76,8 @@ def main() -> int:
 
     identity = get("/identity")
     version = identity.get("version", "")
-    if not version.startswith("1.43.4.") or identity.get("claimed") != "1":
-        raise ValueError("Use the claimed, tested Plex 1.43.4.x lab")
+    if not is_tested_pms_version(version) or identity.get("claimed") != "1":
+        raise ValueError(f"Use a claimed, tested Plex {TESTED_PMS_LABEL} lab")
     work: list[dict[str, Any]] = []
     for item_id in ids:
         root = get("/library/metadata/" + item_id)

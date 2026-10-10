@@ -79,7 +79,12 @@ def agent_too_old(version: str) -> bool:
         Something that isn't our agent is turned away by the ``result`` it doesn't send, as "answered N instead of a
         result".
     """
-    theirs, mine = _version_tuple(version), _version_tuple(MIN_AGENT_VERSION)
+    return agent_older_than(version, MIN_AGENT_VERSION)
+
+
+def agent_older_than(version: str, needed: str) -> bool:
+    """Whether both versions parse as dotted numbers and ``version`` is lower than ``needed``."""
+    theirs, mine = _version_tuple(version), _version_tuple(needed)
     return bool(theirs and mine and theirs < mine)
 
 

@@ -61,7 +61,7 @@ next to the badge.
 
 **What it checks:** Jellyfin must be 10.10 or newer; Plex and Emby
 are informational for scrubber previews (any recent release works). Optional Plex chapter
-registration has a separate version check and currently supports **1.43.4.x**.
+registration has a separate version check and currently supports **1.43.4.x or 1.43.5.x**.
 
 **Why it matters:** pre-10.10 Jellyfin ignores the
 `SaveTrickplayWithMedia` flag and looks for trickplay under

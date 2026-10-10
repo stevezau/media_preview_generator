@@ -95,7 +95,7 @@ For a separate GPU machine, first check the shared-media and output mounts in
 
 - Docker only, with a web UI and no CLI.
 - File/folder jobs and path-based webhooks can generate previews before Plex scans a file, including while Plex is offline. Publication and Plex's ability to serve the result still depend on the file's server state; see [generation without waiting for Plex](multi-server.md#plex-generation-without-waiting-for-plex). Work that must wait for indexing uses the [retry queue](multi-server.md#slow-backoff-retry-queue).
-- GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](guides.md#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**.
+- GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](guides.md#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x or 1.43.5.x**.
 
 ## Related
 

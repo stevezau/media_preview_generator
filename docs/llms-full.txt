@@ -20,7 +20,7 @@ Every docs page in one fetch: https://mediapreviewgenerator.dev/llms-full.txt
 
 **What sets it apart: each new file is decoded once, on the GPU if there is one, and every server that holds it gets its own native output in the place it reads from (a Plex BIF in Plex's data folder, an Emby BIF next to the video, Jellyfin trickplay tiles).** The comparison page says when the built-ins are the better choice: https://mediapreviewgenerator.dev/comparison/
 
-Status: maintained, released as Docker images (linux/amd64, linux/arm64); releases at https://github.com/stevezau/media_preview_generator/releases. Optional Plex chapter thumbnails and Plex loudness analysis use CPU and currently support Plex 1.43.4.x. The app does not transcode for playback.
+Status: maintained, released as Docker images (linux/amd64, linux/arm64); releases at https://github.com/stevezau/media_preview_generator/releases. Optional Plex chapter thumbnails and Plex loudness analysis use CPU and currently support Plex 1.43.4.x or 1.43.5.x. The app does not transcode for playback.
 
 ## How it works
 
@@ -255,7 +255,7 @@ see when you drag the scrub bar. Plex stores them as **BIF bundles**, Emby
 reads a **BIF sidecar** next to the media file, and Jellyfin reads a folder of
 JPG tile sheets called **trickplay** next to the media file. The app writes
 the right format for each. Optional CPU generation of [Plex chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails)
-is also available for Plex **1.43.4.x**, off by default. It can
+is also available for Plex **1.43.4.x or 1.43.5.x**, off by default. It can
 also send **Skip Intro / Skip Credits markers** to your servers, off until you
 turn it on per server (see the [Intro & Credits guide](https://mediapreviewgenerator.dev/guides/#intro--credits)).
 
@@ -830,7 +830,7 @@ The mounts depend on the server: Plex's data folder read-write for Plex, and the
 - **HDR or Dolby Vision thumbnails look wrong:** see [HDR and Dolby Vision thumbnails](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/).
 - **Windows with an AMD or Intel GPU, or any Mac:** Docker can't reach those GPUs, so this project runs on CPU there. The built-in is simpler unless you run the container on a Linux host.
 - **No Docker, or you can't give a container write access to where previews are stored:** use the built-in. For Jellyfin, [off-media mode](https://mediapreviewgenerator.dev/guides/previews-readiness/#jellyfin-config-folder) needs write access to Jellyfin's config folder instead of the media.
-- **You need Plex chapter thumbnails:** optional CPU generation is available for Plex **1.43.4.x**, off by default. Check the [chapter thumbnail requirements and limits](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails).
+- **You need Plex chapter thumbnails:** optional CPU generation is available for Plex **1.43.4.x or 1.43.5.x**, off by default. Check the [chapter thumbnail requirements and limits](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails).
 - **You need a single BIF for a Roku app or one file:** a small tool such as [bifgen](https://github.com/entrez/bifgen) is enough.
 
 > [!NOTE]
@@ -960,7 +960,7 @@ Once it is running, set Plex's **Settings → Library → Generate video preview
 
 - It runs only in Docker. It has a web UI and no CLI.
 - Plex must scan a new file before its preview can be written, because the file's location in Plex's data folder only exists after the scan. The app retries automatically after 1, 2, 5, 15 and 60 minutes by default. See [Slow-backoff retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue).
-- Optional [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**; they are separate from GPU-accelerated scrubber previews.
+- Optional [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x or 1.43.5.x**; they are separate from GPU-accelerated scrubber previews.
 - On Windows only NVIDIA GPUs are accelerated, and on macOS none are. Those setups run on CPU.
 
 ## Related
@@ -1067,7 +1067,7 @@ For a separate GPU machine, first check the shared-media and output mounts in
 
 - Docker only, with a web UI and no CLI.
 - File/folder jobs and path-based webhooks can generate previews before Plex scans a file, including while Plex is offline. Publication and Plex's ability to serve the result still depend on the file's server state; see [generation without waiting for Plex](https://mediapreviewgenerator.dev/multi-server/#plex-generation-without-waiting-for-plex). Work that must wait for indexing uses the [retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue).
-- GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x**.
+- GPU acceleration applies to scrubber previews. Optional [chapter thumbnails](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) use CPU, are off by default, and currently support Plex **1.43.4.x or 1.43.5.x**.
 
 ## Related
 
@@ -1490,7 +1490,7 @@ unlock the playback feature. See Plex's [Audio Track Enhancements for Video](htt
 ## Turning it on
 
 1. Run this app on the same machine as Plex and mount Plex's config folder locally. Plex must be running. Loudness
-   supports Plex **1.43.4.x**. It does not work through the Plex helper or a network-mounted database.
+   supports Plex **1.43.4.x or 1.43.5.x**. It does not work through the Plex helper or a network-mounted database.
 2. Under **Servers → Edit → Processing → Loudness**, switch on **Analyse loudness for this server**.
 3. On the **Libraries** tab, choose movie and TV libraries in the **Loudness** column. Both start on; music and other
    non-video libraries cannot be selected.
@@ -1909,7 +1909,7 @@ A file is retried when the media server hasn't indexed it yet or a per-file fail
 ### Plex chapter thumbnails
 
 Chapter thumbnails are optional images for the chapters Plex already knows about. They are separate from the
-scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x**.
+scrubber previews and from Intro & Credits markers. This feature currently supports Plex Media Server **1.43.4.x or 1.43.5.x**.
 Plex keeps one chapter list per title, so with several versions the thumbnails come from one version, as in
 Plex. A version split into several files is skipped.
 Chapter extraction supports SDR, HDR10, HLG and Dolby Vision with a compatible HDR base layer. Dolby Vision
@@ -3468,7 +3468,7 @@ next to the badge.
 
 **What it checks:** Jellyfin must be 10.10 or newer; Plex and Emby
 are informational for scrubber previews (any recent release works). Optional Plex chapter
-registration has a separate version check and currently supports **1.43.4.x**.
+registration has a separate version check and currently supports **1.43.4.x or 1.43.5.x**.
 
 **Why it matters:** pre-10.10 Jellyfin ignores the
 `SaveTrickplayWithMedia` flag and looks for trickplay under
@@ -3914,7 +3914,7 @@ each server's API. Map the server's media paths to the paths inside this contain
 - **Emby previews:** the container needs write access beside each video for the BIF sidecar.
 - **Jellyfin trickplay:** the default writes beside the video. [Off-media mode](https://mediapreviewgenerator.dev/guides/previews-readiness/#jellyfin-config-folder) needs a writable Jellyfin config mount and the Media Preview Bridge plugin; the media may then stay read-only.
 - **Plex markers and chapter thumbnails:** the relevant [Plex helper setup](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) supports operations that must happen beside Plex. Check each feature's requirements before enabling it.
-- **Plex loudness:** this is a same-machine exception. It requires local Plex 1.43.4.x database access; helper and network-mounted database configurations are unsupported. See [Plex loudness requirements](https://mediapreviewgenerator.dev/plex-loudness-normalization/).
+- **Plex loudness:** this is a same-machine exception. It requires local Plex 1.43.4.x or 1.43.5.x database access; helper and network-mounted database configurations are unsupported. See [Plex loudness requirements](https://mediapreviewgenerator.dev/plex-loudness-normalization/).
 
 Start with one file and watch both the worker's activity and each server's saved result. A network
 share, slow disk or server indexing delay can be the limit even when the GPU has spare capacity.
@@ -4488,7 +4488,7 @@ Plex's `output.chapter_thumbnails` setting is a JSON boolean, default `false`.
 The API rejects strings such as `"false"` and numeric values. The **Chapter thumbnails** section in
 **Servers → Edit → Processing** controls it. It adds chapter images to existing Previews jobs and updates existing
 chapter image references in Plex's database. It requires a supported local Plex database or a compatible configured
-Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x**.
+Plex helper; Intro & Credits can stay off. Currently supported: Plex Media Server **1.43.4.x or 1.43.5.x**.
 See the [chapter thumbnail guide](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for setup and retry behavior.
 
 > **Runtime state, not persisted.** Whether Jellyfin's Media Preview Bridge plugin is installed
@@ -5277,7 +5277,7 @@ off until turned on per server.
 
 | Key | Type | Notes |
 |---|---|---|
-| `enabled` | bool | Default `false`. Independent of Intro & Credits and its write confirmation. Requires a local Plex 1.43.4.x database on the same machine; the Plex helper (`markers.plex.agent.enabled`) is unsupported. Setup Health checks readiness. |
+| `enabled` | bool | Default `false`. Independent of Intro & Credits and its write confirmation. Requires a local Plex 1.43.4.x or 1.43.5.x database on the same machine; the Plex helper (`markers.plex.agent.enabled`) is unsupported. Setup Health checks readiness. |
 | `library_ids` | array of strings \| `null` | Libraries it goes to. `null` = every movie and TV library. An explicit list selects video libraries only; known music and other non-video types are refused. |
 
 ### Job kind `loudness`
@@ -6609,7 +6609,7 @@ Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you hav
 
 ### Does it make chapter thumbnails too?
 
-Yes, optionally for Plex Media Server **1.43.4.x**. Chapter generation is off by default and uses CPU, separately from GPU-accelerated scrubber previews. It requires one media version and one part per item; see the [chapter thumbnail guide](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for setup and limits.
+Yes, optionally for Plex Media Server **1.43.4.x or 1.43.5.x**. Chapter generation is off by default and uses CPU, separately from GPU-accelerated scrubber previews. It requires one media version and one part per item; see the [chapter thumbnail guide](https://mediapreviewgenerator.dev/guides/#plex-chapter-thumbnails) for setup and limits.
 
 ### Do I need a GPU to use Media Preview Generator?
 

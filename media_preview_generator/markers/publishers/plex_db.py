@@ -2,7 +2,7 @@
 
 Plex has no API for intro/credits markers. It serves markers from ``taggings`` rows on its single
 ``tags(tag_type=12, tag='')`` row, and rebuilds those rows from ``media_parts.extra_data`` when it re-detects, so
-both places are written in one short transaction. Proven on PMS 1.43.4 in the lab; anything unexpected stops writes.
+both places are written in one short transaction. Proven on PMS 1.43.4 in the lab (1.43.5: same schema, see ``TESTED_PMS_VERSIONS``); anything unexpected stops writes.
 
 SQLite is only safe to share when both processes lock the very same file, so ``capability()``, every write and every
 read-back first prove that another process (Plex) holds the database open through the path this app sees; only then
@@ -67,6 +67,21 @@ SAME_HOST_PATH_ADVICE = (
 # writing to Plex's database (a Kometa-style tool) was observed holding its write lock 30.8 s, past the 30 s this was.
 # A caller that must answer sooner passes its own ``db_timeout_s`` (the Inspector's publish).
 BUSY_TIMEOUT_S = 120.0
+
+# Plex releases the direct database writers (loudness, chapter registration) were proven against. 1.43.5 has the same
+# tables and columns as 1.43.4 for everything they read or write (compared on a live 1.43.5 database, 2026-10-11).
+TESTED_PMS_VERSIONS = ("1.43.4", "1.43.5")
+TESTED_PMS_LABEL = " or ".join(f"{v}.x" for v in TESTED_PMS_VERSIONS)
+_TESTED_PMS_RE = re.compile(
+    r"(?:" + "|".join(re.escape(v) for v in TESTED_PMS_VERSIONS) + r")\.[0-9]+(?:-[A-Za-z0-9]+)?"
+)
+
+
+def is_tested_pms_version(version: object) -> bool:
+    """Whether ``version`` (as Plex's ``/identity`` reports it) is a release the database writers were proven on."""
+    return isinstance(version, str) and _TESTED_PMS_RE.fullmatch(version) is not None
+
+
 # A job's worker holds a GPU or CPU worker previews need, so its publish waits this long instead, when the job retries a
 # write the database refused a few minutes later (the checking stage, which holds no worker, keeps BUSY_TIMEOUT_S).
 WORKER_BUSY_TIMEOUT_S = 10.0
