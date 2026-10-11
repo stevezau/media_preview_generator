@@ -418,23 +418,13 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install FFmpeg + mediainfo
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: ffmpeg mediainfo
-          version: 1
-
-      - name: Verify FFmpeg + mediainfo are on PATH
-        # The apt cache action can report a hit whose restore leaves the
-        # binaries missing; the next step then dies on "ffmpeg not found on
-        # PATH" with nothing pointing at the cache as the cause (seen
-        # 2026-09-02). Fall back to a real install rather than fail the job.
+        # Plain apt-get, as in the unit job: the cache action's restore leaves
+        # /usr/bin/ffmpeg without libblas.so.3, and the integration fixtures
+        # call /usr/bin/ffmpeg directly.
         run: |
-          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v mediainfo >/dev/null 2>&1; then
-            echo "::warning::Cached apt restore did not provide ffmpeg/mediainfo — installing directly."
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg mediainfo
-          fi
-          ffmpeg -version | head -1
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg mediainfo
+          /usr/bin/ffmpeg -version | head -1
           mediainfo --Version | head -1
 
       - name: Install jellyfin-ffmpeg8 (the FFmpeg the image ships)

@@ -178,6 +178,19 @@ class HealthStore:
             ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    def reread_paths(self, server_id: str) -> dict[str, list[str]]:
+        """Item id -> the paths of its files whose preview exists but isn't showing."""
+        with self._locked() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT item_id, path FROM todo WHERE server_id = ? AND not_showing = 1 AND item_id != '' "
+                "ORDER BY item_id, path",
+                (server_id,),
+            ).fetchall()
+        paths: dict[str, list[str]] = {}
+        for item_id, path in rows:
+            paths.setdefault(item_id, []).append(path)
+        return paths
+
 
 _default: HealthStore | None = None
 _default_lock = threading.Lock()

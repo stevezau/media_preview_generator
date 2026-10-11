@@ -97,7 +97,7 @@ def test_known_item_analyze_uses_normalized_id_and_put(mock_config, item_id):
 
     assert server.refresh_preview_metadata("/media/video.mkv", item_id) is True
 
-    plex.query.assert_called_once_with("/library/metadata/42/analyze", method=plex._session.put)
+    assert _analyzed(plex) == ["42"]
     plex.library.sections.assert_not_called()
 
 
@@ -148,9 +148,18 @@ def test_hintless_notification_scans_then_analyzes_only_when_indexed(mock_config
     ]
     plex.fetchItems.assert_called_once_with("/library/sections/1/all?type=1&file=video.mkv")
     if indexed:
-        plex.query.assert_called_once_with("/library/metadata/42/analyze", method=plex._session.put)
+        assert _analyzed(plex) == ["42"]
     else:
         plex.query.assert_not_called()
+
+
+def _analyzed(plex) -> list[str]:
+    """Item ids that got an Analyze PUT, in order."""
+    return [
+        c.args[0].split("/")[3]
+        for c in plex.query.call_args_list
+        if c.args[0].endswith("/analyze") and c.kwargs.get("method") is plex._session.put
+    ]
 
 
 def _pending_output(tmp_path):
@@ -299,3 +308,139 @@ def test_old_inflight_ack_does_not_clear_new_publication_token(tmp_path):
         release_first.set()
         release_second.set()
         queue.close()
+
+
+MULTI = "/tv/Show/Season 01/Show - S01E01-E02.mkv"
+
+
+class _FakePlex:
+    """Plex's item and season listings. Analyze flags the item's parts whose file has a preview, unless Plex
+    'skips' that request; ``broken`` makes every read fail."""
+
+    def __init__(self, items: dict[str, dict], *, skipped: dict[str, int] | None = None, broken: bool = False):
+        self.items = items
+        self.skipped = dict(skipped or {})
+        self.broken = broken
+        self._session = SimpleNamespace(put=object())
+        self.query = MagicMock(side_effect=self._query)
+
+    def _video(self, key: str) -> str:
+        item = self.items[key]
+        parts = "".join(f'<Part file="{file}"{FLAG if file in item["flagged"] else ""} />' for file in item["files"])
+        parent = item.get("parent", "")
+        return (
+            f'<Video ratingKey="{key}" type="{item["type"]}" parentRatingKey="{parent}"><Media>{parts}</Media></Video>'
+        )
+
+    def _query(self, path: str, method=None):
+        import xml.etree.ElementTree as ET
+
+        key = path.split("/")[3]
+        if path.endswith("/analyze"):
+            if self.skipped.get(key, 0) > 0:
+                self.skipped[key] -= 1
+            else:
+                item = self.items[key]
+                item["flagged"] |= set(item.get("previews", item["files"]))
+            return None
+        if self.broken:
+            raise ConnectionError("Plex is busy")
+        if path.endswith("/children"):
+            body = "".join(self._video(k) for k, item in self.items.items() if item.get("parent") == key)
+        else:
+            body = self._video(key)
+        return ET.fromstring(f"<MediaContainer>{body}</MediaContainer>")
+
+
+FLAG = ' indexes="sd"'
+
+
+def _episode(*files, parent="7"):
+    return {"type": "episode", "parent": parent, "files": list(files), "flagged": set()}
+
+
+def _movie(*files, previews=None):
+    return {"type": "movie", "files": list(files), "flagged": set(), "previews": previews or list(files)}
+
+
+@pytest.fixture
+def no_sleep():
+    with patch("media_preview_generator.servers.plex.time.sleep") as sleep:
+        yield sleep
+
+
+class TestAnalyzeIsConfirmed:
+    def _server(self, mock_config, fake):
+        mock_config.path_mappings = []
+        server = PlexServer(mock_config)
+        server._plex = fake
+        return server
+
+    def test_every_dark_episode_sharing_the_file_is_analyzed(self, mock_config, no_sleep):
+        fake = _FakePlex(
+            {"41": _episode(MULTI), "42": _episode(MULTI), "43": _episode("/tv/Show/Season 01/Show - S01E03.mkv")}
+        )
+
+        assert self._server(mock_config, fake).refresh_preview_metadata(MULTI, "41") is True
+
+        assert _analyzed(fake) == ["41", "42"]
+        no_sleep.assert_not_called()
+
+    @pytest.mark.parametrize("sibling", ["shown", "own-file"])
+    def test_an_episode_already_showing_or_in_its_own_file_is_left_alone(self, mock_config, no_sleep, sibling):
+        second = _episode(MULTI if sibling == "shown" else "/tv/Show/Season 01/Show - S01E02.mkv")
+        if sibling == "shown":
+            second["flagged"].add(MULTI)
+        fake = _FakePlex({"41": _episode(MULTI), "42": second})
+
+        assert self._server(mock_config, fake).refresh_preview_metadata(MULTI, "41") is True
+
+        assert _analyzed(fake) == ["41"]
+
+    def test_a_movie_never_lists_a_season(self, mock_config, no_sleep):
+        fake = _FakePlex({"5": _movie("/m/Film/Film.mkv")})
+
+        assert self._server(mock_config, fake).refresh_preview_metadata("/m/Film/Film.mkv", "5") is True
+
+        assert _analyzed(fake) == ["5"]
+        assert not [c for c in fake.query.call_args_list if c.args[0].endswith("/children")]
+
+    def test_a_skipped_analyze_is_sent_again_for_the_dark_items_only(self, mock_config, no_sleep):
+        fake = _FakePlex({"41": _episode(MULTI), "42": _episode(MULTI)}, skipped={"42": 1})
+
+        assert self._server(mock_config, fake).refresh_preview_metadata(MULTI, "41") is True
+
+        assert _analyzed(fake) == ["41", "42", "42"]
+        no_sleep.assert_called_once()
+
+    def test_still_dark_after_the_retry_still_counts_as_analyzed(self, mock_config, no_sleep):
+        # Analyze finished either way, so chapters may register; Library health lists the file.
+        fake = _FakePlex({"5": _movie("/m/Film/Film.mkv")}, skipped={"5": 9})
+
+        assert self._server(mock_config, fake).refresh_preview_metadata("/m/Film/Film.mkv", "5") is True
+
+        assert _analyzed(fake) == ["5", "5"]
+
+    def test_another_version_without_a_preview_is_not_this_file(self, mock_config, no_sleep):
+        hd, uhd = "/movies/Film (2000)/Film (2000).mkv", "/movies-4k/Film (2000)/Film (2000).mkv"
+        fake = _FakePlex({"5": _movie(hd, uhd, previews=[hd])})
+
+        assert self._server(mock_config, fake).refresh_preview_metadata(hd, "5") is True
+
+        assert _analyzed(fake) == ["5"]
+        no_sleep.assert_not_called()
+
+    def test_unmapped_roots_match_on_folder_and_name(self, mock_config, no_sleep):
+        fake = _FakePlex({"5": _movie("/plex/m/Film/Film.mkv")}, skipped={"5": 1})
+
+        self._server(mock_config, fake).refresh_preview_metadata("/data/m/Film/Film.mkv", "5")
+
+        assert _analyzed(fake) == ["5", "5"]
+
+    @pytest.mark.parametrize("case", ["plex-unreadable", "file-not-on-item"])
+    def test_when_plex_cannot_say_one_analyze_is_enough(self, mock_config, no_sleep, case):
+        fake = _FakePlex({"5": _movie("/m/Other/Other.mkv")}, broken=case == "plex-unreadable")
+
+        assert self._server(mock_config, fake).refresh_preview_metadata("/m/Film/Film.mkv", "5") is True
+
+        assert _analyzed(fake) == ["5"]

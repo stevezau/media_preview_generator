@@ -361,7 +361,7 @@
         const rows = notShowingByLibrary(server);
         const total = rows.reduce(function (sum, row) { return sum + row.count; }, 0);
         $('lhFixTitle').textContent = `Ask Plex to show ${n(total)} previews`;
-        $('lhFixBody').innerHTML = `<p>These previews are already made. Plex only starts showing a preview after it re-reads the video, and it hasn't re-read these. This asks Plex to re-read each one. Nothing new is made.</p>
+        $('lhFixBody').innerHTML = `<p>These previews are already made. Plex only starts showing a preview after it re-reads the video, and it hasn't re-read these. This asks Plex to re-read each one. No previews are made again. A re-read clears chapter thumbnails, so if those are on, a preview job adds them back afterwards.</p>
             <dl class="lh-kv">${rows.map(function (row) { return `<dt>${escapeHtml(row.name)}</dt><dd>${n(row.count)}</dd>`; }).join('')}</dl>
             <p class="mb-0">Plex re-reads one video at a time and can take a few seconds each, so thousands take hours. It runs in the background; you can cancel it on this page.</p>`;
         const start = $('lhFixStart');

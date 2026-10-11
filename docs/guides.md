@@ -522,7 +522,8 @@ or Intro & Credits. There is one card per server and one row per library, with t
   runs, they show the last check's numbers.
 - **"N previews are made but Plex isn't showing them."** The preview file exists, but Plex hasn't re-read the video
   since. **Review & fix** asks Plex to re-read those videos one at a time, in the background. Plex can take a few
-  seconds each, so thousands take hours. Nothing new is made. The bell at the top of every page shows the same notice
+  seconds each, so thousands take hours. No previews are made again. A re-read clears chapter thumbnails, so if those
+  are on, a preview job adds them back afterwards. The bell at the top of every page shows the same notice
   with a link to the fix; dismiss it there if a few never clear. A failed check shows in the bell too.
 
 ### Production Server

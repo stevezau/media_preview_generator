@@ -12,6 +12,8 @@ from __future__ import annotations
 import html
 import json
 import threading
+import time
+import unicodedata
 from collections.abc import Collection, Iterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -55,6 +57,11 @@ SERVER_MARKER_DETECTION_PREFS: dict[str, str] = {
     "intro": "GenerateIntroMarkerBehavior",
     "credits": "GenerateCreditsMarkerBehavior",
 }
+
+# Plex sometimes answers Analyze without running it (seen while it was busy adding new items); one more
+# request after a short pause usually works.
+_ANALYZE_ATTEMPTS = 2
+_ANALYZE_RETRY_DELAY_S = 2.0
 
 
 def _pref_bool(value: Any) -> bool | None:
@@ -2091,7 +2098,9 @@ class PlexServer(MediaServer):
         indexed item's ``indexes`` flag can remain unset until Analyze runs.
         Paths without an item hint get a best-effort scan and lookup first;
         failure here never prevents local generation or publication.
-        Return True only after Plex accepts Analyze; unresolved items remain pending.
+        Every episode sharing the file is analyzed, and a request Plex skipped is sent once more.
+        Return True once Plex has run Analyze (it answers only after finishing, so chapter registration can
+        follow); unresolved items remain pending.
         """
         if not item_id:
             self.trigger_refresh(item_id=None, remote_path=canonical_path)
@@ -2107,8 +2116,74 @@ class PlexServer(MediaServer):
         if not bare_id.isdecimal():
             raise ValueError("Plex preview notification requires a numeric item ID")
         plex = self._connect()
-        plex.query(f"/library/metadata/{bare_id}/analyze", method=plex._session.put)
+        targets = [bare_id]
+        try:
+            before = self._items_holding_file(plex, bare_id, canonical_path)
+            targets += [key for key, shown in before.items() if key != bare_id and not shown]
+        except Exception as exc:
+            logger.debug("Could not list the other episodes in {} for Plex Analyze: {}", canonical_path, exc)
+        for attempt in range(_ANALYZE_ATTEMPTS):
+            if attempt:
+                time.sleep(_ANALYZE_RETRY_DELAY_S)
+            for key in targets:
+                plex.query(f"/library/metadata/{key}/analyze", method=plex._session.put)
+            # Plex finishes Analyze before it answers, so the flag is set by now unless Plex skipped the request.
+            try:
+                after = self._items_holding_file(plex, bare_id, canonical_path)
+            except Exception as exc:
+                logger.debug("Could not confirm Plex shows the previews for {}: {}", canonical_path, exc)
+                return True
+            targets = [key for key, shown in after.items() if not shown]
+            if not targets:
+                return True
+        logger.warning(
+            "{} isn't showing the previews for {} after two re-read requests. "
+            "Library health lists it, and its Review & fix asks again.",
+            self.name,
+            canonical_path,
+        )
         return True
+
+    def _items_holding_file(self, plex: Any, bare_id: str, canonical_path: str) -> dict[str, bool]:
+        """Map each Plex item holding this file to whether its copy of the part carries the preview flag.
+
+        Plex keeps a separate item, with its own copy of the part, for each episode of a multi-episode file, and
+        Analyze on one episode leaves the others unflagged, so their previews never show. The item is missing
+        from the result when this file can't be told apart among its parts.
+        """
+        from ..config.paths import expand_path_mapping_candidates
+
+        exact = {
+            unicodedata.normalize("NFC", path)
+            for path in expand_path_mapping_candidates(canonical_path, self.path_mappings)
+        }
+        tail = "/".join(canonical_path.replace("\\", "/").rstrip("/").split("/")[-2:])
+
+        def flagged(video: Any) -> bool | None:
+            parts = list(video.iter("Part"))
+            files = [unicodedata.normalize("NFC", str(part.get("file") or "").replace("\\", "/")) for part in parts]
+            mine = [part for part, file in zip(parts, files, strict=True) if file in exact]
+            if not mine:
+                # Roots differ when no mapping is set up; folder + file name only counts when it picks one part,
+                # so a second version of the same film (another root, same naming) is never mistaken for this one.
+                mine = [part for part, file in zip(parts, files, strict=True) if file.endswith("/" + tail)]
+                if len(mine) != 1:
+                    return None
+            return all(part.get("indexes") == "sd" for part in mine)
+
+        items: dict[str, bool] = {}
+        video = plex.query(f"/library/metadata/{bare_id}").find("Video")
+        if video is None or (own := flagged(video)) is None:
+            return items
+        items[bare_id] = own
+        parent = str(video.get("parentRatingKey") or "") if video.get("type") == "episode" else ""
+        if parent.isdecimal():
+            for sibling in plex.query(f"/library/metadata/{parent}/children").iter("Video"):
+                key = str(sibling.get("ratingKey") or "")
+                shown = flagged(sibling)
+                if key.isdecimal() and key != bare_id and shown is not None:
+                    items[key] = shown
+        return items
 
     def get_bundle_metadata(self, item_id: str) -> list[tuple[str, str]]:
         """Return ``(bundle_hash, remote_path)`` for every MediaPart of an item (see :meth:`get_bundle_parts`)."""

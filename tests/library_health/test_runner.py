@@ -672,3 +672,79 @@ def test_library_removed_between_runs_is_not_carried(store, monkeypatch, plex_se
     stored = store.load()[0]
     assert [lib.library_id for lib in stored.libraries] == ["1"]
     assert store.list_todo("a", "2", Feature.PREVIEWS)[0] == 0
+
+
+class TestChapterThumbnailsAfterReread:
+    """Plex drops registered chapter thumbnails when it re-reads an item, so a preview job puts them back."""
+
+    def _runner(self, store, monkeypatch, *, chapters=True, sleep=lambda _s: None, starter=None):
+        store.replace_server(ServerResult("p", "Plex", "plex", [], [_not_showing("11"), _not_showing("12")]))
+        monkeypatch.setattr(runner_module.plex_counter, "count_plex", MagicMock(return_value=_result("p")))
+        cfg = _cfg("p")
+        cfg.output = {"chapter_thumbnails": chapters}
+        starter = starter or MagicMock()
+        runner = HealthRunner(
+            store,
+            registry_factory=lambda: FakeRegistry([(cfg, MagicMock())]),
+            markers_db_path=lambda: "/nope",
+            sleep=sleep,
+            start_files_job=starter,
+        )
+        return runner, cfg, starter
+
+    def test_re_read_files_get_a_preview_job(self, store, monkeypatch):
+        runner, cfg, starter = self._runner(store, monkeypatch)
+
+        runner.start_reread("p")
+        runner.wait(5)
+
+        starter.assert_called_once_with(cfg, ["/m/11", "/m/12"], "Chapter thumbnails after Plex re-read")
+
+    def test_no_job_when_chapter_thumbnails_are_off(self, store, monkeypatch):
+        runner, _cfg_, starter = self._runner(store, monkeypatch, chapters=False)
+
+        runner.start_reread("p")
+        runner.wait(5)
+
+        starter.assert_not_called()
+
+    def test_cancel_still_restores_what_was_re_read(self, store, monkeypatch):
+        holder = {}
+        runner, cfg, starter = self._runner(store, monkeypatch, sleep=lambda _s: holder["runner"].cancel())
+        holder["runner"] = runner
+
+        runner.start_reread("p")
+        runner.wait(5)
+
+        starter.assert_called_once_with(cfg, ["/m/11"], "Chapter thumbnails after Plex re-read")
+
+    def test_a_job_that_cannot_start_still_rechecks(self, store, monkeypatch):
+        runner, _cfg_, _starter = self._runner(store, monkeypatch, starter=MagicMock(side_effect=RuntimeError("full")))
+
+        runner.start_reread("p")
+        runner.wait(5)
+
+        runner_module.plex_counter.count_plex.assert_called_once()
+        assert runner.last_error() == ""
+
+
+def test_start_files_job_splits_into_jobs_of_a_thousand(monkeypatch):
+    from media_preview_generator.web import jobs as jobs_module
+    from media_preview_generator.web.routes import job_runner
+
+    manager = MagicMock()
+    manager.create_job.side_effect = lambda **kw: SimpleNamespace(id=f"job-{manager.create_job.call_count}")
+    started = []
+    monkeypatch.setattr(jobs_module, "get_job_manager", lambda: manager)
+    monkeypatch.setattr(job_runner, "_start_job_async", lambda job_id, overrides: started.append((job_id, overrides)))
+    cfg = SimpleNamespace(id="p", name="Plex", type=ServerType.PLEX)
+    paths = [f"/m/{n}" for n in range(2001)]
+
+    runner_module.start_files_job(cfg, paths, "Chapter thumbnails after Plex re-read")
+
+    assert [len(o["webhook_paths"]) for _id, o in started] == [1000, 1000, 1]
+    assert [o["webhook_paths"] for _id, o in started][2] == ["/m/2000"]
+    assert all(o["server_id"] == "p" and o["force_generate"] is False for _id, o in started)
+    first = manager.create_job.call_args_list[0].kwargs
+    assert (first["server_id"], first["server_type"], first["priority"]) == ("p", "plex", jobs_module.PRIORITY_LOW)
+    assert first["library_name"] == "Chapter thumbnails after Plex re-read: 1,000 files"

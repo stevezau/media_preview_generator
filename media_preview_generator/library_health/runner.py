@@ -18,7 +18,8 @@ from .markers_db import nothing_found
 from .models import CellState, CheckCancelled, CheckProgress, ServerResult
 from .store import HealthStore, default_store
 
-REREAD_INTERVAL_S = 0.5  # gentle on Plex: it analyzes each item on its own schedule
+REREAD_INTERVAL_S = 0.5  # Plex analyzes before it answers; the pause leaves it room for everything else
+FILES_PER_JOB = 1000  # the same cap the page uses before it switches to a whole-library job
 
 _BUSY_MESSAGE = "A check or re-read is already running"
 _NO_REGISTRY_MESSAGE = "Could not read your media servers"
@@ -42,6 +43,7 @@ class HealthRunner:
         registry_factory: Callable[[], ServerRegistry | None],
         markers_db_path: Callable[[], str],
         sleep: Callable[[float], None] = time.sleep,
+        start_files_job: Callable[[ServerConfig, list[str], str], None] | None = None,
     ) -> None:
         """Create a runner.
 
@@ -50,11 +52,14 @@ class HealthRunner:
             registry_factory: Builds the live server registry, or returns None when it can't be read.
             markers_db_path: Returns the path of the markers database.
             sleep: Pause function used between re-read calls (replaced in tests).
+            start_files_job: Starts a preview job for ``(server, paths, title)``; used after a re-read to put
+                back the chapter thumbnails Plex drops when it re-reads an item. None skips that.
         """
         self._store = store
         self._registry_factory = registry_factory
         self._markers_db_path = markers_db_path
         self._sleep = sleep
+        self._start_files_job = start_files_job
         # _lock guards every field below it; counters call back from the worker thread.
         self._lock = threading.Lock()
         self._current: CheckProgress | None = None
@@ -96,6 +101,7 @@ class HealthRunner:
             return False, RereadRefusal("That server isn't available", 404)
         if cfg.type is not ServerType.PLEX:
             return False, RereadRefusal("Only Plex servers can be asked to re-read", 400)
+        paths = self._store.reread_paths(server_id)
         item_ids = list(dict.fromkeys(item_id for item_id, _library in self._store.reread_items(server_id)))
         if not item_ids:
             return False, RereadRefusal("Nothing to re-read", 400)
@@ -105,7 +111,7 @@ class HealthRunner:
                 return False, busy
             progress = self._begin("reread", "manual")
             progress.server_name = cfg.name
-            self._launch(lambda: self._reread(registry, cfg, server, item_ids))
+            self._launch(lambda: self._reread(registry, cfg, server, item_ids, paths))
             return True, replace(progress)
 
     def cancel(self) -> bool:
@@ -287,8 +293,15 @@ class HealthRunner:
                 library.total = max(library.total, old_library.total)
                 result.todo.extend(self._store.todo_for(result.server_id, library.library_id, feature))
 
-    def _reread(self, registry: ServerRegistry, cfg: ServerConfig, server: object, item_ids: list[str]) -> None:
-        """Send Plex an analyze request per item, slowly, then re-check that server."""
+    def _reread(
+        self,
+        registry: ServerRegistry,
+        cfg: ServerConfig,
+        server: object,
+        item_ids: list[str],
+        paths: dict[str, list[str]],
+    ) -> None:
+        """Send Plex an analyze request per item, slowly, put chapter thumbnails back, then re-check that server."""
         step = "Asking Plex to re-read"
         total = len(item_ids)
         self._report(step, 0, total)
@@ -302,6 +315,7 @@ class HealthRunner:
                 logger.info("Plex re-read cancelled after {} of {} items", index, total)
                 # Plex was already asked about these, so they are no longer "not showing" as far as we know.
                 self._store.remove_not_showing(cfg.id, sent)
+                self._restore_chapters(cfg, sent, paths)
                 return
             if not item_id.isdecimal():
                 logger.warning("Skipping re-read of non-numeric Plex item id {!r}", item_id)
@@ -315,7 +329,23 @@ class HealthRunner:
                     logger.warning("Plex re-read failed for item {}: {}", item_id, exc)
             self._report(step, index + 1, total)
         logger.info("Asked Plex to re-read {} items ({} failed)", total, failures)
+        self._restore_chapters(cfg, sent, paths)
         self._check_servers([cfg.id], reason="after_reread", registry=registry)
+
+    def _restore_chapters(self, cfg: ServerConfig, item_ids: list[str], paths: dict[str, list[str]]) -> None:
+        """Re-read drops the chapter thumbnails the app registered, so a preview job registers them again.
+
+        The previews already exist, so the job skips them and only redoes chapter thumbnails.
+        """
+        if self._start_files_job is None or cfg.output.get("chapter_thumbnails") is not True:
+            return
+        files = list(dict.fromkeys(path for item_id in item_ids for path in paths.get(item_id, ())))
+        if not files:
+            return
+        try:
+            self._start_files_job(cfg, files, "Chapter thumbnails after Plex re-read")
+        except Exception:
+            logger.exception("Could not start the job that puts back chapter thumbnails after the Plex re-read")
 
 
 def _countable_cells(result: ServerResult) -> list:
@@ -362,8 +392,28 @@ def get_runner() -> HealthRunner:
                 default_store(),
                 registry_factory=_settings_registry,
                 markers_db_path=default_markers_db_path,
+                start_files_job=start_files_job,
             )
         return _runner
+
+
+def start_files_job(cfg: ServerConfig, paths: list[str], title: str) -> None:
+    """Start preview jobs for these files on this server, at most ``FILES_PER_JOB`` files each."""
+    from ..web.jobs import PRIORITY_LOW, get_job_manager
+    from ..web.routes.job_runner import _start_job_async
+
+    for start in range(0, len(paths), FILES_PER_JOB):
+        chunk = paths[start : start + FILES_PER_JOB]
+        overrides = {"webhook_paths": chunk, "force_generate": False, "server_id": cfg.id}
+        job = get_job_manager().create_job(
+            library_name=f"{title}: {len(chunk):,} files",
+            config={"webhook_paths": chunk, "force_generate": False},
+            priority=PRIORITY_LOW,
+            server_id=cfg.id,
+            server_name=cfg.name,
+            server_type=cfg.type.value,
+        )
+        _start_job_async(job.id, overrides)
 
 
 def nightly_check() -> None:
