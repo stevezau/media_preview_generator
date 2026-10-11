@@ -184,7 +184,8 @@ def test_damaged_index_reuses_only_source_bound_bif(synthetic_movie, tmp_path, m
     source = tmp_path / "damaged.mkv"
     _damage_index(valid, source, damage)
     fingerprint = get_source_fingerprint(source)
-    assert inspect_seek_index(str(source), fingerprint, [4000])
+    defect = inspect_seek_index(str(source), fingerprint, [4000])
+    assert defect
     folder = tmp_path / "Contents" / "Chapters"
     frames = tmp_path / "frames"
     frames.mkdir()
@@ -229,6 +230,9 @@ def test_damaged_index_reuses_only_source_bound_bif(synthetic_movie, tmp_path, m
     plan = chapters.ChapterPlan(object(), str(source), fingerprint, folder, {}, target)
     register = MagicMock()
     monkeypatch.setattr("media_preview_generator.servers.plex_chapters.register_chapters", register)
+    # The probe gives up after five seconds by design, and a loaded CI runner can hit that; reuse the
+    # verdict proven above so this test covers what publish_chapters does with it.
+    monkeypatch.setattr(chapters, "inspect_seek_index", lambda *_args, **_kwargs: defect)
     monkeypatch.setattr(
         chapters,
         "extract_chapter_frame",

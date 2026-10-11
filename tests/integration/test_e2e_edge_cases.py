@@ -85,6 +85,8 @@ class TestPartialFailure:
         if emby_sidecar.exists():
             emby_sidecar.unlink()
         trickplay_dir = JellyfinTrickplayAdapter.trickplay_dir(canonical)
+        # Sheets left by an earlier Jellyfin test would make the publisher skip instead of writing.
+        shutil.rmtree(trickplay_dir, ignore_errors=True)
         blocker = trickplay_dir.parent / f".{trickplay_dir.name}.staging"
         shutil.rmtree(blocker, ignore_errors=True)
         blocker.write_text("not a directory")
@@ -290,6 +292,7 @@ class TestServerIdentityDisambiguation:
         should pick that one.
         """
         from media_preview_generator.web.app import create_app
+        from media_preview_generator.web.jobs import get_job_manager
         from media_preview_generator.web.settings_manager import (
             get_settings_manager,
             reset_settings_manager,
@@ -386,16 +389,14 @@ class TestServerIdentityDisambiguation:
                 ),
             )
 
-            assert response.status_code == 200, response.get_data(as_text=True)
+            # Webhooks queue a job (202) since delays came to every route (#340); the job's
+            # owner is what the identity match decided.
+            assert response.status_code == 202, response.get_data(as_text=True)
             body = response.get_json()
             assert body["kind"] == "emby"
-            # Only emby-A should publish — emby-B has wrong identity
-            # AND wrong libraries (empty), so it's not in the
-            # publisher list.
-            publisher_ids = [p["server_id"] for p in body.get("publishers", [])]
-            assert "emby-A" in publisher_ids
-            assert "emby-B" not in publisher_ids
-            assert sidecar.exists()
+            job = get_job_manager().get_job(body["job_id"])
+            assert job is not None
+            assert job.server_id == "emby-A"
         finally:
             if sidecar.exists():
                 sidecar.unlink()

@@ -25,11 +25,11 @@ from __future__ import annotations
 
 import shutil
 import time
-from pathlib import Path
 
 import pytest
 import requests
 
+from media_preview_generator.output.jellyfin_trickplay import JellyfinTrickplayAdapter
 from media_preview_generator.processing.multi_server import process_canonical_path
 from media_preview_generator.servers import ServerRegistry
 
@@ -118,7 +118,7 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
         jf_url = jellyfin_credentials["JELLYFIN_URL"]
         jf_token = jellyfin_credentials["JELLYFIN_ACCESS_TOKEN"]
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        trickplay_dir = Path(canonical).parent / "trickplay"
+        trickplay_dir = JellyfinTrickplayAdapter.trickplay_dir(canonical)
         if trickplay_dir.exists():
             shutil.rmtree(trickplay_dir)
 
@@ -133,7 +133,7 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
             gpu_device_path=None,
         )
         assert result.publishers, "no publishers ran"
-        assert (trickplay_dir / "Test Movie H264 (2024)-320.json").exists()
+        assert (trickplay_dir / "320 - 10x10" / "0.jpg").exists()
 
         try:
             # ----- 2. Apply the fix via the unified health-check -----

@@ -297,4 +297,5 @@ class TestEmbyTriggerRefresh:
         server.trigger_refresh(item_id=None, remote_path=canonical)
 
         assert succeeded, "Emby rejected the refresh nudge (see the logged warning)"
-        assert all(path.startswith("/em-media/Movies/") for path in succeeded), succeeded
+        # The unmapped path is nudged too (multi-mount installs); what matters is that the mapped one landed.
+        assert any(path.startswith("/em-media/Movies/") for path in succeeded), succeeded

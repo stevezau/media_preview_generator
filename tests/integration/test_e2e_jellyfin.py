@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import json
 import shutil
-from pathlib import Path
 
 import pytest
 
+from media_preview_generator.output.jellyfin_trickplay import JellyfinTrickplayAdapter
 from media_preview_generator.processing.multi_server import (
     MultiServerStatus,
     PublisherStatus,
@@ -94,11 +94,11 @@ class TestLiveJellyfinConnection:
 @pytest.mark.integration
 @pytest.mark.slow
 class TestLiveJellyfinTrickplay:
-    """Real FFmpeg → real trickplay tile-grid + manifest.json for Jellyfin."""
+    """Real FFmpeg → real trickplay tile sheets in Jellyfin's ``<name>.trickplay/`` layout."""
 
-    def test_trickplay_lands_with_tile_sheets_and_manifest(self, jf_registry, live_config, media_root):
+    def test_trickplay_lands_with_tile_sheets(self, jf_registry, live_config, media_root):
         canonical = str(media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv")
-        trickplay_dir = Path(canonical).parent / "trickplay"
+        trickplay_dir = JellyfinTrickplayAdapter.trickplay_dir(canonical)
 
         # Clean up any leftovers so we can assert the tests created them.
         if trickplay_dir.exists():
@@ -116,27 +116,14 @@ class TestLiveJellyfinTrickplay:
             published = next(p for p in result.publishers if p.status is PublisherStatus.PUBLISHED)
             assert published.adapter_name == "jellyfin_trickplay"
 
-            # Manifest exists and is valid JSON keyed by Jellyfin item id.
-            manifest = trickplay_dir / "Test Movie H264 (2024)-320.json"
-            assert manifest.exists(), f"manifest missing at {manifest}"
-            data = json.loads(manifest.read_text())
-            assert "Trickplay" in data
-            # Manifest must be keyed by a real Jellyfin item id.
-            item_ids = list(data["Trickplay"].keys())
-            assert item_ids, data
-            (item_id,) = item_ids
-            info = data["Trickplay"][item_id]["320"]
-            assert info["TileWidth"] == 10
-            assert info["TileHeight"] == 10
-            assert info["Width"] > 0
-            assert info["ThumbnailCount"] > 0
-            assert info["Interval"] == 5000
-
-            # Sheets directory has 0.jpg (fewer than 100 frames → 1 sheet).
-            sheets_dir = trickplay_dir / "Test Movie H264 (2024)-320"
+            # Jellyfin 10.10+ builds its own TrickplayInfo from the sheets; no manifest is written.
+            assert not list(trickplay_dir.parent.glob("*-320.json"))
+            # Fewer than 100 frames → a single 10x10 sheet, 0.jpg.
+            sheets_dir = trickplay_dir / "320 - 10x10"
             assert sheets_dir.is_dir()
-            sheets = sorted(sheets_dir.iterdir())
-            assert sheets and sheets[0].name == "0.jpg"
+            sheets = sorted(f.name for f in sheets_dir.iterdir() if f.suffix == ".jpg")
+            assert sheets == ["0.jpg"]
+            assert (sheets_dir / "0.jpg").read_bytes()[:2] == b"\xff\xd8"
         finally:
             if trickplay_dir.exists():
                 shutil.rmtree(trickplay_dir)
