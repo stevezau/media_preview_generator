@@ -45,7 +45,7 @@ class HealthRunner:
         registry_factory: Callable[[], ServerRegistry | None],
         markers_db_path: Callable[[], str],
         sleep: Callable[[float], None] = time.sleep,
-        start_files_job: Callable[[ServerConfig, list[str], str], None] | None = None,
+        start_files_job: Callable[[ServerConfig, list[tuple[str, str]], str], None] | None = None,
     ) -> None:
         """Create a runner.
 
@@ -54,8 +54,8 @@ class HealthRunner:
             registry_factory: Builds the live server registry, or returns None when it can't be read.
             markers_db_path: Returns the path of the markers database.
             sleep: Pause function used between re-read calls (replaced in tests).
-            start_files_job: Starts a preview job for ``(server, paths, title)``; used after a re-read to put
-                back the chapter thumbnails Plex drops when it re-reads an item. None skips that.
+            start_files_job: Starts preview jobs for ``(server, [(path, Plex item id)], title)``; used after a
+                re-read to put back the chapter thumbnails Plex drops when it re-reads an item. None skips that.
         """
         self._store = store
         self._registry_factory = registry_factory
@@ -346,7 +346,7 @@ class HealthRunner:
         """
         if self._start_files_job is None or cfg.output.get("chapter_thumbnails") is not True:
             return
-        files = list(dict.fromkeys(path for item_id in item_ids for path in paths.get(item_id, ())))
+        files = list(dict.fromkeys((path, item_id) for item_id in item_ids for path in paths.get(item_id, ())))
         if not files:
             return
         try:
@@ -404,23 +404,38 @@ def get_runner() -> HealthRunner:
         return _runner
 
 
-def start_files_job(cfg: ServerConfig, paths: list[str], title: str) -> None:
-    """Start preview jobs for these files on this server, at most ``FILES_PER_JOB`` files each."""
+def start_files_job(cfg: ServerConfig, files: list[tuple[str, str]], title: str) -> None:
+    """Start preview jobs for these ``(path, Plex item id)`` pairs on this server.
+
+    The item id goes with each path because a file holding several episodes is one Plex item per episode, and
+    without it the chapter step can't tell which one is meant and skips the file. A job carries one item per
+    path, so each further episode of a file goes into the next job; each job holds at most ``FILES_PER_JOB``.
+    """
     from ..web.jobs import PRIORITY_LOW, get_job_manager
     from ..web.routes.job_runner import _start_job_async
 
-    for start in range(0, len(paths), FILES_PER_JOB):
-        chunk = paths[start : start + FILES_PER_JOB]
-        overrides = {"webhook_paths": chunk, "force_generate": False, "server_id": cfg.id}
+    jobs: list[dict[str, str]] = []
+    for path, item_id in dict.fromkeys(files):
+        job_files = next((j for j in jobs if path not in j and len(j) < FILES_PER_JOB), None)
+        if job_files is None:
+            job_files = {}
+            jobs.append(job_files)
+        job_files[path] = item_id
+    for job_files in jobs:
+        config = {
+            "webhook_paths": list(job_files),
+            "webhook_item_id_hints": {path: {cfg.id: item_id} for path, item_id in job_files.items()},
+            "force_generate": False,
+        }
         job = get_job_manager().create_job(
-            library_name=f"{title}: {len(chunk):,} files",
-            config={"webhook_paths": chunk, "force_generate": False},
+            library_name=f"{title}: {len(job_files):,} files",
+            config=config,
             priority=PRIORITY_LOW,
             server_id=cfg.id,
             server_name=cfg.name,
             server_type=cfg.type.value,
         )
-        _start_job_async(job.id, overrides)
+        _start_job_async(job.id, {**config, "server_id": cfg.id})
 
 
 def nightly_check() -> None:

@@ -698,7 +698,9 @@ class TestChapterThumbnailsAfterReread:
         runner.start_reread("p")
         runner.wait(5)
 
-        starter.assert_called_once_with(cfg, ["/m/11", "/m/12"], "Chapter thumbnails after Plex re-read")
+        starter.assert_called_once_with(
+            cfg, [("/m/11", "11"), ("/m/12", "12")], "Chapter thumbnails after Plex re-read"
+        )
 
     def test_no_job_when_chapter_thumbnails_are_off(self, store, monkeypatch):
         runner, _cfg_, starter = self._runner(store, monkeypatch, chapters=False)
@@ -716,7 +718,7 @@ class TestChapterThumbnailsAfterReread:
         runner.start_reread("p")
         runner.wait(5)
 
-        starter.assert_called_once_with(cfg, ["/m/11"], "Chapter thumbnails after Plex re-read")
+        starter.assert_called_once_with(cfg, [("/m/11", "11")], "Chapter thumbnails after Plex re-read")
 
     def test_thumbnails_go_back_in_batches_while_the_re_read_runs(self, store, monkeypatch):
         monkeypatch.setattr(runner_module, "RESTORE_EVERY", 2)
@@ -726,7 +728,11 @@ class TestChapterThumbnailsAfterReread:
         runner.start_reread("p")
         runner.wait(5)
 
-        assert [c.args[1] for c in starter.call_args_list] == [["/m/11", "/m/12"], ["/m/13", "/m/14"], ["/m/15"]]
+        assert [[p for p, _ in c.args[1]] for c in starter.call_args_list] == [
+            ["/m/11", "/m/12"],
+            ["/m/13", "/m/14"],
+            ["/m/15"],
+        ]
         assert all(c.args[0] is cfg for c in starter.call_args_list)
 
     def test_cancel_restores_only_the_batch_not_yet_restored(self, store, monkeypatch):
@@ -746,7 +752,7 @@ class TestChapterThumbnailsAfterReread:
         runner.start_reread("p")
         runner.wait(5)
 
-        assert [c.args[1] for c in starter.call_args_list] == [["/m/11", "/m/12"], ["/m/13"]]
+        assert [[p for p, _ in c.args[1]] for c in starter.call_args_list] == [["/m/11", "/m/12"], ["/m/13"]]
 
     def test_a_job_that_cannot_start_still_rechecks(self, store, monkeypatch):
         runner, _cfg_, _starter = self._runner(store, monkeypatch, starter=MagicMock(side_effect=RuntimeError("full")))
@@ -758,7 +764,7 @@ class TestChapterThumbnailsAfterReread:
         assert runner.last_error() == ""
 
 
-def test_start_files_job_splits_into_jobs_of_a_thousand(monkeypatch):
+def _capture_jobs(monkeypatch):
     from media_preview_generator.web import jobs as jobs_module
     from media_preview_generator.web.routes import job_runner
 
@@ -767,14 +773,36 @@ def test_start_files_job_splits_into_jobs_of_a_thousand(monkeypatch):
     started = []
     monkeypatch.setattr(jobs_module, "get_job_manager", lambda: manager)
     monkeypatch.setattr(job_runner, "_start_job_async", lambda job_id, overrides: started.append((job_id, overrides)))
-    cfg = SimpleNamespace(id="p", name="Plex", type=ServerType.PLEX)
-    paths = [f"/m/{n}" for n in range(2001)]
+    return manager, started, jobs_module
 
-    runner_module.start_files_job(cfg, paths, "Chapter thumbnails after Plex re-read")
+
+def test_start_files_job_splits_into_jobs_of_a_thousand(monkeypatch):
+    manager, started, jobs_module = _capture_jobs(monkeypatch)
+    cfg = SimpleNamespace(id="p", name="Plex", type=ServerType.PLEX)
+    files = [(f"/m/{n}", str(n)) for n in range(2001)]
+
+    runner_module.start_files_job(cfg, files, "Chapter thumbnails after Plex re-read")
 
     assert [len(o["webhook_paths"]) for _id, o in started] == [1000, 1000, 1]
     assert [o["webhook_paths"] for _id, o in started][2] == ["/m/2000"]
     assert all(o["server_id"] == "p" and o["force_generate"] is False for _id, o in started)
+    assert started[2][1]["webhook_item_id_hints"] == {"/m/2000": {"p": "2000"}}
     first = manager.create_job.call_args_list[0].kwargs
     assert (first["server_id"], first["server_type"], first["priority"]) == ("p", "plex", jobs_module.PRIORITY_LOW)
     assert first["library_name"] == "Chapter thumbnails after Plex re-read: 1,000 files"
+    # Saved with the job, so a job revived after a restart keeps its item ids.
+    assert first["config"]["webhook_item_id_hints"]["/m/0"] == {"p": "0"}
+
+
+def test_each_episode_of_a_shared_file_gets_its_own_job(monkeypatch):
+    """Plex lists one item per episode of a multi-episode file; without its id the chapter step skips the file."""
+    _manager, started, _jobs = _capture_jobs(monkeypatch)
+    cfg = SimpleNamespace(id="p", name="Plex", type=ServerType.PLEX)
+
+    runner_module.start_files_job(cfg, [("/m/e1-e2", "41"), ("/m/e1-e2", "42"), ("/m/solo", "50")], "Restore")
+
+    assert [o["webhook_item_id_hints"] for _id, o in started] == [
+        {"/m/e1-e2": {"p": "41"}, "/m/solo": {"p": "50"}},
+        {"/m/e1-e2": {"p": "42"}},
+    ]
+    assert [o["webhook_paths"] for _id, o in started] == [["/m/e1-e2", "/m/solo"], ["/m/e1-e2"]]
