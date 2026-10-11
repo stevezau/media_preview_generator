@@ -143,12 +143,16 @@ class TestJellyfinTrickplayAutoFixEndToEnd:
                 f"expected EnableTrickplayImageExtraction issue, got {[i.flag for i in issues_before]}"
             )
 
-            fix_results = server.apply_recommended_settings(flags=["EnableTrickplayImageExtraction"])
+            # Apply every recommendation, as the server's one-click fix does: SaveTrickplayWithMedia also starts
+            # off in a fresh library, and with it off Jellyfin serves sheets from its own data folder, not ours.
+            fix_results = server.apply_recommended_settings()
             assert all(v == "ok" for v in fix_results.values()), fix_results
 
             issues_after = server.check_settings_health()
-            critical_after = [i for i in issues_after if i.flag == "EnableTrickplayImageExtraction"]
-            assert not critical_after, f"flag still mis-set after fix: {critical_after}"
+            still_wrong = [
+                i.flag for i in issues_after if i.flag in ("EnableTrickplayImageExtraction", "SaveTrickplayWithMedia")
+            ]
+            assert not still_wrong, f"flags still mis-set after fix: {still_wrong}"
 
             # ----- 3. Trigger a refresh + poll for JF to pick up the trickplay -----
             requests.post(
