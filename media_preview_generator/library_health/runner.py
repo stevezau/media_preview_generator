@@ -19,7 +19,9 @@ from .models import CellState, CheckCancelled, CheckProgress, ServerResult
 from .store import HealthStore, default_store
 
 REREAD_INTERVAL_S = 0.5  # Plex analyzes before it answers; the pause leaves it room for everything else
-FILES_PER_JOB = 1000  # the same cap the page uses before it switches to a whole-library job
+FILES_PER_JOB = 1000
+# Re-read items whose chapter thumbnails go back per job, so they're missing minutes, not hours.
+RESTORE_EVERY = 200  # the same cap the page uses before it switches to a whole-library job
 
 _BUSY_MESSAGE = "A check or re-read is already running"
 _NO_REGISTRY_MESSAGE = "Could not read your media servers"
@@ -308,6 +310,7 @@ class HealthRunner:
         plex = server._connect()  # type: ignore[attr-defined]
         failures = 0
         sent: list[str] = []
+        unrestored: list[str] = []
         for index, item_id in enumerate(item_ids):
             if index:
                 self._sleep(REREAD_INTERVAL_S)
@@ -315,7 +318,7 @@ class HealthRunner:
                 logger.info("Plex re-read cancelled after {} of {} items", index, total)
                 # Plex was already asked about these, so they are no longer "not showing" as far as we know.
                 self._store.remove_not_showing(cfg.id, sent)
-                self._restore_chapters(cfg, sent, paths)
+                self._restore_chapters(cfg, unrestored, paths)
                 return
             if not item_id.isdecimal():
                 logger.warning("Skipping re-read of non-numeric Plex item id {!r}", item_id)
@@ -324,12 +327,16 @@ class HealthRunner:
                 try:
                     plex.query(f"/library/metadata/{item_id}/analyze", method=plex._session.put)
                     sent.append(item_id)
+                    unrestored.append(item_id)
                 except Exception as exc:
                     failures += 1
                     logger.warning("Plex re-read failed for item {}: {}", item_id, exc)
+            if len(unrestored) >= RESTORE_EVERY:
+                self._restore_chapters(cfg, unrestored, paths)
+                unrestored = []
             self._report(step, index + 1, total)
         logger.info("Asked Plex to re-read {} items ({} failed)", total, failures)
-        self._restore_chapters(cfg, sent, paths)
+        self._restore_chapters(cfg, unrestored, paths)
         self._check_servers([cfg.id], reason="after_reread", registry=registry)
 
     def _restore_chapters(self, cfg: ServerConfig, item_ids: list[str], paths: dict[str, list[str]]) -> None:

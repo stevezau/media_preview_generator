@@ -718,6 +718,36 @@ class TestChapterThumbnailsAfterReread:
 
         starter.assert_called_once_with(cfg, ["/m/11"], "Chapter thumbnails after Plex re-read")
 
+    def test_thumbnails_go_back_in_batches_while_the_re_read_runs(self, store, monkeypatch):
+        monkeypatch.setattr(runner_module, "RESTORE_EVERY", 2)
+        runner, cfg, starter = self._runner(store, monkeypatch)
+        store.replace_server(ServerResult("p", "Plex", "plex", [], [_not_showing(str(n)) for n in range(11, 16)]))
+
+        runner.start_reread("p")
+        runner.wait(5)
+
+        assert [c.args[1] for c in starter.call_args_list] == [["/m/11", "/m/12"], ["/m/13", "/m/14"], ["/m/15"]]
+        assert all(c.args[0] is cfg for c in starter.call_args_list)
+
+    def test_cancel_restores_only_the_batch_not_yet_restored(self, store, monkeypatch):
+        monkeypatch.setattr(runner_module, "RESTORE_EVERY", 2)
+        sleeps = []
+
+        def sleep(_s):
+            sleeps.append(_s)
+            if len(sleeps) == 3:
+                holder["runner"].cancel()
+
+        holder = {}
+        runner, _cfg_, starter = self._runner(store, monkeypatch, sleep=sleep)
+        holder["runner"] = runner
+        store.replace_server(ServerResult("p", "Plex", "plex", [], [_not_showing(str(n)) for n in range(11, 16)]))
+
+        runner.start_reread("p")
+        runner.wait(5)
+
+        assert [c.args[1] for c in starter.call_args_list] == [["/m/11", "/m/12"], ["/m/13"]]
+
     def test_a_job_that_cannot_start_still_rechecks(self, store, monkeypatch):
         runner, _cfg_, _starter = self._runner(store, monkeypatch, starter=MagicMock(side_effect=RuntimeError("full")))
 
