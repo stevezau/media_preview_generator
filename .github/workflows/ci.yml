@@ -499,8 +499,10 @@ jobs:
           MEDIA_PREVIEW_TEXTREC_MODEL: ${{ runner.temp }}/models/latin_PP-OCRv5_rec_mobile.onnx
         # The default 30s per-test limit kills a worker outright (timeout-method=thread) when a real CPU encode
         # or the 50-file webhook flood runs on a shared 4-core runner; these tests drive real servers and FFmpeg.
-        run: pytest -m integration --no-cov --tb=short -rs --timeout=300 tests/integration/ tests/markers/credits/ tests/journeys/test_journey_startup_gate.py
-        timeout-minutes: 15
+        # Serial (-n 0): many tests publish for the same test films on the same three servers, and in parallel
+        # one test's cleanup deleted the previews another was still checking.
+        run: pytest -m integration -n 0 --no-cov --tb=short -rs --timeout=300 tests/integration/ tests/markers/credits/ tests/journeys/test_journey_startup_gate.py
+        timeout-minutes: 45
 
       - name: Vendor stack logs on failure
         if: failure()

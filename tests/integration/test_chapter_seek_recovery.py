@@ -178,13 +178,13 @@ def test_corrupt_cluster_cannot_return_a_wrong_successful_frame(synthetic_movie,
 @pytest.mark.parametrize("damage", ["seekhead", "cluster"])
 @pytest.mark.parametrize("bound_to_source", [True, False])
 def test_damaged_index_reuses_only_source_bound_bif(synthetic_movie, tmp_path, monkeypatch, damage, bound_to_source):
-    from media_preview_generator.processing.chapter_recovery import inspect_seek_index
+    from media_preview_generator.processing.chapter_recovery import _inspect_index
 
     valid, config = synthetic_movie
     source = tmp_path / "damaged.mkv"
     _damage_index(valid, source, damage)
     fingerprint = get_source_fingerprint(source)
-    defect = inspect_seek_index(str(source), fingerprint, [4000])
+    defect = _inspect_index(str(source), fingerprint, [4000])
     assert defect
     folder = tmp_path / "Contents" / "Chapters"
     frames = tmp_path / "frames"
@@ -230,8 +230,8 @@ def test_damaged_index_reuses_only_source_bound_bif(synthetic_movie, tmp_path, m
     plan = chapters.ChapterPlan(object(), str(source), fingerprint, folder, {}, target)
     register = MagicMock()
     monkeypatch.setattr("media_preview_generator.servers.plex_chapters.register_chapters", register)
-    # The probe gives up after five seconds by design, and a loaded CI runner can hit that; reuse the
-    # verdict proven above so this test covers what publish_chapters does with it.
+    # The probe process gives up after five seconds by design, which a loaded CI runner hit; feed
+    # publish_chapters the verdict proven above so this test covers what it does with one.
     monkeypatch.setattr(chapters, "inspect_seek_index", lambda *_args, **_kwargs: defect)
     monkeypatch.setattr(
         chapters,
