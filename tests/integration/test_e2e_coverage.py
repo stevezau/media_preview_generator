@@ -161,7 +161,10 @@ class TestForceRegenerate:
 class TestSourceFileDeletedMidFlight:
     """File vanishes between webhook arrival and FFmpeg call."""
 
-    def test_returns_failed_when_source_disappears(self, emby_credentials, media_root, coverage_config, tmp_path):
+    def test_returns_retryable_skip_when_source_disappears(
+        self, emby_credentials, media_root, coverage_config, tmp_path
+    ):
+        """A missing source is usually still copying, so it is a retryable skip, not a failure."""
         # Use a copy in tmp_path so we can delete it without touching the
         # canonical fixture.
         original = media_root / "Movies" / "Test Movie H264 (2024)" / "Test Movie H264 (2024).mkv"
@@ -183,7 +186,7 @@ class TestSourceFileDeletedMidFlight:
             gpu=None,
             gpu_device_path=None,
         )
-        assert result.status is MultiServerStatus.FAILED
+        assert result.status is MultiServerStatus.SKIPPED_FILE_NOT_FOUND
         assert "Source file not found" in result.message
 
 

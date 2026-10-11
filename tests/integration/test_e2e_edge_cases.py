@@ -11,11 +11,13 @@ Covers:
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from media_preview_generator.output.jellyfin_trickplay import JellyfinTrickplayAdapter
 from media_preview_generator.processing.multi_server import (
     MultiServerStatus,
     PublisherStatus,
@@ -37,7 +39,11 @@ class TestPartialFailure:
     """One publisher fails; the others still succeed."""
 
     def test_jellyfin_failure_does_not_block_emby(self, emby_credentials, media_root, base_config):
-        """Configured Jellyfin server is unreachable; Emby publish still wins."""
+        """Jellyfin's trickplay write fails; Emby publish still wins.
+
+        Media-adjacent trickplay never needs the Jellyfin server (the layout comes from the path), so an
+        unreachable server alone no longer fails it. A file where the staging folder goes makes the write fail.
+        """
         raw_servers = [
             {
                 "id": "emby-int-1",
@@ -78,6 +84,10 @@ class TestPartialFailure:
         emby_sidecar = Path(canonical).parent / "Test Movie H264 (2024)-320-5.bif"
         if emby_sidecar.exists():
             emby_sidecar.unlink()
+        trickplay_dir = JellyfinTrickplayAdapter.trickplay_dir(canonical)
+        blocker = trickplay_dir.parent / f".{trickplay_dir.name}.staging"
+        shutil.rmtree(blocker, ignore_errors=True)
+        blocker.write_text("not a directory")
 
         try:
             result = process_canonical_path(
@@ -92,15 +102,13 @@ class TestPartialFailure:
             assert result.status is MultiServerStatus.PUBLISHED, result.message
             statuses = {p.adapter_name: p.status for p in result.publishers}
             assert statuses.get("emby_sidecar") is PublisherStatus.PUBLISHED
-            # Jellyfin's lookup of remote_path → item_id hits the dead
-            # endpoint and returns None; the adapter then raises
-            # ValueError because no item_id, which surfaces as FAILED.
             assert statuses.get("jellyfin_trickplay") is PublisherStatus.FAILED, statuses
             # The Emby BIF still landed.
             assert emby_sidecar.exists()
         finally:
             if emby_sidecar.exists():
                 emby_sidecar.unlink()
+            blocker.unlink(missing_ok=True)
 
 
 @pytest.mark.integration

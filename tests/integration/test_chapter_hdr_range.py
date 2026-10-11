@@ -58,7 +58,7 @@ def hdr_movie(tmp_path, request):
         ],
         check=True,
         capture_output=True,
-        timeout=15,
+        timeout=60,  # x265 is slow on a shared CI runner while other workers decode
     )
     config = SimpleNamespace(
         ffmpeg_path=ffmpeg, ffmpeg_threads=2, thumbnail_quality=4, tonemap_algorithm="hable", log_level="INFO"

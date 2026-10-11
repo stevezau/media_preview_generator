@@ -437,6 +437,19 @@ jobs:
           ffmpeg -version | head -1
           mediainfo --Version | head -1
 
+      - name: Install jellyfin-ffmpeg8 (the FFmpeg the image ships)
+        # Ubuntu's FFmpeg 6.1 lacks options the app relies on (per-stream -bsf:v:0 for keyframe reads),
+        # so the frame tests failed here while passing on the image's 8.1.2.
+        run: |
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused \
+            https://repo.jellyfin.org/jellyfin_team.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg
+          printf 'Types: deb\nURIs: https://repo.jellyfin.org/ubuntu\nSuites: noble\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/jellyfin.gpg\n' \
+            | sudo tee /etc/apt/sources.list.d/jellyfin.sources >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jellyfin-ffmpeg8
+          echo /usr/lib/jellyfin-ffmpeg >> "$GITHUB_PATH"
+          /usr/lib/jellyfin-ffmpeg/ffmpeg -version | head -1
+
       - name: Install dependencies
         run: pip install -e ".[test]"
 
@@ -494,7 +507,9 @@ jobs:
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
           MEDIA_PREVIEW_TEXTDET_MODEL: ${{ runner.temp }}/models/ch_PP-OCRv4_det_infer.onnx
           MEDIA_PREVIEW_TEXTREC_MODEL: ${{ runner.temp }}/models/latin_PP-OCRv5_rec_mobile.onnx
-        run: pytest -m integration --no-cov --tb=short -rs tests/integration/ tests/markers/credits/ tests/journeys/test_journey_startup_gate.py
+        # The default 30s per-test limit kills a worker outright (timeout-method=thread) when a real CPU encode
+        # or the 50-file webhook flood runs on a shared 4-core runner; these tests drive real servers and FFmpeg.
+        run: pytest -m integration --no-cov --tb=short -rs --timeout=300 tests/integration/ tests/markers/credits/ tests/journeys/test_journey_startup_gate.py
         timeout-minutes: 15
 
       - name: Vendor stack logs on failure
