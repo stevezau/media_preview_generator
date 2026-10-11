@@ -166,3 +166,17 @@ def test_remove_not_showing_lowers_the_stored_count(store):
 
     assert store.load()[0].libraries[0].cells[Feature.PREVIEWS].not_showing == 1
     assert store.reread_items("s1") == [("12", "1")]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DELETE FROM todo WHERE server_id = ? AND not_showing = 1 AND item_id = ?",
+        "SELECT DISTINCT item_id, path FROM todo WHERE server_id = ? AND not_showing = 1 AND item_id != ''",
+    ],
+)
+def test_not_showing_lookups_use_an_index(store, sql):
+    """Review & fix clears and lists rows by item; a full scan per item froze sflix's store for minutes."""
+    params = ("s1", "1")[: sql.count("?")]
+    plan = " ".join(row[-1] for row in store._conn.execute(f"EXPLAIN QUERY PLAN {sql}", params))
+    assert "idx_todo_not_showing" in plan, plan

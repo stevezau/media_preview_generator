@@ -22,6 +22,9 @@ _SCHEMA = (
         item_id TEXT NOT NULL,
         not_showing INTEGER NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_todo_lookup ON todo(server_id, library_id, feature, path)",
+    # Review & fix finds and clears the "not showing" rows by item; without this each one scanned every
+    # to-do row, and clearing 1,661 items among 225,000 rows held the store lock for many minutes.
+    "CREATE INDEX IF NOT EXISTS idx_todo_not_showing ON todo(server_id, not_showing, item_id)",
 )
 
 _MAX_LIMIT = 500
