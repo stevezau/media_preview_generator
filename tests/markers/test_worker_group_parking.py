@@ -104,8 +104,11 @@ def test_forced_marker_job_parks_then_keeps_counts_and_verify_obligations(tmp_pa
     runner = threading.Thread(target=job_runner.run_intro_credits_job, args=(parent.id,))
     runner.start()
     try:
+        # park_job commits the checkpoint first and only then releases the tracker and gate slot, so wait for both.
         deadline = time.monotonic() + 8
-        while not parent.config.get("parked_checkpoint") and time.monotonic() < deadline:
+        while time.monotonic() < deadline and not (
+            parent.config.get("parked_checkpoint") and gate.snapshot()[0] == 0 and parent.id not in dispatcher._trackers
+        ):
             time.sleep(0.02)
         assert parent.status is JobStatus.PENDING and parent.config.get("parked_checkpoint"), parent.error
         assert gate.snapshot()[0] == 0 and parent.id not in dispatcher._trackers
