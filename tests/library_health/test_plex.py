@@ -3,6 +3,7 @@
 import json
 import time
 import tracemalloc
+import unicodedata
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from unittest.mock import MagicMock
@@ -153,6 +154,16 @@ def test_part_without_audio_excluded_from_loudness_total(monkeypatch, tmp_path):
 
     assert _cell(result, "1", Feature.LOUDNESS).total == 1
     assert _cell(result, "1", Feature.PREVIEWS).total == 2
+
+
+def test_nothing_found_matches_a_path_in_another_unicode_form(monkeypatch, tmp_path):
+    items = [_episode("Pilot", unicodedata.normalize("NFD", "/tv/Engaño.mkv"))]
+    found = {unicodedata.normalize("NFC", "/tv/Engaño.mkv"): {Feature.INTRO}}
+
+    result = _run(monkeypatch, tmp_path, _cfg(tmp_path, [_lib("2", "TV", "show")]), items, nothing_found=found)
+
+    intro = _cell(result, "2", Feature.INTRO)
+    assert (intro.nothing_found, intro.todo) == (1, 0)
 
 
 def test_nothing_found_from_markers_db(monkeypatch, tmp_path):

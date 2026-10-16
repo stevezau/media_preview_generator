@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import unicodedata
 import urllib.parse
 
 from loguru import logger
@@ -14,6 +15,11 @@ _NOTHING_FOUND_SQL = (
     "SELECT f.canonical_path, d.type FROM files f JOIN decisions d ON d.file_id = f.id "
     "WHERE d.type IN ('intro','credits') AND d.status IN ('no_evidence','needs_review')"
 )
+
+
+def path_key(path: str) -> str:
+    """The form a path is matched in: a name with accents can be stored composed (NFC) or decomposed (NFD)."""
+    return unicodedata.normalize("NFC", path)
 
 
 def markers_db_path() -> str:
@@ -30,7 +36,7 @@ def nothing_found(markers_db_path: str) -> dict[str, set[Feature]]:
         markers_db_path: Path to markers.db.
 
     Returns:
-        Canonical path -> the INTRO and/or CREDITS features with a no_evidence/needs_review decision.
+        ``path_key`` of the canonical path -> the INTRO and/or CREDITS features with a no_evidence/needs_review decision.
         Empty when the file is missing or unreadable.
     """
     if not os.path.isfile(markers_db_path):
@@ -44,7 +50,7 @@ def nothing_found(markers_db_path: str) -> dict[str, set[Feature]]:
         )
         try:
             for path, kind in conn.execute(_NOTHING_FOUND_SQL):
-                found.setdefault(path, set()).add(Feature(kind))
+                found.setdefault(path_key(path), set()).add(Feature(kind))
         finally:
             conn.close()
     except sqlite3.Error as exc:

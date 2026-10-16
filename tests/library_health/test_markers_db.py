@@ -1,6 +1,7 @@
 """Tests for library_health.markers_db."""
 
 import sqlite3
+import unicodedata
 
 from media_preview_generator.library_health.markers_db import markers_db_path, nothing_found
 from media_preview_generator.library_health.models import Feature
@@ -59,3 +60,15 @@ def test_path_with_url_special_characters_is_read(tmp_path):
     conn.close()
 
     assert nothing_found(db) == {"/a.mkv": {Feature.INTRO}}
+
+
+def test_decomposed_accent_on_disk_is_keyed_composed(tmp_path):
+    # Linux keeps a file name's bytes as written (often NFD); Plex reports the same path NFC.
+    db = str(tmp_path / "markers.db")
+    MarkerStore(db).close()
+    conn = sqlite3.connect(db)
+    _add(conn, 1, unicodedata.normalize("NFD", "/tv/El Engaño.mkv"), [("intro", "no_evidence")])
+    conn.commit()
+    conn.close()
+
+    assert nothing_found(db) == {unicodedata.normalize("NFC", "/tv/El Engaño.mkv"): {Feature.INTRO}}

@@ -30,6 +30,7 @@ from ..markers.settings import load_server
 from ..output.plex_bundle import PlexBundleAdapter
 from ..output.plex_hash import get_source_fingerprint
 from ..servers.base import MediaServer, ServerConfig
+from .markers_db import path_key
 from .models import Cell, CellState, CheckCancelled, Feature, LibraryResult, ServerResult, TodoFile
 from .plex_rows import query_rows
 from .scope import LibraryScope, excluded, library_scopes
@@ -446,7 +447,7 @@ def _tally_library(
             cell.total += 1
             if feature.value in rows.markers.get(part.item_id, ()):
                 cell.done += 1
-            elif feature in nothing_found.get(part.path, ()):
+            elif feature in nothing_found.get(path_key(part.path), ()):
                 cell.nothing_found += 1
             else:
                 add_todo(feature, part)

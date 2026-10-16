@@ -28,6 +28,7 @@ from ..servers._embyish import (
     _NO_BOXSET_COLLAPSE,
 )
 from ..servers.base import MediaServer, ServerConfig, ServerType
+from .markers_db import path_key
 from .models import Cell, CellState, CheckCancelled, Feature, LibraryResult, ServerResult, TodoFile
 from .scope import LibraryScope, excluded, library_scopes
 
@@ -345,7 +346,7 @@ def _count_library(
             cell.total += 1
             if item.markers is not None and feature in item.markers:
                 cell.done += 1
-            elif feature in nothing_found.get(item.path, ()):
+            elif feature in nothing_found.get(path_key(item.path), ()):
                 cell.nothing_found += 1
             else:
                 add_todo(feature, item)

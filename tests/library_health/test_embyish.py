@@ -1,6 +1,7 @@
 """Tests for library_health.embyish."""
 
 import os
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,13 @@ def test_jellyfin_segments_intro_outro():
     assert (cells[Feature.INTRO].total, cells[Feature.INTRO].done) == (2, 1)
     assert (cells[Feature.CREDITS].done, cells[Feature.CREDITS].nothing_found, cells[Feature.CREDITS].todo) == (1, 1, 0)
     assert {(t.feature, t.item_id) for t in result.todo if t.feature != Feature.PREVIEWS} == {(Feature.INTRO, "i2")}
+
+
+def test_nothing_found_matches_a_path_in_another_unicode_form():
+    server = _Server([_item(1, path=unicodedata.normalize("NFD", "/media/Engaño.mkv"))], segments={"i1": []})
+    result = _run(_cfg(), server, nothing_found={unicodedata.normalize("NFC", "/media/Engaño.mkv"): {Feature.CREDITS}})
+    credits = _cells(result)[Feature.CREDITS]
+    assert (credits.nothing_found, credits.todo) == (1, 0)
 
 
 def test_jellyfin_segment_errors_threshold():
