@@ -91,6 +91,12 @@ def test_jellyfin_previews_from_trickplay_field():
     assert server.calls[0]["Fields"] == "Path,Trickplay,MediaSources"
 
 
+def test_library_walk_counts_collection_movies_not_their_boxset():
+    server = _Server([_item(1)])
+    _run(_cfg(kind="movie", markers={"enabled": False}), server)
+    assert server.calls[0]["CollapseBoxSetItems"] == "false"
+
+
 def test_jellyfin_segments_intro_outro():
     server = _Server(
         [_item(1), _item(2)],

@@ -467,6 +467,20 @@ class TestListItems:
                 f"Got kwargs: {req_call.kwargs!r}"
             )
 
+    def test_list_items_lists_collection_movies_not_their_boxset(self, jelly):
+        """Without ``CollapseBoxSetItems=false`` Jellyfin answers a movies-library
+        walk with one BoxSet per collection (Path inside its own config dir) in
+        place of the collection's movies, which are then never scanned.
+        """
+        response = MagicMock()
+        response.json.return_value = {"Items": [], "TotalRecordCount": 0}
+        response.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request", return_value=response) as req:
+            list(jelly.list_items("lib-1"))
+
+        assert req.call_args.kwargs["params"]["CollapseBoxSetItems"] == "false"
+
     def test_first_page_retries_on_transient_timeout_then_succeeds(self, jelly):
         """Job b6deeac3 regression: Jellyfin took >30s to respond on a
         118k-item Shows library, ``_request`` raised ``ReadTimeout``,

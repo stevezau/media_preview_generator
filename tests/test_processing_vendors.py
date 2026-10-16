@@ -255,6 +255,7 @@ class TestEmbyishRecentlyAdded:
         assert items[0].canonical_path == "/l/recent.mkv"
         assert items[0].title == "Recent"
         assert items[0].item_id_by_server == {"srv-x": "i1"}
+        assert instance.query_items.call_args.args[0]["CollapseBoxSetItems"] == "false"
 
     def test_scan_recently_added_fans_out_multi_version(self):
         """A recently-added multi-version item must yield one ProcessableItem

@@ -680,6 +680,10 @@ class TestResolveRemotePathToItemIdViaExactPath:
             assert req.call_count >= 2
             # First call was the exact-Path fast path.
             assert req.call_args_list[0].kwargs["params"]["Path"] == "/missing.mkv"
+            # Pass 2 enumerates the library, so it must list collection movies rather than their BoxSet.
+            pass2 = req.call_args_list[2].kwargs["params"]
+            assert "searchTerm" not in pass2
+            assert pass2["CollapseBoxSetItems"] == "false"
 
 
 class TestFindOwningLibraryId:
@@ -1021,6 +1025,8 @@ class TestPass0NameStartsWithFastPath:
             # Article stripped + first-word-only: "A Quiet Place" → "Quiet".
             assert ns_call.kwargs["params"]["NameStartsWith"] == "Quiet"
             assert ns_call.kwargs["params"]["IncludeItemTypes"] == "Movie"
+            # A movie in a collection only comes back as itself, not its BoxSet, when collapsing is off.
+            assert ns_call.kwargs["params"]["CollapseBoxSetItems"] == "false"
 
     def test_short_circuits_pass1_when_namestartswith_returns_zero(self, emby_with_tv_lib):
         """perf #44 — when Pass 0 ran with a cleanly-extracted prefix

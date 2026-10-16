@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..servers._embyish import EmbyApiClient
+from ..servers._embyish import _NO_BOXSET_COLLAPSE, EmbyApiClient
 from ..servers.base import ServerConfig
 from ._shared import _MediaServerProcessor
 from .types import ProcessableItem
@@ -51,6 +51,7 @@ class _EmbyishProcessor(_MediaServerProcessor):
             "SortBy": "DateCreated",
             "SortOrder": "Descending",
             "Limit": 500,
+            **_NO_BOXSET_COLLAPSE,
         }
         if library_ids:
             params["ParentId"] = ",".join(library_ids)

@@ -86,6 +86,13 @@ _LIST_ITEMS_RETRY_BASE_WAIT_S = 2.0
 # + 4s`` ≈ ~186s before ``list_items`` gives up on a page.
 _LIST_ITEMS_TIMEOUT_S = 60
 
+# Jellyfin/Emby fold the movies of a collection into its BoxSet on any
+# movies-library ``/Items`` query that doesn't opt out, so a walk lists
+# "Die Hard Collection" (whose ``Path`` is in the server's own config
+# dir, never on disk) instead of the four Die Hard movies. Every query
+# that walks a library or matches by name merges this in.
+_NO_BOXSET_COLLAPSE = {"CollapseBoxSetItems": "false"}
+
 # Issue #237: ``/Library/VirtualFolders`` includes music, photo, books
 # and audiobook libraries alongside the video ones. None of those have
 # a preview-thumbnail toggle (Emby/Jellyfin don't generate previews for
@@ -1008,6 +1015,7 @@ class EmbyApiClient(MediaServer):
                 "Fields": fields,
                 "Limit": _LIST_ITEMS_PAGE_SIZE,
                 "StartIndex": start_index,
+                **_NO_BOXSET_COLLAPSE,
             }
             if sort_by in ("newest", "oldest"):
                 params["SortBy"] = "DateCreated"
@@ -1764,6 +1772,7 @@ class EmbyApiClient(MediaServer):
             "IncludeItemTypes": "Movie,Episode",
             "Fields": "Path",
             "Limit": self._PASS2_PAGE_SIZE,
+            **_NO_BOXSET_COLLAPSE,
         }
         if parent_id:
             pass2_params["ParentId"] = parent_id
@@ -1938,6 +1947,7 @@ class EmbyApiClient(MediaServer):
             "Fields": "Path",
             "Limit": self._PASS0_PARENT_CANDIDATE_CAP,
             "ParentId": parent_id,
+            **_NO_BOXSET_COLLAPSE,
         }
         try:
             response = self._request("GET", "/Items", params=step1_params)
