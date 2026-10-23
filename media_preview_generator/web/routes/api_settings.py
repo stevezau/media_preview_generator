@@ -10,6 +10,7 @@ from flask import jsonify, request
 from loguru import logger
 
 from ...config import MAX_CPU_THREADS, VALID_TONEMAP_ALGORITHMS, validate_processing_thread_totals
+from ...job_kinds import parse_kind_ranks, safe_kind_ranks
 from ...markers.settings import mask_global
 from ...processing.retry_queue import DEFAULT_RETRY_COUNT
 from ...utils import is_docker_environment
@@ -396,6 +397,7 @@ def get_settings():
             # without the user having to demote the scan by hand.
             "incoming_job_priority": parse_priority(settings.get("incoming_job_priority", PRIORITY_HIGH)),
             "loudness_nice_level": settings.get("loudness_nice_level", 10),
+            "job_kind_priority": safe_kind_ranks(settings.get("job_kind_priority")),
             # backup retention (count + max-age days). 0 max_age_days
             # disables age-based pruning so existing installs keep behaving
             # exactly as before until the user opts in.
@@ -447,6 +449,7 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "requeue_max_age_minutes",
     "incoming_job_priority",
     "loudness_nice_level",
+    "job_kind_priority",
     "frame_reuse",
     "config_backup_keep",
     "config_backup_max_age_days",
@@ -643,6 +646,16 @@ def _validate_and_coerce_settings_updates(
                 400,
             )
         updates["incoming_job_priority"] = parse_priority(raw)
+
+    if "job_kind_priority" in updates:
+        # Checked here, merged into the stored ranks under the settings lock in save_settings.
+        sent = updates["job_kind_priority"]
+        try:
+            if not isinstance(sent, dict):
+                raise ValueError("job_kind_priority must map previews, intro_credits and loudness to 1, 2 or 3")
+            parse_kind_ranks(sent)
+        except ValueError as exc:
+            return None, (jsonify({"error": str(exc)}), 400)
 
     # Library-scanning concurrency. 0 = Auto; an explicit value is bounded
     # to [1, 256]. Reject out-of-range rather than silently clamping so Save
@@ -985,6 +998,10 @@ def save_settings():
                 updates = _translate_legacy_worker_updates(settings, updates)
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
+            if "job_kind_priority" in updates:
+                # A partial value changes only the kinds it names.
+                stored = safe_kind_ranks(settings.get("job_kind_priority"))
+                updates["job_kind_priority"] = {**stored, **updates["job_kind_priority"]}
             settings.update(updates)
         logger.info("Settings updated: {}", list(updates.keys()))
         result.update(_apply_post_save_hooks(settings, updates, incoming_field_keys))

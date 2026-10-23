@@ -2413,6 +2413,43 @@ class TestSettingsAPI:
         # And nothing was persisted — the default still stands.
         assert client.get("/api/settings", headers=_api_headers()).get_json()["incoming_job_priority"] == 1
 
+    def test_get_settings_ranks_every_job_kind_1_by_default(self, client):
+        resp = client.get("/api/settings", headers=_api_headers())
+        assert resp.get_json()["job_kind_priority"] == {"previews": 1, "intro_credits": 1, "loudness": 1}
+
+    def test_save_job_kind_priority_changes_only_the_kinds_it_names(self, client):
+        for sent in ({"loudness": 2}, {"previews": 3}):
+            resp = client.post("/api/settings", headers=_api_headers(), json={"job_kind_priority": sent})
+            assert resp.status_code == 200, resp.get_json()
+        saved = client.get("/api/settings", headers=_api_headers()).get_json()["job_kind_priority"]
+        assert saved == {"previews": 3, "intro_credits": 1, "loudness": 2}
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            None,
+            "x",
+            [],
+            {"movies": 1},
+            {"loudness": 0},
+            {"loudness": 4},
+            {"loudness": True},
+            {"loudness": "2"},
+            {"loudness": 1.5},
+        ],
+    )
+    def test_save_job_kind_priority_rejects_unknown_kinds_and_ranks(self, client, bad):
+        resp = client.post("/api/settings", headers=_api_headers(), json={"job_kind_priority": bad})
+        assert resp.status_code == 400, f"{bad!r} must be rejected, got {resp.get_json()!r}"
+        assert "job_kind_priority" in resp.get_json()["error"]
+        saved = client.get("/api/settings", headers=_api_headers()).get_json()["job_kind_priority"]
+        assert saved == {"previews": 1, "intro_credits": 1, "loudness": 1}
+
+    def test_a_hand_edited_bad_job_kind_priority_ranks_every_kind_1(self):
+        from media_preview_generator.job_kinds import safe_kind_ranks
+
+        assert safe_kind_ranks("garbage") == {"previews": 1, "intro_credits": 1, "loudness": 1}
+
 
 # ---------------------------------------------------------------------------
 # Job config / path_mappings (settings vs config_overrides)

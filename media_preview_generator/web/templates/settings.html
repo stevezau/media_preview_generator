@@ -78,6 +78,54 @@
                     </div>
                 </div>
 
+                <div class="setting-row">
+                    <div class="sr-label">
+                        <label for="kindPriorityPreviews" class="sr-title">Previews priority
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Which job kind gets workers first. Same number: share as before." data-explain-title="Job kind priority" data-explain-template="infoKindPriorityTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
+                        <div class="sr-hint">Seek thumbnails. 1 runs first; the same number takes turns.</div>
+                    </div>
+                    <div class="sr-control">
+                        <select class="form-select" id="kindPriorityPreviews">
+                            <option value="1">1 — First</option>
+                            <option value="2">2 — Second</option>
+                            <option value="3">3 — Third</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="setting-row">
+                    <div class="sr-label">
+                        <label for="kindPriorityIntroCredits" class="sr-title">Intro &amp; Credits priority
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Which job kind gets workers first. Same number: share as before." data-explain-title="Job kind priority" data-explain-template="infoKindPriorityTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
+                        <div class="sr-hint">Skip Intro / Skip Credits buttons. 1 runs first; the same number takes turns.</div>
+                    </div>
+                    <div class="sr-control">
+                        <select class="form-select" id="kindPriorityIntroCredits">
+                            <option value="1">1 — First</option>
+                            <option value="2">2 — Second</option>
+                            <option value="3">3 — Third</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="setting-row">
+                    <div class="sr-label">
+                        <label for="kindPriorityLoudness" class="sr-title">Loudness priority
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Which job kind gets workers first. Same number: share as before." data-explain-title="Job kind priority" data-explain-template="infoKindPriorityTpl"><i class="bi bi-info-circle"></i></button>
+                        </label>
+                        <div class="sr-hint">Plex volume levelling. 1 runs first; the same number takes turns.</div>
+                    </div>
+                    <div class="sr-control">
+                        <select class="form-select" id="kindPriorityLoudness">
+                            <option value="1">1 — First</option>
+                            <option value="2">2 — Second</option>
+                            <option value="3">3 — Third</option>
+                        </select>
+                    </div>
+                </div>
+
                 <h3 class="settings-subheading"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>Retry policy
                     <button type="button" class="info-icon ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
@@ -994,6 +1042,15 @@
     <p>It only matters when the CPU is fully busy. On an idle CPU, loudness runs at full speed at any level. It doesn't change how many loudness jobs run at once (that's your worker groups) or how fast files are read from disk.</p>
     <p>Applies to remote worker nodes too, from the next file analysed.</p>
 </template>
+<template id="infoKindPriorityTpl">
+    <p>Ranks the three job kinds, 1 first. Kinds with the same number share workers as before.</p>
+    <p>A kind with a higher number starts no new file while a lower-numbered kind has files queued for a worker open
+        right now. Files still being checked do not count, so a mostly up-to-date scan does not hold anyone, and
+        neither do files waiting for a remote node. Files
+        already running finish, and the waiting kind resumes on its own. A paused job holds nobody back.</p>
+    <p>Example: Previews 1, Intro &amp; Credits 1, Loudness 2 runs loudness only when no previews or markers are waiting.
+        Default: all 1.</p>
+</template>
 <template id="infoRetryPolicyTpl">
     <p>Global retry defaults for every job — webhook, scheduled, manual, recently-added.</p>
     <p>A file that can't be found on the media server (still indexing, transient API error) is retried this many times with this delay before being marked failed.</p>
@@ -1213,6 +1270,10 @@ async function loadSettings() {
             ? parseInt(settings.incoming_job_priority, 10)
             : 1;
         document.getElementById('incomingJobPriority').value = String(incomingPriority);
+        const kindPriority = settings.job_kind_priority || {};
+        document.getElementById('kindPriorityPreviews').value = String(kindPriority.previews ?? 1);
+        document.getElementById('kindPriorityIntroCredits').value = String(kindPriority.intro_credits ?? 1);
+        document.getElementById('kindPriorityLoudness').value = String(kindPriority.loudness ?? 1);
 
         // 0 is a real level (no nice): only a missing or unreadable one falls back to the default.
         const niceLevel = parseInt(settings.loudness_nice_level, 10);
@@ -1582,6 +1643,11 @@ async function saveAllSettings() {
             const level = parseInt(document.getElementById('loudnessNiceLevel').value, 10);
             return Number.isNaN(level) ? 10 : Math.min(19, Math.max(0, level));
         })(),
+        job_kind_priority: {
+            previews: parseInt(document.getElementById('kindPriorityPreviews').value, 10) || 1,
+            intro_credits: parseInt(document.getElementById('kindPriorityIntroCredits').value, 10) || 1,
+            loudness: parseInt(document.getElementById('kindPriorityLoudness').value, 10) || 1,
+        },
         webhook_retry_count: Math.min(
             10,
             Math.max(0, parseInt(document.getElementById('webhookRetryCount').value, 10) || 0),

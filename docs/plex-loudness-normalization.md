@@ -54,7 +54,9 @@ hasn't added to its library yet, or met while Plex was restarting or its databas
 your retry settings. The same job row shows the countdown and attempt count; **Retry now** skips the wait.
 After retries end, unresolved files leave a failure or a completion warning when other files succeeded. The Files
 panel gives the reason. These retries are automatic and do not require review or approval.
-Jobs use eligible CPU workers and the shared priorities, job limit, pause and cancel controls. Loudness jobs default to Low priority. Without eligible CPU
+Jobs use eligible CPU workers and the shared priorities, job limit, pause and cancel controls. Loudness jobs default to Low priority. To hold loudness back
+while previews or Intro & Credits have files queued, rank it lower under **Processing options → Job execution → Loudness
+priority**. Without eligible CPU
 capacity a job waits, keeping its identity and work; it does not run audio analysis in a GPU worker slot. See
 [Worker groups and availability](guides.md#worker-groups-and-availability).
 

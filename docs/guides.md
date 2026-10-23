@@ -166,6 +166,10 @@ A schedule only follows the incoming setting while its own **Job Priority** is
 Normal, or Low there to pin that schedule instead, and the global setting stops
 applying to it.
 
+Job priority orders jobs of the same kind. **Job kind priority** (Previews, Intro & Credits,
+Loudness, all **1** by default) ranks the kinds themselves: a kind with a higher number waits while a
+lower-numbered kind has files queued for a worker, whatever priority its own jobs carry.
+
 Set the global setting to **Normal** to go back to strict
 first-come-first-served ordering. A job you pin to High by hand can still
 overtake a running scan.

@@ -33,6 +33,15 @@ def current_group_policy(config=None) -> tuple[list[dict] | None, int | None]:
     return (groups, None) if isinstance(groups, list) else (None, None)
 
 
+def current_kind_ranks() -> dict[str, int]:
+    """The saved ``job_kind_priority``, read live each dispatch pass; every kind ranks 1 without a settings manager."""
+    from ..job_kinds import safe_kind_ranks
+    from ..web.settings_manager import peek_settings_manager
+
+    settings = peek_settings_manager()
+    return safe_kind_ranks(settings.get("job_kind_priority") if settings is not None else None)
+
+
 def current_groups(config=None) -> list[dict] | None:
     """Prefer persisted live application policy to a job's stale config snapshot."""
     return current_group_policy(config)[0]

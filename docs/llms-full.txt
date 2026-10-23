@@ -1556,7 +1556,9 @@ hasn't added to its library yet, or met while Plex was restarting or its databas
 your retry settings. The same job row shows the countdown and attempt count; **Retry now** skips the wait.
 After retries end, unresolved files leave a failure or a completion warning when other files succeeded. The Files
 panel gives the reason. These retries are automatic and do not require review or approval.
-Jobs use eligible CPU workers and the shared priorities, job limit, pause and cancel controls. Loudness jobs default to Low priority. Without eligible CPU
+Jobs use eligible CPU workers and the shared priorities, job limit, pause and cancel controls. Loudness jobs default to Low priority. To hold loudness back
+while previews or Intro & Credits have files queued, rank it lower under **Processing options → Job execution → Loudness
+priority**. Without eligible CPU
 capacity a job waits, keeping its identity and work; it does not run audio analysis in a GPU worker slot. See
 [Worker groups and availability](https://mediapreviewgenerator.dev/guides/#worker-groups-and-availability).
 
@@ -1817,6 +1819,10 @@ A schedule only follows the incoming setting while its own **Job Priority** is
 **Default (from Settings)** — the value new schedules start on. Pick High,
 Normal, or Low there to pin that schedule instead, and the global setting stops
 applying to it.
+
+Job priority orders jobs of the same kind. **Job kind priority** (Previews, Intro & Credits,
+Loudness, all **1** by default) ranks the kinds themselves: a kind with a higher number waits while a
+lower-numbered kind has files queued for a worker, whatever priority its own jobs carry.
 
 Set the global setting to **Normal** to go back to strict
 first-come-first-served ordering. A job you pin to High by hand can still
@@ -4818,6 +4824,7 @@ These are the top-level keys `POST /api/settings` accepts, besides `frame_reuse`
 | `cpu_threads` | none | `1` | Legacy CPU count. Once groups exist, posting it returns `409`; use the worker-groups API. |
 | `incoming_job_priority` | Processing → Job execution → Incoming job priority | `high` | Priority of jobs the app creates itself from webhooks and Recently Added scans. `high`, `normal`, `low` (or `1`, `2`, `3`). |
 | `loudness_nice_level` | Processing → Job execution → Loudness analysis nice level | `10` | How far loudness analysis FFmpeg yields the CPU to previews and Intro & Credits detection when the CPU is busy. `0`–`19`; `0` runs it at the same priority. Read per file, so a change applies to the next file analysed, on remote worker nodes too. |
+| `job_kind_priority` | Processing → Job execution → Previews / Intro & Credits / Loudness priority | `{"previews": 1, "intro_credits": 1, "loudness": 1}` | Dispatch rank per job kind, 1–3 (1 = first). Kinds with the same rank share workers as before. A partial value changes only the kinds it names. A kind with a higher number starts no new file while a lower-numbered kind has files queued for a worker (job not paused) and a worker open now that may run them — files still being checked or waiting for a remote node do not count; files already running finish, and the held kind resumes on its own. |
 | `webhook_retry_count` | Processing → Retry policy → Retry count | `5` | Attempts for files a server hasn't indexed yet. The page allows 0–10; `0` turns retries off. |
 | `webhook_retry_delay` | Processing → Retry policy → Initial retry delay | `30` | Base delay in seconds (the page allows 10–300). At 30, retries wait 1 min, 2 min, 5 min, 15 min, then 1 h. |
 | `auto_requeue_on_restart` | Processing → Restart recovery | `true` | Re-queue jobs a restart interrupted. |
