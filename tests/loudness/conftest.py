@@ -197,3 +197,9 @@ def lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     finally:
         dispatcher.shutdown()
         manager.close()
+
+
+@pytest.fixture
+def crash_keeps_ledger(monkeypatch):
+    """Tests that re-run a finished job to stand in for a crash: a real crash never reaches the ledger cleanup."""
+    monkeypatch.setattr(job, "delete_ledger", lambda *args: None)

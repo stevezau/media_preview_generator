@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from ..job_kinds import ItemOutcome
 from ..jobs.checkpoints import checkpoint_items, item_descriptor
 from ..jobs.orchestrator import fold_publisher_rows_into_aggregate
@@ -53,10 +55,45 @@ def _path(config_dir: str | Path, job_id: str) -> Path:
 
 
 def delete_ledger(config_dir: str | Path, job_id: str) -> None:
-    """Remove completion records when the owning job's history is deleted."""
+    """Remove completion records once the owning job can no longer resume."""
     path = _path(config_dir, job_id)
     for suffix in ("", "-wal", "-shm"):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def delete_unneeded_ledgers(config_dir: str | Path, needed_job_ids: set[str], *, idle_seconds: float = 600) -> int:
+    """Remove ledgers of jobs that can no longer resume, such as finished ones from before ledgers were cleaned up.
+
+    A ledger written to within ``idle_seconds`` is left alone: its job may still be settling its last attempt.
+
+    Args:
+        config_dir: App config directory.
+        needed_job_ids: Jobs that may still run or be revived; their ledgers are kept.
+        idle_seconds: How long a ledger must have been untouched to be removed.
+
+    Returns:
+        How many ledgers were removed.
+    """
+    folder = Path(config_dir) / "job_loudness_resume"
+    if not folder.is_dir():
+        return 0
+    cutoff = time.time() - idle_seconds
+    removed = 0
+    for entry in folder.glob("*.sqlite3"):
+        job_id = entry.name.removesuffix(".sqlite3")
+        if job_id in needed_job_ids:
+            continue
+        try:
+            newest = max(
+                Path(f"{entry}{suffix}").stat().st_mtime for suffix in ("", "-wal") if Path(f"{entry}{suffix}").exists()
+            )
+            if newest > cutoff:
+                continue
+            delete_ledger(config_dir, job_id)
+            removed += 1
+        except (OSError, ValueError) as exc:
+            logger.debug("Could not remove loudness continuation {}: {}", entry.name, exc)
+    return removed
 
 
 def source_fingerprint(item: ProcessableItem) -> SourceFingerprint | None:

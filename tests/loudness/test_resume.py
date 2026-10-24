@@ -178,7 +178,9 @@ def test_failed_sqlite_commit_does_not_create_a_resume_success(tmp_path, selecte
         reopened.close()
 
 
-def test_restarted_job_restores_written_counts_without_relying_on_display_history(lifecycle: Lifecycle):
+def test_restarted_job_restores_written_counts_without_relying_on_display_history(
+    crash_keeps_ledger, lifecycle: Lifecycle
+):
     lifecycle.api_ready = True
     first = lifecycle.add_file("finished.mkv")
     second = lifecycle.add_file("remaining.mkv")
@@ -219,7 +221,9 @@ def test_partial_stream_failure_resumes_only_missing_stream(lifecycle: Lifecycle
     assert lifecycle.analyses == [(path, 1), (path, 2), (path, 1), (path, 2), (path, 2)]
 
 
-def test_all_restored_finishes_without_creating_an_empty_dispatcher_tracker(lifecycle: Lifecycle, monkeypatch):
+def test_all_restored_finishes_without_creating_an_empty_dispatcher_tracker(
+    crash_keeps_ledger, lifecycle: Lifecycle, monkeypatch
+):
     lifecycle.api_ready = True
     path = lifecycle.add_file("settled.mkv")
     parent = lifecycle.start([path])
@@ -287,7 +291,9 @@ def test_handler_commits_before_returning_an_outcome(tmp_path, selected, monkeyp
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["immutable-baseline", "legacy-recount"])
-def test_retry_restores_committed_result_when_crash_preceded_files_callback(lifecycle: Lifecycle, legacy):
+def test_retry_restores_committed_result_when_crash_preceded_files_callback(
+    crash_keeps_ledger, lifecycle: Lifecycle, legacy
+):
     path = lifecycle.add_file("retry-crash.mkv")
     parent = lifecycle.start([path])
     (child,) = lifecycle.children(parent)
@@ -360,6 +366,7 @@ def test_parked_resume_revalidates_completed_files_outside_checkpoint(lifecycle:
 
 @pytest.mark.parametrize("finish", ["resume", "cancel"])
 def test_global_pause_between_native_resume_checks_waits_for_resume_or_cancel(
+    crash_keeps_ledger,
     lifecycle: Lifecycle,
     monkeypatch,
     finish,
@@ -483,7 +490,9 @@ def test_cancelling_a_resume_stops_within_one_check_per_thread(tmp_path):
 
 
 @pytest.mark.parametrize("finish", ["resume", "cancel"])
-def test_eight_threads_stop_at_a_cancel_and_wait_out_a_pause(lifecycle: Lifecycle, monkeypatch, finish):
+def test_eight_threads_stop_at_a_cancel_and_wait_out_a_pause(
+    crash_keeps_ledger, lifecycle: Lifecycle, monkeypatch, finish
+):
     threads = resume.RESTORE_CHECK_THREADS
     lifecycle.api_ready = True
     paths = [lifecycle.add_file(f"many-{n}.mkv") for n in range(3 * threads)]
@@ -535,3 +544,55 @@ def test_eight_threads_stop_at_a_cancel_and_wait_out_a_pause(lifecycle: Lifecycl
         hold.set()
         lifecycle.manager.request_cancellation(parent.id)
         runner.join(3)
+
+
+def _make_ledger(config_dir, job_id, age_s=3600):
+    ledger = CompletionLedger(config_dir, job_id)
+    ledger.close()
+    path = resume._path(config_dir, job_id)
+    old = time.time() - age_s
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(f"{path}{suffix}")
+        if candidate.exists():
+            import os
+
+            os.utime(candidate, (old, old))
+    return path
+
+
+def test_sweep_removes_finished_ledgers_but_keeps_needed_and_recent_ones(tmp_path):
+    finished = _make_ledger(tmp_path, "finished")
+    running = _make_ledger(tmp_path, "running")
+    just_written = _make_ledger(tmp_path, "settling", age_s=0)
+
+    removed = resume.delete_unneeded_ledgers(tmp_path, {"running"})
+
+    assert removed == 1
+    assert not finished.exists()
+    assert running.exists()
+    assert just_written.exists()
+
+
+def test_sweep_without_a_ledger_folder_is_a_no_op(tmp_path):
+    assert resume.delete_unneeded_ledgers(tmp_path, set()) == 0
+
+
+def test_retention_sweep_keeps_running_and_pending_jobs(tmp_path):
+    from media_preview_generator.web.jobs import JobManager
+
+    manager = JobManager(str(tmp_path))
+    try:
+        running = manager.create_job(kind="loudness", config={"kind": "loudness"})
+        manager.start_job(running.id)
+        pending = manager.create_job(kind="loudness", config={"kind": "loudness"})
+        done = manager.create_job(kind="loudness", config={"kind": "loudness"})
+        manager.complete_job(done.id)
+        paths = {name: _make_ledger(tmp_path, name) for name in (running.id, pending.id, done.id, "orphan")}
+
+        with manager._lock:
+            manager._enforce_log_retention()
+
+        assert paths[running.id].exists() and paths[pending.id].exists()
+        assert not paths[done.id].exists() and not paths["orphan"].exists()
+    finally:
+        manager.close()

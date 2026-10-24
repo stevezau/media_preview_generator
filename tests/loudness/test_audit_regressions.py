@@ -44,7 +44,9 @@ def test_unreadable_retry_input_preserves_full_parent_totals(lifecycle: Lifecycl
     assert lifecycle.analyses == []
 
 
-def test_restart_keeps_publishers_for_files_finished_before_interruption(lifecycle: Lifecycle) -> None:
+def test_restart_keeps_publishers_for_files_finished_before_interruption(
+    crash_keeps_ledger, lifecycle: Lifecycle
+) -> None:
     lifecycle.api_ready = True
     first = lifecycle.add_file("first.mkv")
     second = lifecycle.add_file("second.mkv")

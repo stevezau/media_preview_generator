@@ -191,3 +191,43 @@ def test_cell_cant_do_round_trips_and_leaves_todo():
     assert Cell.from_dict(data) == cell
     del data["cant_do"]
     assert Cell.from_dict(data).cant_do == 0
+
+
+def _big_result(count):
+    todo = [TodoFile(Feature.PREVIEWS, f"/media/{i}" + "x" * 200, "T", str(i), library_id="1") for i in range(count)]
+    return _result(todo=todo)
+
+
+def test_old_style_database_is_switched_to_incremental_auto_vacuum(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "old.db")
+    seed = sqlite3.connect(path)
+    seed.execute("PRAGMA auto_vacuum=NONE")
+    seed.execute("CREATE TABLE servers (server_id TEXT PRIMARY KEY, json TEXT NOT NULL, checked_at REAL NOT NULL)")
+    seed.commit()
+    seed.close()
+
+    store = HealthStore(path)
+
+    assert store._conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
+
+
+def test_wal_is_truncated_after_a_big_replace(tmp_path):
+    path = tmp_path / "health.db"
+    store = HealthStore(str(path))
+
+    store.replace_server(_big_result(5000))
+
+    assert (tmp_path / "health.db-wal").stat().st_size == 0
+
+
+def test_file_shrinks_after_replacing_with_a_much_smaller_result(tmp_path):
+    path = tmp_path / "health.db"
+    store = HealthStore(str(path))
+    store.replace_server(_big_result(5000))
+    big = path.stat().st_size
+
+    store.replace_server(_big_result(5))
+
+    assert path.stat().st_size < big / 10

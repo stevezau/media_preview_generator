@@ -16,6 +16,27 @@ from media_preview_generator.web.jobs import JobManager, JobStatus, is_user_visi
 from .conftest import Lifecycle
 
 
+def _ledger_path(lifecycle: Lifecycle, job_id: str) -> Path:
+    return Path(lifecycle.manager.config_dir) / "job_loudness_resume" / f"{job_id}.sqlite3"
+
+
+def test_ledger_is_removed_when_the_job_completes(lifecycle: Lifecycle) -> None:
+    path = lifecycle.add_file("done.mkv")
+    lifecycle.api_ready = True
+    parent = lifecycle.start([path])
+    assert parent.status is JobStatus.COMPLETED
+    assert not _ledger_path(lifecycle, parent.id).exists()
+
+
+def test_ledger_is_removed_when_the_job_fails(lifecycle: Lifecycle) -> None:
+    path = lifecycle.add_file("waiting.mkv")
+    parent = lifecycle.start([path])
+    (child,) = lifecycle.children(parent)
+    lifecycle.retry(child)
+    assert parent.status is JobStatus.FAILED
+    assert not _ledger_path(lifecycle, child.id).exists()
+
+
 def test_unverified_publication_keeps_original_pending_with_hidden_retry(lifecycle: Lifecycle) -> None:
     path = lifecycle.add_file("waiting.mkv")
     parent = lifecycle.start([path])
@@ -344,6 +365,7 @@ def test_capacity_closure_parks_same_job_and_resumes_only_unfinished_work(lifecy
         assert parent.id not in lifecycle.dispatcher._trackers
         assert len(lifecycle.analyses) == 1
         assert lifecycle.children(parent) == []
+        assert _ledger_path(lifecycle, parent.id).exists()
         if restart:
             runner.join(3)
             assert not runner.is_alive()
@@ -365,6 +387,7 @@ def test_capacity_closure_parks_same_job_and_resumes_only_unfinished_work(lifecy
         assert {key: value for key, value in parent.progress.outcome.items() if value} == {job.WRITTEN: 2}
         assert sorted(lifecycle.analyses) == [(path, 1) for path in sorted(paths)]
         assert "parked_checkpoint" not in parent.config and "resource_wait" not in parent.config
+        assert not _ledger_path(lifecycle, parent.id).exists()
     finally:
         lifecycle.manager.request_cancellation(parent.id)
         group_runtime.wake_group_runtime()

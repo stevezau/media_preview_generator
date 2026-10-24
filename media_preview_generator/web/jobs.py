@@ -29,6 +29,7 @@ from loguru import logger
 
 from ..job_kinds import JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS, parse_job_kind
 from ..shutdown import is_shutting_down
+from ..sqlite_maintenance import ensure_incremental_autovacuum, reclaim_space
 from ..utils import redact_secrets
 from .job_gate import format_wait_message
 
@@ -620,52 +621,12 @@ class JobStorage:
         for stmt in self._SCHEMA_SQL:
             self._conn.execute(stmt)
         self._migrate_schema()
-        self._ensure_incremental_autovacuum()
+        ensure_incremental_autovacuum(self._conn, "Jobs DB")
 
-    def _ensure_incremental_autovacuum(self) -> None:
-        """Enable SQLite incremental auto-vacuum, compacting an existing DB on first upgrade.
-
-        Without auto_vacuum the .db file grows monotonically — deleted rows
-        leave freelist pages that are reused for future inserts but never
-        returned to the OS. A live case: the production container's
-        jobs.db had 4 rows but 20,114 pages (82 MB, 99.7% slack) because
-        a 117k-item full-scan had previously bloated publishers_json to
-        ~11 MB per UPSERT before the ``set_publishers`` fix landed.
-
-        ``auto_vacuum=INCREMENTAL`` is sticky per-database and only takes
-        effect on an *existing* DB after a full ``VACUUM``. So: if the
-        connected DB is still at the default ``NONE`` setting, we flip
-        it to INCREMENTAL and run one VACUUM to apply + compact. After
-        that, ``_retention_tick`` can reclaim freelist pages cheaply
-        via ``PRAGMA incremental_vacuum`` without a full rewrite.
-        """
-        try:
-            current = self._conn.execute("PRAGMA auto_vacuum").fetchone()
-            mode = int(current[0]) if current else 0
-        except Exception as exc:
-            logger.debug("Could not read auto_vacuum PRAGMA: {}", exc)
-            return
-        if mode == 2:
-            return
-        try:
-            # Checkpoint-truncate first so any pending WAL pages land in
-            # the main DB — VACUUM rewrites the main file, and without
-            # the checkpoint a large WAL backlog gets stranded (the
-            # file size wouldn't actually shrink until the next WAL
-            # rotation). See the live production case: 82 MB main +
-            # 76 MB WAL sitting there for the same scan.
-            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            self._conn.execute("VACUUM")
-            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            logger.info("Jobs DB: auto_vacuum set to INCREMENTAL and compacted")
-        except Exception as exc:
-            logger.warning(
-                "Could not enable incremental auto_vacuum on jobs DB ({}); "
-                "the file may grow monotonically until a manual VACUUM. "
-                "This is non-fatal — job state persistence still works.",
-                exc,
-            )
+    def reclaim_space(self) -> None:
+        """Shrink the file after bulk deletes, serialised with every other use of the shared connection."""
+        with self._lock:
+            reclaim_space(self._conn, "Jobs DB")
 
     def _migrate_schema(self) -> None:
         """One-shot ALTER TABLE migrations for columns added after launch.
@@ -1382,13 +1343,12 @@ class JobManager:
             # not the whole table). Goes through the storage layer's
             # connection — JobManager does not own a raw sqlite3 handle.
             if self._storage is not None:
-                try:
-                    self._storage._conn.execute("PRAGMA incremental_vacuum")
-                except Exception as exc:
-                    logger.debug("incremental_vacuum after retention sweep failed: {}", exc)
+                self._storage.reclaim_space()
 
         if self._jobs_load_failed:
             return
+
+        self._sweep_loudness_ledgers()
 
         # Clean orphaned job log files
         if os.path.isdir(self._job_logs_dir):
@@ -1417,6 +1377,20 @@ class JobManager:
                         logger.debug("Removed orphaned file results: {}", path)
                     except OSError:
                         pass
+
+    def _sweep_loudness_ledgers(self) -> None:
+        """Remove loudness resume ledgers of jobs that can no longer resume. Caller must hold _lock.
+
+        Only pending or running jobs resume, and so do the interrupted ones a restart may still revive.
+        """
+        from ..loudness.resume import delete_unneeded_ledgers
+
+        needed = {job.id for job in self._jobs.values() if job.status in (JobStatus.PENDING, JobStatus.RUNNING)}
+        needed.update(job.id for job in self._interrupted_jobs)
+        needed.update(job.id for job in self._interrupted_retry_chains)
+        removed = delete_unneeded_ledgers(self.config_dir, needed)
+        if removed:
+            logger.info("Retention: removed {} finished loudness resume ledger(s)", removed)
 
     _RETENTION_INTERVAL_SEC = 3600  # 1 hour
 

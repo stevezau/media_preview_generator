@@ -79,7 +79,7 @@ from .plex_db import (
     read_streams,
     write_stream,
 )
-from .resume import CompletionLedger, source_fingerprint
+from .resume import CompletionLedger, delete_ledger, source_fingerprint
 from .settings import library_chosen, load_server_loudness, loudness_libraries
 
 # Serialises a webhook's files joining a waiting loudness job with its runner sealing the files it runs.
@@ -1104,6 +1104,12 @@ def _run_loudness_pass(job_id: str) -> bool | None:
     finally:
         if completion_ledger is not None:
             completion_ledger.close()
+            # Only a job that can still resume needs its ledger; a stop leaves the job RUNNING for revival.
+            if job.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+                try:
+                    delete_ledger(jm.config_dir, job_id)
+                except OSError as exc:
+                    logger.warning("Could not remove loudness continuation for {}: {}", job_id, exc)
         if chain_head and job.status is JobStatus.CANCELLED:
             jm.cancel_job(chain_head)
         release_slot(slot, get_job_gate())

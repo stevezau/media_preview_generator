@@ -10,6 +10,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from ..sqlite_maintenance import ensure_incremental_autovacuum, reclaim_space
 from .models import Feature, ServerResult, TodoFile
 
 _SCHEMA = (
@@ -56,6 +57,7 @@ class HealthStore:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=10)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        ensure_incremental_autovacuum(self._conn, "Library health DB")
         with self._lock, self._conn:
             for statement in _SCHEMA:
                 self._conn.execute(statement)
@@ -96,6 +98,9 @@ class HealthStore:
                     for entry in result.todo
                 ],
             )
+        # Each replace deletes and reinserts every to-do row; without this the file and its WAL only ever grow.
+        with self._locked() as conn:
+            reclaim_space(conn, "Library health DB")
 
     def remove_missing_servers(self, keep_ids: set[str]) -> None:
         """Forget servers that are no longer configured."""
