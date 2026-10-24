@@ -118,6 +118,14 @@ class TestShouldUseMultiServerFullScan:
             config = _full_scan_config(server_id_filter=pin)
             assert _should_use_multi_server_full_scan(config, pinned_type=pinned_type) is expected
 
+    def test_a_multi_server_pick_uses_the_multi_server_path_with_one_server_enabled(self):
+        """A server disabled since the job was made must not send it down the Plex-only path (every Plex library)."""
+        with patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm:
+            mock_sm.return_value.get.return_value = [{"id": "plex-a", "type": "plex", "enabled": True}]
+            config = _full_scan_config()
+            config.library_ids_by_server = {"plex-a": ["1"], "jf-1": ["abc"]}
+            assert _should_use_multi_server_full_scan(config, pinned_type="") is True
+
 
 class TestRunProcessingRoutesMultiPlex:
     """Integration: assert ``run_processing`` actually picks the right

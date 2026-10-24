@@ -85,6 +85,19 @@ class TestScanDispatchPriority:
         assert mock_scan.call_args.kwargs["job_id"] == "job-1"
         assert mock_scan.call_args.kwargs["priority"] == PRIORITY_HIGH
 
+    def test_run_processing_forwards_the_picked_libraries_per_server_to_the_full_scan(self):
+        config = _config()
+        config.library_ids_by_server = {"plex-1": ["1"], "jf-1": ["abc"]}
+        with (
+            patch(f"{MODULE}._resolve_pinned_server", return_value=(None, None)),
+            patch(f"{MODULE}._classify_processing_mode", return_value="full_scan"),
+            patch(f"{MODULE}._should_use_multi_server_full_scan", return_value=True),
+            patch(f"{MODULE}._run_full_scan_multi_server", return_value={}) as mock_scan,
+        ):
+            orchestrator.run_processing(config, selected_gpus=[], job_id="job-1")
+
+        assert mock_scan.call_args.kwargs["library_ids_by_server"] == {"plex-1": ["1"], "jf-1": ["abc"]}
+
     def test_run_processing_forwards_job_priority_to_a_recently_added_scan(self):
         # A scheduled Recently Added scan runs through run_processing too (its config carries recently_added_since).
         config = _config()

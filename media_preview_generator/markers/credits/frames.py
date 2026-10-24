@@ -26,7 +26,7 @@ from typing import BinaryIO, NamedTuple
 import numpy as np
 from loguru import logger
 
-from ...processing.ffmpeg_runner import GPU_CANT_DECODE_VERDICT
+from ...processing.ffmpeg_runner import GPU_CANT_DECODE_VERDICT, SAYS_NOTHING_RE
 from ...processing.hwaccel import hwaccel_decode_args
 from ...utils import dies_with_node, scratch_dir
 from ..freeze import Freeze
@@ -83,9 +83,6 @@ _CODEC_NAMES = {
     "prores": "ProRes",
     "vc1": "VC-1",
 }
-# Lines that never say why ffmpeg failed: showinfo's per-frame lines ("color_space:unknown" reads as an error to the
-# summary) and the "Conversion failed!" every failed run ends on, which would hide the line before it.
-_SAYS_NOTHING_RE = re.compile(r"\[Parsed_showinfo_\d+ @|^Conversion failed!\s*$")
 # ffmpeg's closing lines, which end every failed run whatever failed: its progress line, a thread or task ending, and
 # "Nothing was written". Left out of the lines a GPU failure keeps for the job log (``GpuDecodeError.stderr_tail``).
 _CLOSING_LINE_RE = re.compile(
@@ -891,7 +888,7 @@ def run_decode(
 
         raise GpuDecodeError(misdecoded, fallback_kind=FALLBACK_CODEC)
     if returncode != 0:
-        lines = [line for line in stderr.decode("utf-8", "replace").splitlines() if not _SAYS_NOTHING_RE.search(line)]
+        lines = [line for line in stderr.decode("utf-8", "replace").splitlines() if not SAYS_NOTHING_RE.search(line)]
         logger.debug("ffmpeg exited {} decoding {}; its last lines: {}", returncode, name, "\n".join(lines[-8:]))
         from ...processing.generator import NO_DECODER_SUMMARY, hwaccel_in, video_has_no_decoder
 

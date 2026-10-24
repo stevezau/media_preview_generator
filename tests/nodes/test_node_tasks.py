@@ -646,6 +646,21 @@ class TestLog:
         assert messages.count(("WARNING", "direct line")) == 1
         assert not any("too chatty" in m for _, m in messages)
 
+    def test_a_per_file_line_is_tagged_for_the_apps_relay(self, make_table, media):
+        from media_preview_generator.logging_config import per_file_logger
+
+        def op(ctx, node_path, params):
+            per_file_logger.info("how the run ended")
+            logger.info("plain line")
+            return {}
+
+        table = make_table({"test.op": op})
+
+        lines = {line["message"]: line for line in _finished(table, table.start(_spec(media)))["log"]}
+
+        assert lines["how the run ended"]["per_file"] is True
+        assert "per_file" not in lines["plain line"]
+
     def test_other_threads_only_when_they_register(self, make_table, media):
         def op(ctx, node_path, params):
             def helper(capture: bool) -> None:

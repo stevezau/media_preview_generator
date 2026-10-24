@@ -363,7 +363,7 @@ def _scan_scope(job: Any) -> tuple[str | None, frozenset[str] | None] | None:
 
     Filtered scans (added-in-last-N-days and the like), webhook, retry, Recently Added and Check servers jobs, and
     Intro & Credits jobs for explicit files, cover only part of a library and so return None. A job spanning several
-    servers' libraries also returns None; schedules pin one server, so it is never the job that covers them.
+    servers' libraries also returns None: a schedule tick scans one server's libraries, or the same picks as one unpinned job.
 
     Args:
         job: A job from the job manager.
@@ -381,6 +381,8 @@ def _scan_scope(job: Any) -> tuple[str | None, frozenset[str] | None] | None:
         if cfg.get("job_type", "full_library") != "full_library" or cfg.get("source"):
             return None
         if _has_scan_filters(cfg):
+            return None
+        if cfg.get("libraries"):
             return None
         library_ids = {str(x) for x in cfg.get("selected_library_ids") or []}
         library_ids |= {str(x) for x in cfg.get("selected_libraries") or []}
@@ -984,19 +986,20 @@ def execute_scheduled_job(
         try:
             if kind == JOB_KIND_PREVIEWS:
                 preview_cfg = {key: value for key, value in cfg.items() if key not in ("job_kinds", "libraries")}
-                # One previews job per server, each pinned to it, as Start new job creates them.
-                scopes = _pairs_by_server(pairs) if pairs else [(server_id, library_ids)]
-                for scope_server_id, scope_library_ids in scopes:
-                    queued |= _start_scheduled_previews_job(
-                        manager,
-                        schedule_id,
-                        scope_library_ids,
-                        library_name,
-                        preview_cfg,
-                        priority,
-                        scope_server_id,
-                        force=bool((config or {}).get("force") or (config or {}).get("force_generate")),
-                    )
+                # Picks on several servers are one unpinned job carrying the pairs, as Start new job creates it, so a
+                # file shared by two servers is processed once.
+                if pairs:
+                    preview_cfg["libraries"] = pairs
+                queued |= _start_scheduled_previews_job(
+                    manager,
+                    schedule_id,
+                    library_ids,
+                    library_name,
+                    preview_cfg,
+                    priority,
+                    server_id,
+                    force=bool((config or {}).get("force") or (config or {}).get("force_generate")),
+                )
             elif kind == JOB_KIND_INTRO_CREDITS:
                 queued |= _start_scheduled_intro_credits_job(
                     manager, schedule_id, library_ids, library_name, priority, server_id, scan_filters, pairs=pairs
@@ -1020,14 +1023,6 @@ def execute_scheduled_job(
             )
     if queued:
         manager._update_last_run(schedule_id)
-
-
-def _pairs_by_server(pairs: list[dict]) -> list[tuple[str, list[str]]]:
-    """Exact library picks grouped by server, in first-seen order."""
-    by_server: dict[str, list[str]] = {}
-    for pair in pairs:
-        by_server.setdefault(pair["server_id"], []).append(pair["library_id"])
-    return list(by_server.items())
 
 
 def _start_scheduled_previews_job(
@@ -1062,7 +1057,7 @@ def _start_scheduled_previews_job(
     cfg = dict(cfg)
     # For multi-library schedules, hand off the full list via config.selected_library_ids so the orchestrator
     # processes each library in one job. The single-library shortcut goes via library_id.
-    if len(library_ids) > 1:
+    if len(library_ids) > 1 and "libraries" not in cfg:
         cfg["selected_library_ids"] = sorted(set(library_ids))
     kwargs: dict[str, Any] = {
         "library_id": primary_library_id,
@@ -1085,7 +1080,7 @@ def _start_scheduled_previews_job(
     from .jobs import JobStatus, get_job_manager
 
     pinned_server_id = server_id
-    if not pinned_server_id and library_ids:
+    if not pinned_server_id and library_ids and "libraries" not in cfg:
         from .routes.api_jobs import _infer_server_from_library_ids
 
         pinned_server_id = _infer_server_from_library_ids(library_ids)[0]

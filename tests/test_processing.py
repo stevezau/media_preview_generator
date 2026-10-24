@@ -1212,7 +1212,8 @@ class TestSummaryAndWarnings:
             loguru_logger.remove(sink_id)
 
         listed = [r for r in records if r["message"].startswith("Run finished with") or "a.mkv" in r["message"]]
-        assert [r["level"].name for r in listed] == ["WARNING", "WARNING"], [r["message"] for r in records]
+        # One WARNING with the count; each file's own ERROR line already said its reason, so the list is DEBUG.
+        assert [r["level"].name for r in listed] == ["WARNING", "DEBUG"], [r["message"] for r in records]
         assert all(r["extra"].get(JOB_LOG_SKIP) is True for r in listed)
         complete = [r for r in records if r["message"].startswith("Processing complete")]
         assert len(complete) == 1 and not complete[0]["extra"].get(JOB_LOG_SKIP)

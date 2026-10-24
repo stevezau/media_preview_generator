@@ -2946,18 +2946,46 @@ def _node_label(gpu: str | None, gpu_device_path: str | None) -> str:
         return ""
 
 
-def _log_live(build: Callable[..., str], level: str = "INFO") -> None:
-    """Log one line as the file's work happens, live. Never raises: a bug building it (an unexpected shape in a
+def _emit(notes: RunNotes | None, line: str, level: str = "INFO") -> None:
+    """Write one of the file's lines, or hold it while the checking thread has only re-read what's stored.
+
+    A file that ends with nothing new to send writes none of its held lines (``_log_file``), like an unchanged
+    preview; a file a detector reads, or that a worker picks up, is real work and logs live, so what a long read
+    is doing is never hidden until it finishes.
+
+    Args:
+        notes: The run's notes; None writes at once.
+        line: The line.
+        level: Its level.
+    """
+    if notes is None or notes.live or notes.worker:
+        write_line(line, level)
+    else:
+        notes.held.append((line, level))
+
+
+def _flush_held(notes: RunNotes, *, go_live: bool = True) -> None:
+    """Write the lines held so far, in order, and (by default) log the rest of the file's lines as they happen."""
+    held, notes.held = notes.held, []
+    if go_live:
+        notes.live = True
+    for line, level in held:
+        write_line(line, level)
+
+
+def _log_live(build: Callable[..., str], level: str = "INFO", *, notes: RunNotes | None = None) -> None:
+    """Log one line as the file's work happens: live, or held until the file reads something (``_emit``). Never raises: a bug building it (an unexpected shape in a
     step's own data) mustn't fail the file or hold up another owner's write -- the same guard ``_log_file`` gives
     the file's last lines, for every line logged before them.
 
     Args:
         build: Builds the line's text; logged only when it doesn't raise.
         level: The line's level.
+        notes: The run's notes, when the line may be held (``_emit``).
     """
     line = _built_line(build)
     if line is not None:
-        write_line(line, level)
+        _emit(notes, line, level)
 
 
 def _log_source(notes: RunNotes, key: tuple[Source, str], build: Callable[..., str]) -> None:
@@ -2978,7 +3006,7 @@ def _log_source(notes: RunNotes, key: tuple[Source, str], build: Callable[..., s
     if line is None:
         return
     notes.logged_sources.add(key)
-    write_line(line)
+    _emit(notes, line)
 
 
 def _attempt(
@@ -3055,7 +3083,7 @@ def _attempt(
         # A worker's own pickup line already named this (``log_pickup``); the checking thread names itself here,
         # live, rather than waiting for the file to finish.
         notes.start_logged = True
-        _log_live(lambda: file_start_line(title, types, is_episode=ids.is_episode))
+        _log_live(lambda: file_start_line(title, types, is_episode=ids.is_episode), notes=notes)
     rec = ctx.store.upsert_file(
         FileIdentity(path, st.st_size, st.st_mtime_ns),
         duration_ms=probe.duration_ms if probe else None,
@@ -3261,10 +3289,13 @@ def _attempt(
                 on_gpu = gpu is not None
                 device = worker_device(notes.worker) if on_gpu else ""
                 node = _node_label(gpu, gpu_device_path)
+                # A detector is about to read the file, which can take a while: log from here on, live.
+                _flush_held(notes)
                 _log_live(
                     lambda s=source, g=on_gpu, d=device, n=node: titled(
                         title, reading_line(s, on_gpu=g, device=d, node=n)
-                    )
+                    ),
+                    notes=notes,
                 )
                 read_started = ctx.monotonic()
                 try:
@@ -3290,6 +3321,7 @@ def _attempt(
                         _log_live(
                             lambda s=source, e=exc, lines=said: titled(title, gpu_failure_line(s, str(e), lines)),
                             "WARNING",
+                            notes=notes,
                         )
                     raise
                 if unanswered is None:
@@ -3321,7 +3353,7 @@ def _attempt(
                         ),  # fmt: skip
                     )
 
-                _log_live(_read_result_line)
+                _log_live(_read_result_line, notes=notes)
             if pending:
                 ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
                 # Its Reading/result lines already said this: a later stage's "already decided" render of the same
@@ -3360,7 +3392,7 @@ def _attempt(
 
             extra = _built_line(_season_extra)
             if extra:
-                write_line(titled(title, extra))
+                _emit(notes, titled(title, extra))
 
     if cancelled():  # a detector stopped part way decides nothing: the file is left as it was for the next run
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
@@ -3384,7 +3416,7 @@ def _attempt(
         }
     decisions = _keep_published_before_rule_change(ctx, rec, decisions)
     decisions = _carry_over(ctx, rec, servers, owners, decisions)
-    _log_live(lambda: titled(title, decided_line(decisions, types, ctx.store.evidence_rows(rec.id))))
+    _log_live(lambda: titled(title, decided_line(decisions, types, ctx.store.evidence_rows(rec.id))), notes=notes)
     fingerprint = ctx.settings.detection_fingerprint()
     changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
     if changed:
@@ -3427,7 +3459,9 @@ def _attempt(
             row["status"], row["message"] = ServerStatus.FAILED.value, read_failure
         rows.append(row)
         # A bug describing what a server got mustn't stop the next owner's write: each row is already stored above.
-        _log_live(lambda r=row: titled(title, server_result_line(_server_result(ctx, rec, r, decisions, notes))))
+        _log_live(
+            lambda r=row: titled(title, server_result_line(_server_result(ctx, rec, r, decisions, notes))), notes=notes
+        )
     waiting_to_retry = any(
         r["status"] == ServerStatus.WAITING.value and r.get("reason_code") in RETRY_REASON_CODES for r in rows
     )
@@ -3660,6 +3694,13 @@ def _outcome_reason(rows: list[dict], status: str) -> str:
     return ""
 
 
+def _is_unchanged(notes: RunNotes, rows: list[dict], *, failed: bool) -> bool:
+    """Whether a checking stage ended with nothing read and nothing to send, so the file logs what an unchanged
+    preview does (debug only): a detector's read, a worker's stage and a failure are all work worth the log.
+    """
+    return not failed and not notes.worker and not notes.live and nothing_was_sent(rows)
+
+
 def _log_file(
     ctx: PipelineContext,
     rows: list[dict],
@@ -3669,13 +3710,21 @@ def _log_file(
     title: str,
 ) -> None:
     """Log the file's last line: the worker's "completed" line or the checking thread's "done" line. Every other line
-    -- each source's, "Decided" and each server's -- was already logged live as that work happened.
+    -- each source's, "Decided" and each server's -- was logged live as that work happened, or held until now and
+    written here (dropped for an unchanged file).
 
-    Every file gets its "completed"/"done" line, whatever it did. A failed file is always logged, at WARNING.
+    Every file gets its "completed"/"done" line, whatever it did; an unchanged one only at DEBUG, like an unchanged
+    preview. A failed file is always logged, at WARNING.
     """
     ctx._note_finished(rows)
     failed = outcome is FileOutcome.FAILED
     seconds = _stage_seconds(ctx, notes)
+    if _is_unchanged(notes, rows, failed=failed):
+        logger.debug("{}", titled(title, done_line(seconds, nothing_sent=True)))
+        notes.held = []
+        notes.logged = True
+        return
+    _flush_held(notes, go_live=False)
     level = "WARNING" if failed else "INFO"
     if notes.worker:
         status = _outcome_status(outcome)
@@ -3696,6 +3745,7 @@ def _log_failure(ctx: PipelineContext, path: str, notes: RunNotes, message: str)
     read, or kept changing while it was analysed): its start line too, if nothing logged it yet. Never raises: the
     file already has its outcome."""
     try:
+        _flush_held(notes)
         title = notes.title or display_name(path)
         path_ids = ids_from_path(path)
         types = notes.types if notes.types is not None else _enabled_types(ctx.settings, path_ids)
@@ -3722,6 +3772,7 @@ def _log_failure(ctx: PipelineContext, path: str, notes: RunNotes, message: str)
 def _log_gone(path: str, notes: RunNotes, message: str) -> None:
     """Log the one line of a file a newer file replaced (``_not_on_disk``). Never raises."""
     try:
+        _flush_held(notes)
         write_line(f"{notes.title or display_name(path)}: {message}")
         notes.logged = True
     except Exception as exc:
@@ -3748,6 +3799,7 @@ def log_pickup(item: ProcessableItem, worker: str, *, ctx: PipelineContext) -> N
     types = notes.types if notes is not None and notes.types is not None else _enabled_types(ctx.settings, path_ids)
     if notes is not None:
         notes.start_logged = True
+        _flush_held(notes)  # a file a worker works on shows what the checking stage found, before the worker's line
     write_line(file_start_line(title, types, is_episode=is_episode, worker=worker))
 
 
@@ -3870,6 +3922,8 @@ def _run(
                         _log_failure(ctx, path, notes, outcome.message)
                     elif not notes.logged and outcome.outcome_key == FileOutcome.SOURCE_GONE.value:
                         _log_gone(path, notes, outcome.message)
+                    elif not notes.logged:
+                        _flush_held(notes)  # e.g. a cancelled file: its lines so far are still the job's record
                     return outcome
         except _FileChangedError:
             logger.info("{} changed while its markers were detected; detecting again", path)

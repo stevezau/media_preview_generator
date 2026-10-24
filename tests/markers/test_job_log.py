@@ -512,43 +512,45 @@ class TestFileBlocks:
             "Done: 1 file · 1 sent to Plex · 0 nothing found · TheIntroDB skipped for 1 file"
         ]
 
-    def test_a_file_whose_answer_didnt_change_gets_a_full_block_too(self, store, media, job_log):
+    def test_a_file_whose_answer_didnt_change_writes_nothing_to_the_job_log(self, store, media, job_log):
         reg = _plex(media)
-        for expected in (FileOutcome.PUBLISHED, FileOutcome.UP_TO_DATE):
-            ctx = _job(store, media, reg, now=lambda: datetime.now(UTC))
-            out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
-            assert out.outcome_key == expected.value
+        ctx = _job(store, media, reg, now=lambda: datetime.now(UTC))
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        written = _messages(job_log)
+        assert written[-1] == DONE
 
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        assert _messages(job_log) == [
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (asked now)",
-            f"{EPISODE} · Checking TheIntroDB… no entry (asked now)",
-            f"{EPISODE} · Reading credit text on the CPU…",
-            f"{EPISODE} · Credit text: credits start at 21:31 (0 s)",
-            f"{EPISODE} · Checking Plex's own markers… none (asked now)",
-            f"{EPISODE} · Decided: intro nothing found · credits 21:31–22:01 (credit text)",
-            f"{EPISODE} · [Plex] Added credits 21:31–22:01",
-            DONE,
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (saved {today})",
-            f"{EPISODE} · Checking TheIntroDB… no entry (saved {today})",
-            f"{EPISODE} · Checking credit text… credits start at 21:31 (saved {today})",
-            f"{EPISODE} · Checking Plex's own markers… none (saved {today})",
-            f"{EPISODE} · Decided: intro nothing found · credits 21:31–22:01 (credit text)",
-            f"{EPISODE} · [Plex] Already up to date (credits 21:31–22:01)",
-            f"{DONE} (nothing new to send)",
+        ctx = _job(store, media, reg, now=lambda: datetime.now(UTC))
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+
+        # Like an unchanged preview: nothing read, nothing sent, nothing logged.
+        assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+        assert _messages(job_log) == written
+
+    def test_an_unchanged_file_ends_with_a_debug_done_line_only(self, store, media):
+        reg = _plex(media)
+        _run(_job(store, media, reg), media, {"plex-1": ready_publisher()}, probe=_probe())
+        records: list[tuple[str, str]] = []
+        handler = logger.add(
+            lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG", format="{message}"
+        )
+        try:
+            _run(_job(store, media, reg), media, {"plex-1": ready_publisher()}, probe=_probe())
+        finally:
+            logger.remove(handler)
+
+        assert [(level, msg) for level, msg in records if msg.startswith(EPISODE)] == [
+            ("DEBUG", f"{DONE} (nothing new to send)")
         ]
 
-    def test_nothing_found_twice_still_logs_a_full_block_the_second_time(self, store, media, job_log):
+    def test_nothing_found_twice_writes_nothing_the_second_time(self, store, media, job_log):
         reg = _plex(media)
-        for _ in range(2):
-            ctx = _job(store, media, reg, found=(), now=lambda: datetime.now(UTC))
-            out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
-            assert out.outcome_key == FileOutcome.NO_MARKERS.value
-
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        assert _messages(job_log) == [
+        ctx = _job(store, media, reg, found=(), now=lambda: datetime.now(UTC))
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+        assert out.outcome_key == FileOutcome.NO_MARKERS.value
+        written = _messages(job_log)
+        # The first run read the file, so it is logged in full, step by step.
+        assert written == [
             HEAD,
             f"{EPISODE} · Checking chapters… none (asked now)",
             f"{EPISODE} · Checking TheIntroDB… no entry (asked now)",
@@ -558,15 +560,26 @@ class TestFileBlocks:
             f"{EPISODE} · Decided: intro nothing found · credits nothing found",
             f"{EPISODE} · [Plex] Nothing to send",
             f"{DONE} (nothing new to send)",
-            HEAD,
-            f"{EPISODE} · Checking chapters… none (saved {today})",
-            f"{EPISODE} · Checking TheIntroDB… no entry (saved {today})",
-            f"{EPISODE} · Checking credit text… none found (saved {today})",
-            f"{EPISODE} · Checking Plex's own markers… none (saved {today})",
-            f"{EPISODE} · Decided: intro nothing found · credits nothing found",
-            f"{EPISODE} · [Plex] Nothing to send",
-            f"{DONE} (nothing new to send)",
         ]
+
+        ctx = _job(store, media, reg, found=(), now=lambda: datetime.now(UTC))
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+
+        assert out.outcome_key == FileOutcome.NO_MARKERS.value
+        assert _messages(job_log) == written
+
+    def test_a_failed_file_writes_the_steps_it_held_then_its_failure(self, store, media, job_log):
+        ctx = _job(store, media, _plex(media))
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(duration=0))
+
+        assert out.outcome_key == FileOutcome.FAILED.value
+        assert _messages(job_log) == [
+            HEAD,
+            f"{EPISODE} · Checking chapters… none (asked now)",
+            f"{EPISODE} · Failed: {pipeline.NO_DURATION_MESSAGE}",
+            f"{EPISODE} · failed after 0 s",
+        ]
+        assert [level for level, _ in job_log][-2:] == ["WARNING", "WARNING"]
 
     def test_a_movie_without_a_server_title_is_named_by_its_file(self, store, movie, job_log):
         chapters = (Chapter(0, 1_295_324, "Movie"), Chapter(1_295_324, None, "Credits"))
@@ -603,11 +616,8 @@ class TestFileBlocks:
         publishers = {"plex-1": ready_publisher()}
         handed_on, _ = _run(ctx, media, publishers, probe=_probe())
         assert handed_on is None
-        assert _messages(job_log) == [
-            HEAD,
-            f"{EPISODE} \u00b7 Checking chapters\u2026 none (asked now)",
-            f"{EPISODE} \u00b7 Checking TheIntroDB\u2026 no entry (asked now)",
-        ]
+        # Held on the checking stage; the worker's pickup shows them, before its own line.
+        assert _messages(job_log) == []
 
         pipeline.log_pickup(ProcessableItem(canonical_path=media, server_id="plex-1"), "CPU Worker 1", ctx=ctx)
         _run(ctx, media, publishers, probe=_probe(), stage="process", worker_name="CPU Worker 1")
@@ -1083,7 +1093,7 @@ class TestASourceOfferedAgain:
     left undecided, IntroDB is asked for real, and its answer gets its own line, not held back by the "not needed" one
     already logged for the same key."""
 
-    def test_a_source_offered_again_gets_its_real_answer_logged(self, store, media, job_log):
+    def test_a_source_offered_again_gets_its_real_answer_logged(self, store, media, job_log, every_file_logged):
         reg = _plex(media)
         raw = {
             "sources": [
@@ -1617,39 +1627,26 @@ class TestSentLine:
         assert server_result_line(result) == "[Plex] Unchanged intro 0:41–1:12; removed credits (it no longer holds)"
 
 
-class TestUnchangedFilesGetFullBlocks:
-    """A file whose answer didn't change and whose servers are up to date logs its full block too, not a one-line
-    summary: every source's answer (a reused one saying when it was last stored), what was decided and what was sent."""
+class TestUnchangedFilesWriteNothing:
+    """A file whose answer didn't change and whose servers are up to date writes no job-log lines, as an unchanged
+    preview doesn't: a recheck over a whole library doesn't fill the log."""
 
-    def test_a_hundred_file_recheck_logs_a_block_per_file(self, store, tmp_path, job_log):
+    def test_a_hundred_file_recheck_logs_nothing(self, store, tmp_path, job_log):
         paths = [_accused(tmp_path, episode) for episode in range(1, 6)]
         reg = _plex(paths[0])
 
         def run_all():
             ctx = _job(store, paths[0], reg, now=lambda: datetime.now(UTC))
             for n, path in enumerate(paths):
-                _run(ctx, path, {"plex-1": ready_publisher()}, probe=_probe(), hints={"plex-1": f"item-{n}"})
+                out, _ = _run(ctx, path, {"plex-1": ready_publisher()}, probe=_probe(), hints={"plex-1": f"item-{n}"})
+            return out
 
         run_all()
         job_log.clear()
-        run_all()
+        out = run_all()
 
-        heads = [m for m in _messages(job_log) if m.startswith("Accused S04E") and ": checking" in m]
-        assert heads == [f"Accused S04E{n:02d}: checking intro and credits" for n in range(1, 6)]
-        dones = [m for m in _messages(job_log) if " · done in" in m]
-        assert dones == [f"Accused S04E{n:02d} · done in 0 s (nothing new to send)" for n in range(1, 6)]
-        # Every source's line is still there, its reused answer saying when it was stored rather than "asked now".
-        first_block = [m for m in _messages(job_log) if m.startswith("Accused S04E01")]
-        assert first_block[0] == "Accused S04E01: checking intro and credits"
-        assert [line.split("…", 1)[0] for line in first_block[1:5]] == [
-            "Accused S04E01 · Checking chapters",
-            "Accused S04E01 · Checking TheIntroDB",
-            "Accused S04E01 · Checking credit text",
-            "Accused S04E01 · Checking Plex's own markers",
-        ]
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        assert first_block[3] == f"Accused S04E01 · Checking credit text… credits start at 21:31 (saved {today})"
-        assert first_block[6] == "Accused S04E01 · [Plex] Already up to date (credits 21:31–22:01)"
+        assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+        assert _messages(job_log) == []
 
 
 class TestTitles:
@@ -1743,7 +1740,7 @@ class TestTitles:
         assert server.get_external_ids.call_count == 1
         lookups.assert_not_called()
 
-    def test_a_film_without_an_answer_is_looked_up_once_per_process(self, store, movie, job_log):
+    def test_a_film_without_an_answer_is_looked_up_once_per_process(self, store, movie, job_log, every_file_logged):
         # A hint gives ``title_asks`` a known item id (a webhook payload, say): naming the file never searches for
         # one itself (that's ``_publish_to``'s job, later in the same run).
         self._known_movie(store, movie)
@@ -1821,7 +1818,9 @@ class TestTitles:
         server.get_external_ids.assert_not_called()
 
     @pytest.mark.parametrize("failure", ["times-out", "raises", "no-title"])
-    def test_a_lookup_that_fails_never_holds_or_fails_the_file(self, store, movie, job_log, monkeypatch, failure):
+    def test_a_lookup_that_fails_never_holds_or_fails_the_file(
+        self, store, movie, job_log, every_file_logged, monkeypatch, failure
+    ):
         self._known_movie(store, movie)
         reg = _plex(movie)
         server = reg.get("plex-1")

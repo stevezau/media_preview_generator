@@ -167,6 +167,9 @@ class Config:
     # at all; False lists the files and queues only those follow-ups (a schedule without Previews ticked).
     recently_added_follow_up_kinds: list[str] | None = None
     recently_added_make_previews: bool = True
+    # A scan that picked libraries on several servers: each server's library ids (server id -> ids). None = the
+    # job is pinned to one server or scans every library.
+    library_ids_by_server: dict[str, list[str]] | None = None
     # Exclude paths: list of {"value": str, "type": "path"|"regex"}; path = prefix match, regex = full match
     exclude_paths: list[dict[str, str]] | None = None
     # When a job is pinned to one configured media-server (via the Schedules

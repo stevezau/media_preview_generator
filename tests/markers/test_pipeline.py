@@ -4395,7 +4395,7 @@ class TestDecideRulesVersion:
         return _run(ctx, self.media, {"plex-1": plex})[0]
 
     def test_a_lone_skipdb_intro_published_before_the_rule_change_is_kept(
-        self, store, media, monkeypatch, loguru_caplog
+        self, store, media, monkeypatch, loguru_caplog, every_file_logged
     ):
         # SkipDB needs a second source for new decisions, but a re-decide that only the rule
         # change causes doesn't pull an intro users already see (on arm64 no season audio would ever confirm it).

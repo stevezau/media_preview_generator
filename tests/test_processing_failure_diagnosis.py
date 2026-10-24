@@ -18,14 +18,17 @@ from media_preview_generator.processing.ffmpeg_runner import create_ffmpeg_runne
 from media_preview_generator.processing.generator import (
     NO_DECODER_SUMMARY,
     _diagnose_ffmpeg_exit_code,
+    _extract_ffmpeg_error_summary,
     _gpu_hand_off,
     _save_ffmpeg_failure_log,
     _without_metadata_tags,
     video_has_no_decoder,
+    video_input_unreadable,
 )
 from tests.test_processing_partial_output import (
     HWACCEL_LINE,
     IO_ERROR,
+    RAW_SIGSEGV,
     Outcome,
     _write_frames,
     assert_handed_to_cpu,
@@ -123,8 +126,8 @@ def _run_real(
 
 
 def _error_header(outcome: Outcome) -> str:
-    headers = [line for line in outcome.warnings if "FFmpeg failed while extracting frames" in line]
-    assert headers, outcome.warnings
+    headers = [line for line in outcome.job_log if "FFmpeg failed while extracting frames" in line]
+    assert headers, outcome.job_log
     return headers[-1]
 
 
@@ -162,6 +165,199 @@ class TestExit251Tag:
 
         assert f"(exit code {IO_ERROR}: {tag})" in _error_header(outcome)
         assert f"exit_diagnosis: {tag}\n" in _failure_log(tmp_path, monkeypatch, IO_ERROR, stderr)
+
+
+# Production stderr of a Matroska file whose first bytes are zeroes (exit 183), and of one that is gone (exit 254).
+EBML_STDERR = [
+    "[matroska,webm @ 0x55d0c8a4e8c0] 0x00 at pos 0 (0x0) invalid as first byte of an EBML number",
+    "[in#0 @ 0x55d0c8a4e780] Error opening input: Invalid data found when processing input",
+    "Error opening input file /media/movie.mkv.",
+    "Error opening input files: Invalid data found when processing input",
+]
+MID_FILE_EBML_STDERR = [
+    "[matroska,webm @ 0x55d0c8a4e8c0] Length 9 indicated by an EBML number's first byte 0x01 at pos 4096 (0x1000) "
+    "exceeds max length 8.",
+    "[in#0/matroska,webm @ 0x55d0c8a4e8c0] Error during demuxing: Invalid data found when processing input",
+]
+GONE_STDERR = [
+    "[in#0 @ 0x5581d3c0b780] Error opening input: No such file or directory",
+    "Error opening input file /media/movie.mkv.",
+    "Error opening input files: No such file or directory",
+]
+INVALID_DATA_EXIT = 183
+NO_SUCH_FILE_EXIT = 254
+
+
+STATS_LINES = [
+    "[out#0/image2 @ 0x5581d3c0b780] video:0KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB "
+    "muxing overhead: unknown",
+    "frame=    0 fps=0.0 q=0.0 Lsize=N/A time=N/A bitrate=N/A speed=N/A",
+    "Conversion failed!",
+]
+
+
+class TestExtractFfmpegErrorSummary:
+    """The reason shown for a failed run is FFmpeg's error line, never the stats it prints on the way out."""
+
+    @pytest.mark.parametrize(
+        ("stderr", "expected"),
+        [
+            ([*EBML_STDERR, *STATS_LINES], "Error opening input files: Invalid data found when processing input"),
+            (
+                ["Error while decoding stream #0:0: Invalid data found", *STATS_LINES],
+                "Error while decoding stream #0:0: Invalid data found",
+            ),
+            (["[hevc @ 0x1] Cannot allocate memory", *STATS_LINES], "Cannot allocate memory"),
+            (STATS_LINES, ""),
+            (["Stream mapping:", "Press [q] to stop"], ""),
+            ([], ""),
+        ],
+        ids=["error-before-stats", "decode-error-before-stats", "prefix-stripped", "stats-only", "no-error", "empty"],
+    )
+    def test_skips_the_stats_lines(self, stderr, expected):
+        assert _extract_ffmpeg_error_summary(stderr) == expected
+
+    @pytest.mark.parametrize("line", STATS_LINES)
+    def test_a_stats_line_is_never_the_reason_even_with_an_error_keyword_in_it(self, line):
+        assert _extract_ffmpeg_error_summary([line]) == ""
+
+
+class TestBadInputIsNotTheGpusFault:
+    """A file FFmpeg can't open fails the same way on every device: one attempt, no hand-off, no GPU blame. A damaged
+    file that opens (FFmpeg resyncs past its container errors) is not that: its GPU failures are handled as before."""
+
+    @pytest.mark.parametrize(
+        ("rc", "stderr", "frames_written", "expected"),
+        [
+            (INVALID_DATA_EXIT, EBML_STDERR, False, True),
+            (NO_SUCH_FILE_EXIT, GONE_STDERR, False, True),
+            (1, ["[in#0 @ 0x1] Error opening input: Permission denied"], False, True),
+            (INVALID_DATA_EXIT, EBML_STDERR, True, False),
+            (0, EBML_STDERR, False, False),
+            # Container errors alone, without an open failure, are a file FFmpeg read on.
+            (INVALID_DATA_EXIT, MID_FILE_EBML_STDERR, False, False),
+            (1, [EBML_STDERR[0]], False, False),
+            # An open failure that names no file error can be a device problem (an unknown -hwaccel).
+            (1, ["Error opening input files: Invalid argument"], False, False),
+            (1, ["[in#0 @ 0x1] Error opening input: Operation not permitted"], False, False),
+            # Not input errors: a GPU error, a disk's I/O error, a plain failure and a decoder-side invalid frame.
+            (IO_ERROR, [HWACCEL_LINE], False, False),
+            (IO_ERROR, [PLAIN_IO_STDERR], False, False),
+            (1, ["Some error"], False, False),
+            (
+                1,
+                ["[hevc @ 0x1] Error while decoding stream #0:0: Invalid data found when processing input"],
+                False,
+                False,
+            ),
+            (1, [], False, False),
+        ],
+        ids=[
+            "ebml-at-open",
+            "gone",
+            "permission-denied",
+            "frames-written",
+            "exit-0",
+            "ebml-mid-file",
+            "ebml-line-alone",
+            "open-failure-invalid-argument",
+            "open-failure-not-permitted",
+            "gpu-error",
+            "io-error",
+            "plain",
+            "decoder",
+            "empty",
+        ],
+    )
+    def test_verdict_follows_the_stderr(self, rc, stderr, frames_written, expected):
+        assert video_input_unreadable(rc, stderr, frames_written=frames_written) is expected
+
+    @pytest.mark.parametrize(
+        ("rc", "stderr"),
+        [(INVALID_DATA_EXIT, EBML_STDERR), (NO_SUCH_FILE_EXIT, GONE_STDERR)],
+        ids=["ebml", "gone"],
+    )
+    def test_a_file_that_wont_open_is_not_handed_to_another_device(self, rc, stderr):
+        assert _gpu_hand_off(rc, stderr, stderr, stopped_part_way=False, hwaccel="cuda") is None
+        assert _diagnose_ffmpeg_exit_code(rc, stderr) == "bad_input"
+
+    @pytest.mark.parametrize(
+        ("rc", "stderr", "part_way"),
+        [
+            # A damaged-but-playable file whose GPU run really failed: another device gets it, as before.
+            (IO_ERROR, [EBML_STDERR[0], HWACCEL_LINE], True),
+            (IO_ERROR, [*MID_FILE_EBML_STDERR, HWACCEL_LINE], False),
+            (RAW_SIGSEGV, [EBML_STDERR[0]], True),
+            (RAW_SIGSEGV, MID_FILE_EBML_STDERR, False),
+            (IO_ERROR, [EBML_STDERR[0], PLAIN_IO_STDERR], True),
+            (INVALID_DATA_EXIT, MID_FILE_EBML_STDERR, True),
+            # Frames were written, so the file opened: even an open failure line is the GPU's to answer for.
+            (INVALID_DATA_EXIT, EBML_STDERR, True),
+        ],
+        ids=[
+            "hwaccel-error",
+            "hwaccel-error-no-frames",
+            "sigsegv",
+            "sigsegv-no-frames",
+            "io-error",
+            "stopped",
+            "open-line",
+        ],
+    )
+    def test_a_file_that_opened_still_goes_to_another_device(self, rc, stderr, part_way):
+        assert _gpu_hand_off(rc, stderr, stderr, stopped_part_way=part_way, hwaccel="cuda") is not None
+
+    @pytest.mark.parametrize("keyframe_gap", [1.0, None], ids=["keyframe", "full-decode"])
+    @pytest.mark.parametrize(
+        ("rc", "stderr"),
+        [(INVALID_DATA_EXIT, EBML_STDERR), (NO_SUCH_FILE_EXIT, GONE_STDERR)],
+        ids=["ebml", "gone"],
+    )
+    def test_a_gpu_run_on_a_file_that_wont_open_ends_in_one_attempt(self, run, tmp_path, rc, stderr, keyframe_gap):  # noqa: F811
+        (tmp_path / "movie.mkv").write_bytes(b"\0" * 16)
+        outcome, procs = _run_real(run, tmp_path, rc, stderr, gpu="NVIDIA", keyframe_gap=keyframe_gap)
+
+        assert not isinstance(outcome.result, Exception), "a CodecNotSupportedError would send it to another device"
+        assert [proc.keyframe_only for proc in procs] == [keyframe_gap is not None], "one FFmpeg run, no rerun"
+        assert outcome.result[:2] == (False, 0)
+        assert [f["exit_code"] for f in outcome.failures] == [rc]
+        assert "(bad_input)" in outcome.failures[0]["reason"]
+        # The app log has the file's one ERROR with the reason; the job log goes on to show the run's own line.
+        app_errors = [line for line in outcome.app_log if line.startswith(("ERROR|", "WARNING|"))]
+        assert len(app_errors) == 1 and app_errors[0].startswith("ERROR|"), outcome.app_log
+        assert "(bad_input)" in app_errors[0] and _extract_ffmpeg_error_summary(stderr) in app_errors[0]
+        assert any(f"exit code {rc}: bad_input" in line for line in outcome.job_log), outcome.job_log
+        assert not any(f"exit code {rc}: bad_input" in line for line in outcome.app_log), outcome.app_log
+
+    def test_a_file_that_is_gone_is_neither_logged_as_an_error_nor_recorded_as_failed(self, run, tmp_path):  # noqa: F811
+        outcome, procs = _run_real(run, tmp_path, NO_SUCH_FILE_EXIT, GONE_STDERR, gpu="NVIDIA")
+
+        assert len(procs) == 1
+        assert outcome.result[:2] == (False, 0)
+        assert outcome.failures == []
+        assert not any(line.startswith(("ERROR|", "WARNING|")) for line in outcome.app_log), outcome.app_log
+
+    @pytest.mark.parametrize("keyframe_gap", [1.0, None], ids=["keyframe", "full-decode"])
+    @pytest.mark.parametrize(
+        ("rc", "stderr"),
+        [
+            (INVALID_DATA_EXIT, [EBML_STDERR[0], *MID_FILE_EBML_STDERR]),
+            (RAW_SIGSEGV, [EBML_STDERR[0]]),
+            (IO_ERROR, [EBML_STDERR[0], HWACCEL_LINE]),
+        ],
+        ids=["damaged-file-fails", "damaged-file-crashes", "damaged-file-gpu-error"],
+    )
+    def test_a_damaged_file_whose_gpu_run_failed_with_some_frames_goes_to_the_cpu(
+        self,
+        run,  # noqa: F811
+        tmp_path,
+        rc,
+        stderr,
+        keyframe_gap,
+    ):
+        outcome, _procs = _run_real(run, tmp_path, rc, stderr, gpu="NVIDIA", keyframe_gap=keyframe_gap, frames=7)
+
+        assert_handed_to_cpu(outcome)
 
 
 class TestVideoNoDeviceCanDecode:
@@ -243,16 +439,17 @@ class TestVideoNoDeviceCanDecode:
             (NO_DECODER_EXIT, "GPU" if gpu else "CPU")
         ]
         assert outcome.failures[0]["reason"] == f"FFmpeg exit {NO_DECODER_EXIT} (no_decoder) — {summary}"
-        # One failure line, then only FFmpeg's own lines about the video.
-        errors = [line for line in outcome.warnings if line.startswith("ERROR|")]
-        assert len(errors) == 1, outcome.warnings
+        # One failure line in the app log; the job log goes on with only FFmpeg's own lines about the video.
+        errors = [line for line in outcome.app_log if line.startswith(("ERROR|", "WARNING|"))]
+        assert len(errors) == 1 and errors[0].startswith("ERROR|"), outcome.app_log
+        assert not any("stderr lines about the video" in line for line in outcome.app_log), outcome.app_log
         assert "can't be decoded by any device" in errors[0] and "unknown or protected codec" in errors[0]
         assert str(tmp_path / "movie.mkv") in errors[0]
         cause = VIDEO_STREAM_LINES + ([] if keyframe_gap else [NO_DECODER_STDERR[-3]])
-        assert [line.split("|", 1)[1].rstrip("\n") for line in outcome.warnings if line.startswith("WARNING|")] == [
-            f"FFmpeg's last {len(cause)} stderr lines about the video in {tmp_path / 'movie.mkv'}:",
-            *(f"  {line}" for line in cause),
-        ]
+        job_lines = [line.split("|", 1)[1].rstrip("\n") for line in outcome.job_log]
+        header = f"FFmpeg's last {len(cause)} stderr lines about the video in {tmp_path / 'movie.mkv'}:"
+        start = job_lines.index(header)
+        assert job_lines[start:] == [header, *(f"  {line}" for line in cause)]
 
     @pytest.mark.parametrize("gpu", ["INTEL", "AMD", "NVIDIA", None], ids=["intel", "amd", "nvidia", "cpu"])
     def test_a_dolby_vision_file_is_not_rerun_on_the_simpler_chains(self, run, tmp_path, gpu):  # noqa: F811
@@ -298,7 +495,7 @@ class TestVideoNoDeviceCanDecode:
         assert not isinstance(outcome.result, Exception)
         assert [(f["exit_code"], f["worker_type"]) for f in outcome.failures] == [(rc, "CPU")]
         assert "can't be decoded by any device" not in outcome.result[5]
-        assert not any("can't be decoded by any device" in line for line in outcome.warnings), outcome.warnings
+        assert not any("can't be decoded by any device" in line for line in outcome.job_log), outcome.job_log
         assert "FFmpeg failed while extracting frames" in _error_header(outcome)
         assert [proc.keyframe_only for proc in procs] == ([True, False] if keyframe_gap else [False])
 
@@ -343,8 +540,8 @@ class TestStderrExcerpt:
         stderr = NO_DECODER_STDERR[:-3] + ["Conversion failed!"]  # ends: tags, then the one cause line
         outcome, _procs = _run_real(run, tmp_path, NO_DECODER_EXIT, stderr, gpu=None)
 
-        start = next(i for i, line in enumerate(outcome.warnings) if "last 5 stderr lines" in line)
-        excerpt = [line.split("|", 1)[1].strip() for line in outcome.warnings[start + 1 : start + 6]]
+        start = next(i for i, line in enumerate(outcome.job_log) if "last 5 stderr lines" in line)
+        excerpt = [line.split("|", 1)[1].strip() for line in outcome.job_log[start + 1 : start + 6]]
         assert excerpt == [
             NO_DECODER_STDERR[2],
             "Input #0, matroska,webm, from 'movie.mkv':",

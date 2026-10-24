@@ -330,9 +330,9 @@ def test_chapter_seek_past_last_frame_is_not_reported_as_a_crash(
     code, _elapsed, _speed, _stderr = run(use_skip=False)
 
     assert code == 234
-    errors = [r for r in loguru_caplog.records if r.levelname == "ERROR"]
+    said = [r for r in loguru_caplog.records if "FFmpeg failed while extracting frames" in r.getMessage()]
     if quiet:
-        assert not errors and not saved
+        assert not said and not saved
         assert any("No video frame at 4.000s" in r.getMessage() for r in loguru_caplog.records)
     else:
-        assert errors and saved
+        assert said and saved

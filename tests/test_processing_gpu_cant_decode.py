@@ -918,7 +918,7 @@ class TestAGpuWithoutTheDecoderIsAQuietHandOff:
         assert_handed_to_cpu(outcome)
         assert outcome.result.kind == "hwaccel"
         assert len(procs) == 2
-        assert any(line.startswith("ERROR|FFmpeg failed while extracting frames") for line in records), records
+        assert any(line.startswith("INFO|FFmpeg failed while extracting frames") for line in records), records
         assert not any("The GPU can't decode the video of" in line for line in records), records
 
     def test_a_driver_error_besides_the_decoders_verdict_still_says_so(self, run):  # noqa: F811
@@ -934,7 +934,7 @@ class TestAGpuWithoutTheDecoderIsAQuietHandOff:
 
         assert_handed_to_cpu(outcome)
         assert len(procs) == 2
-        assert any(line.startswith("ERROR|FFmpeg failed while extracting frames") for line in records), records
+        assert any(line.startswith("INFO|FFmpeg failed while extracting frames") for line in records), records
         assert not any("The GPU can't decode the video of" in line for line in records), records
 
 

@@ -1399,6 +1399,32 @@ class TestLogsAndProgress:
             logger.remove(sink)
         assert ("INFO", "NAS/CPU · hi") in lines
 
+    @pytest.mark.parametrize("per_file", [True, None], ids=["tagged", "untagged"])
+    def test_a_line_the_node_tagged_as_one_files_story_stays_out_of_the_apps_log(self, media, per_file):
+        from media_preview_generator.logging_config import _app_sink_filter
+
+        line = {"seq": 0, "level": "INFO", "message": "FFmpeg failed while extracting frames"}
+        if per_file:
+            line["per_file"] = True
+        _install(ScriptedClient([running(log=[line], next_log=1), finished(protocol.STATUS_DONE, result={})]))
+        job_log, app_log = [], []
+        sinks = [
+            logger.add(lambda m: job_log.append(m.record["message"]), format="{message}"),
+            logger.add(
+                lambda m: app_log.append(m.record["message"]),
+                format="{message}",
+                filter=_app_sink_filter("INFO", console=False),
+            ),
+        ]
+        try:
+            _run(media)
+        finally:
+            for sink in sinks:
+                logger.remove(sink)
+        said = "NAS/CPU · FFmpeg failed while extracting frames"
+        assert said in job_log
+        assert (said in app_log) is (not per_file)
+
     def _relayed(self, media, message):
         lines = []
         state = running(log=[{"seq": 0, "level": "INFO", "message": message}], next_log=1)

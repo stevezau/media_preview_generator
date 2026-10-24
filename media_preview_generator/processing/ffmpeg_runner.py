@@ -36,6 +36,7 @@ from typing import Any, cast
 
 from loguru import logger
 
+from ..logging_config import per_file_logger
 from ..utils import (
     FFMPEG_LOG_PREFIX,
     dies_with_node,
@@ -72,6 +73,14 @@ _HEVC_PARAMETER_ERROR = re.compile(
     r"|(?P<pps>PPS id out of range: \d+)"
     r"|(?P<nalu>Skipping invalid undecodable NALU: \d+))$",
     re.IGNORECASE,
+)
+
+
+# Lines that never say why ffmpeg failed: showinfo's per-frame lines ("color_space:unknown" reads as an error to an
+# error summary), the end-of-run stats ("video:0KiB audio:0KiB ... muxing overhead: unknown", the progress line) and
+# the "Conversion failed!" every failed run ends on, which would hide the line before it.
+SAYS_NOTHING_RE = re.compile(
+    r"\[Parsed_showinfo_\d+ @|^Conversion failed!\s*$|^frame=|muxing overhead|\bvideo:\d+\w*B\s+audio:\d+\w*B"
 )
 
 
@@ -892,7 +901,7 @@ def create_ffmpeg_runner(
                     video_file,
                 )
             else:
-                logger.error(
+                per_file_logger.info(
                     "FFmpeg failed while extracting frames from {} (exit code {}: {}). "
                     "See the FFmpeg stderr lines logged below — they usually point at the cause "
                     "(unsupported codec, broken hardware acceleration, corrupted file, full disk). "
@@ -905,12 +914,12 @@ def create_ffmpeg_runner(
                     gpu_settings_hint(),
                 )
 
-            # Log last few stderr lines at WARNING level so users can diagnose
-            # failures without needing DEBUG mode (especially for crashes/signals)
+            # How this run ended and its last stderr lines go to the job log step by step (the app log shows them at
+            # DEBUG only): the app log's one ERROR for a failed file comes from the caller that knows the final outcome.
             # A full quota's exit code (134) is also a wrapper shell's SIGABRT: the write failure was said above.
             crash = _crash_signal(proc.returncode) if refused is None else None
             if crash is not None:
-                logger.warning(
+                per_file_logger.info(
                     "FFmpeg crashed on {} ({}, exit code {}). A crash like this comes from the file itself (damaged "
                     "data) or a bug in FFmpeg or the GPU driver, and happens at the same place on every try; the "
                     "stderr lines below usually show where. Other files in the queue will keep processing.",
@@ -919,7 +928,7 @@ def create_ffmpeg_runner(
                     proc.returncode,
                 )
             elif _is_signal_killed(proc.returncode) and _signal_name(proc.returncode) == "SIGKILL":
-                logger.warning(
+                per_file_logger.info(
                     "FFmpeg was killed with SIGKILL (exit code {}) while processing {}. This is usually the "
                     "out-of-memory killer: the system or the container ran out of memory. Check container memory "
                     "limits and free RAM; if nothing was short of memory, someone force-stopped the process. "
@@ -928,7 +937,7 @@ def create_ffmpeg_runner(
                     video_file,
                 )
             elif _is_signal_killed(proc.returncode):
-                logger.warning(
+                per_file_logger.info(
                     "FFmpeg was stopped by {} (exit code {}) while processing {}: something outside this file "
                     "stopped it, such as the container stopping or restarting, or someone ending the process. "
                     "Other files in the queue will keep processing.",
@@ -940,7 +949,7 @@ def create_ffmpeg_runner(
                 # Exit 251 with a GPU error in the stderr is the GPU's, not a disk's: the stderr lines below say so.
                 # One the folder refused (it couldn't create a frame file) was said above.
                 folder, _move = working_folder_hint()
-                logger.warning(
+                per_file_logger.info(
                     "FFmpeg hit an I/O error on {}: reading the video from its disk or network share, or writing "
                     "thumbnails to {} ({}, exists: {}), failed. Check that disk or share, and that "
                     "{} isn't full and is writable. "
@@ -952,7 +961,7 @@ def create_ffmpeg_runner(
                     folder,
                 )
             elif exit_diagnosis == "high_exit_non_signal":
-                logger.warning(
+                per_file_logger.info(
                     "FFmpeg crashed with an unusual exit code ({}) while processing {}. "
                     "This usually points to an internal FFmpeg bug, a broken hardware acceleration "
                     "driver, or a malformed video file. The stderr lines below should explain. "
@@ -968,18 +977,18 @@ def create_ffmpeg_runner(
                     if "Video: " in line or NO_DECODER_PHRASE in line
                 ]
                 tail = about_video[-5:]
-                logger.warning("FFmpeg's last {} stderr lines about the video in {}:", len(tail), video_file)
+                per_file_logger.info("FFmpeg's last {} stderr lines about the video in {}:", len(tail), video_file)
                 for line in tail:
-                    logger.warning("  {}", line)
+                    per_file_logger.info("  {}", line)
             elif ffmpeg_output_lines and not handed_back:
                 tail = _without_metadata_tags(ffmpeg_output_lines)[-5:]
-                logger.warning(
+                per_file_logger.info(
                     "FFmpeg's last {} stderr lines for {} (these usually identify the cause):",
                     len(tail),
                     video_file,
                 )
                 for line in tail:
-                    logger.warning("  {}", line)
+                    per_file_logger.info("  {}", line)
 
             # Check for permission-related errors in FFmpeg output
             # FFmpeg outputs "Permission denied" in messages like "av_interleaved_write_frame(): Permission denied"

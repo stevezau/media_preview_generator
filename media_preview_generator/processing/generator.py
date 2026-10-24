@@ -53,7 +53,12 @@ from ..config import Config
 from ..display_rotation import display_matrix, rotation_filter
 from ..shutdown import is_shutting_down
 from ..utils import cpu_workers_hint, debug_logging_hint, gpu_details_hint, is_node_mode, working_folder_hint
-from .ffmpeg_runner import GPU_CANT_DECODE_LINE, GPU_CANT_DECODE_VERDICT, STALL_WATCHDOG_LINE
+from .ffmpeg_runner import (
+    GPU_CANT_DECODE_LINE,
+    GPU_CANT_DECODE_VERDICT,
+    SAYS_NOTHING_RE,
+    STALL_WATCHDOG_LINE,
+)
 from .filter_chain import (
     DV5_PATH_INTEL_OPENCL,
     DV5_PATH_LIBPLACEBO,
@@ -212,6 +217,9 @@ _CRASH_SIGNALS = frozenset(
 # FFmpeg's statement that it has no decoder at all for the stream it was asked to decode (previews decode only video).
 # Not "unknown codec": FFmpeg also prints that for audio and subtitle streams of files whose video decodes fine.
 NO_DECODER_PHRASE = "no decoder found for"
+# What FFmpeg prints when it can't open or parse the file at all (gone, or a damaged container).
+INPUT_OPEN_FAILED_PHRASE = "Error opening input"
+_INPUT_FILE_ERRORS = ("No such file or directory", "Invalid data found when processing input", "Permission denied")
 # A keyframe-only run stops earlier, at input open: with no decoder for any video stream nothing takes
 # ``-skip_frame:v`` (previews) or the bare ``-skip_frame`` (Intro & Credits; only a video decoder takes it, so unknown
 # audio next to a video that decodes never leaves it over), and FFmpeg rejects the leftover option before it gets to
@@ -511,13 +519,13 @@ def log_failure_summary() -> None:
         return
 
     logger.warning(
-        "Run finished with {} failed file(s). Each line below shows the exit code, "
-        "the short reason, and the file path — scroll up for the full FFmpeg output.",
+        "Run finished with {} failed file(s). Each was logged above with its reason and file path.",
         len(failures),
     )
     for i, f in enumerate(failures, 1):
         wt = f"[{f['worker_type']}] " if f["worker_type"] else ""
-        logger.warning(
+        # The list repeats each file's own ERROR line; the app log shows it only at DEBUG.
+        logger.debug(
             "  {:3d}. {}exit={} | {} | {}",
             i,
             wt,
@@ -710,6 +718,28 @@ def video_has_no_decoder(stderr_lines: list[str]) -> bool:
     )
 
 
+def video_input_unreadable(returncode: int, stderr_lines: list[str], *, frames_written: bool) -> bool:
+    """Whether FFmpeg couldn't open the file at all: another device reads the same bytes and fails the same way.
+
+    Only an open failure that names a file error counts, and only when no frame was written. A damaged file that
+    FFmpeg resyncs past prints container errors yet decodes, and a bare "Error opening input" can be a device problem.
+
+    Args:
+        returncode: The run's exit code.
+        stderr_lines: One FFmpeg run's stderr lines.
+        frames_written: The run (or an earlier one on this file) wrote thumbnails.
+
+    Returns:
+        True when the run failed opening a file that is gone, unreadable or not a parsable container. Not for a run
+        stopped from outside (a signal, the stall watchdog, or a disk's I/O error): ``_was_interrupted``.
+    """
+    if returncode == 0 or frames_written or _was_interrupted(returncode, stderr_lines):
+        return False
+    return any(
+        INPUT_OPEN_FAILED_PHRASE in line and any(error in line for error in _INPUT_FILE_ERRORS) for line in stderr_lines
+    )
+
+
 def _diagnose_ffmpeg_exit_code(
     returncode: int, stderr_lines: list[str] | None = None, output_folder: str | None = None
 ) -> str:
@@ -722,7 +752,7 @@ def _diagnose_ffmpeg_exit_code(
     Args:
         returncode: FFmpeg process exit code
         stderr_lines: That run's stderr, when the caller has it. It tells a video no device can decode
-            (``no_decoder``) from other failures, and exit 251 from a GPU error (``gpu_error``) from a disk's
+            (``no_decoder``) or a file it couldn't open (``bad_input``) from other failures, and exit 251 from a GPU error (``gpu_error``) from a disk's
             (``io_error``). A thumbnail write the folder refused (``folder_write_error``) is told by the exit code
             too.
         output_folder: The folder the run wrote to, so a permission error can be checked against it.
@@ -751,6 +781,9 @@ def _diagnose_ffmpeg_exit_code(
 
     if stderr_lines and video_has_no_decoder(stderr_lines):
         return "no_decoder"
+
+    if stderr_lines and video_input_unreadable(returncode, stderr_lines, frames_written=False):
+        return "bad_input"
 
     if returncode == FFMPEG_IO_ERROR_EXIT:
         if stderr_lines and not _io_cut_off(returncode, stderr_lines):
@@ -920,7 +953,9 @@ def _gpu_hand_off(
         return FALLBACK_STALL, f"FFmpeg stopped making progress for {FFMPEG_STALL_TIMEOUT_SEC} s"
     if rc != 0 and GPU_CANT_DECODE_LINE in stderr_lines:
         return FALLBACK_CODEC, "the GPU can't decode this video's codec"
-    if video_has_no_decoder(stderr_lines):
+    if video_has_no_decoder(stderr_lines) or (
+        not stopped_part_way and video_input_unreadable(rc, stderr_lines, frames_written=False)
+    ):
         return None
     should_fallback, reason = classify_cpu_fallback_reason(
         rc,
@@ -1089,7 +1124,7 @@ def _extract_ffmpeg_error_summary(stderr_lines: list[str]) -> str:
     candidates: list[str] = []
     for line in stderr_lines[-10:]:
         stripped = line.strip()
-        if not stripped:
+        if not stripped or SAYS_NOTHING_RE.search(stripped):
             continue
         lower = stripped.lower()
         if not any(kw in lower for kw in error_keywords):
@@ -2481,6 +2516,7 @@ def generate_images(
     cant_decode = (
         GPU_CANT_DECODE_LINE in stderr_lines
         or video_has_no_decoder(stderr_lines)
+        or video_input_unreadable(rc, stderr_lines, frames_written=False)
         or _gpu_lacks_the_decoder(rc, stderr_lines, hwaccel_in(last_command), stderr_lines)
     )
     # Nor after the stall watchdog: the mount is stuck and a rerun would wait out another full timeout.
@@ -2534,6 +2570,8 @@ def generate_images(
     image_count = _count_usable_frames(rc, stderr_lines)
     # No other filter chain or device decodes a video FFmpeg has no decoder for: the first run that says so is the last.
     no_decoder = rc != 0 and video_has_no_decoder(stderr_lines)
+    # Likewise a file FFmpeg couldn't open or parse: another device reads the same bytes.
+    input_unreadable = video_input_unreadable(rc, stderr_lines, frames_written=image_count > 0 or partial_discarded)
 
     # Hardware DV5 path unavailable — retry with software decode + libplacebo.
     #
@@ -2557,6 +2595,7 @@ def generate_images(
         and image_count == 0
         and not partial_discarded
         and not no_decoder
+        and not input_unreadable
         and (use_vaapi_dv5_path or use_intel_opencl_dv5_path)
     ):
         if cancel_check and cancel_check():
@@ -2605,7 +2644,7 @@ def generate_images(
     # transfer characteristics or RPU parsing failures.
     # On both CPU and GPU, retry once with a DV-safe filter chain that
     # avoids zscale/tonemap/libplacebo entirely.
-    if rc != 0 and image_count == 0 and not partial_discarded and not no_decoder:
+    if rc != 0 and image_count == 0 and not partial_discarded and not no_decoder and not input_unreadable:
         if cancel_check and cancel_check():
             raise CancellationError(f"Processing cancelled for {video_file}")
         diag_label = classify_dv_safe_retry_reason(stderr_lines_all, use_libplacebo=use_libplacebo)
@@ -2785,30 +2824,37 @@ def generate_images(
             if did_dv_safe_retry
             else (" after sw libplacebo retry" if did_sw_libplacebo_retry else (" after retry" if did_retry else ""))
         )
-        if no_decoder:
-            # The FFmpeg run already logged the one line that says so.
-            error_summary = NO_DECODER_SUMMARY
-        else:
-            logger.error(
-                "FFmpeg produced no preview frames for {}{}. "
-                "Common causes: video file is corrupted, codec is unsupported by your FFmpeg build, "
-                "or hardware acceleration failed silently. Try playing the file in a media player to "
-                "confirm it's intact, then {} to see FFmpeg's "
-                "detailed output. The rest of the queue continues; only this file is skipped.",
-                video_file,
-                fallback_suffix,
-                debug_logging_hint(),
-            )
-            error_summary = _extract_ffmpeg_error_summary(stderr_lines_all)
-        worker_ctx = "GPU" if gpu is not None else "CPU"
-        reason = (
-            f"FFmpeg exit {rc} ({_diagnose_ffmpeg_exit_code(rc, stderr_lines, output_folder)}){fallback_suffix}"
-            if rc != 0
-            else f"0 images{fallback_suffix}"
+        # The FFmpeg run already logged the one line for a video no device can decode; any other file gets its one here.
+        error_summary = NO_DECODER_SUMMARY if no_decoder else _extract_ffmpeg_error_summary(stderr_lines_all)
+        # A file that went away under FFmpeg isn't a failed file: the caller ends it as replaced or not found. A node
+        # can't tell (its disk may differ from the app's), so it reports the failure and the app decides.
+        source_gone = (
+            input_unreadable
+            and not is_node_mode()
+            and not os.path.isfile(video_file)
+            and any("No such file or directory" in line for line in stderr_lines)
         )
-        if error_summary:
-            reason = f"{reason} — {error_summary}"
-        record_failure(video_file, rc, reason, worker_type=worker_ctx)
+        if not source_gone:
+            worker_ctx = "GPU" if gpu is not None else "CPU"
+            reason = (
+                f"FFmpeg exit {rc} ({_diagnose_ffmpeg_exit_code(rc, stderr_lines, output_folder)}){fallback_suffix}"
+                if rc != 0
+                else f"0 images{fallback_suffix}"
+            )
+            if error_summary:
+                reason = f"{reason} — {error_summary}"
+            if not no_decoder:
+                logger.error(
+                    "FFmpeg produced no preview frames for {}: {}. "
+                    "Common causes: video file is corrupted, codec is unsupported by your FFmpeg build, "
+                    "or hardware acceleration failed silently. Try playing the file in a media player to "
+                    "confirm it's intact, then {} to see FFmpeg's "
+                    "detailed output. The rest of the queue continues; only this file is skipped.",
+                    video_file,
+                    reason,
+                    debug_logging_hint(),
+                )
+            record_failure(video_file, rc, reason, worker_type=worker_ctx)
 
     return success, image_count, hw, seconds, speed, error_summary
 

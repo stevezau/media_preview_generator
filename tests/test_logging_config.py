@@ -337,6 +337,11 @@ class TestStdlibLogging:
 
         assert _logging_mod.CONSOLE_ONLY == nodelog.SECRET_EXTRA
 
+    def test_the_per_file_name_is_the_node_logs_per_file_name(self):
+        from media_preview_generator.nodes.server import nodelog
+
+        assert _logging_mod.PER_FILE_LOG == nodelog.PER_FILE_EXTRA
+
     def test_a_held_back_line_reaches_no_app_sink(self, start):
         # A node's GPU re-check holds its lines and logs them again itself (at DEBUG when nothing changed).
         from loguru import logger

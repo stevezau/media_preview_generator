@@ -389,6 +389,30 @@ def test_a_missing_decoder_is_told_apart_from_other_ffmpeg_failures(monkeypatch,
 
 
 @pytest.mark.parametrize(
+    ("stderr", "shown"),
+    [
+        (
+            b"Error opening input files: Invalid data found when processing input\n"
+            b"[out#0/null @ 0x1] video:0KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB "
+            b"muxing overhead: unknown\nConversion failed!\n",
+            "Error opening input files: Invalid data found when processing input",
+        ),
+        # Nothing that reads as an error: the last 200 characters, as before.
+        (b"size=N/A time=00:00:01.00 speed=1x\n", "size=N/A time=00:00:01.00 speed=1x"),
+    ],
+    ids=["real-error-not-the-stats-line", "no-error-line-falls-back-to-the-tail"],
+)
+def test_a_failed_run_shows_ffmpegs_error_not_its_stats_line(monkeypatch, stderr, shown):
+    proc = MagicMock(returncode=183)
+    proc.stdout = io.BytesIO(b"")
+    proc.stderr = io.BytesIO(stderr)
+    monkeypatch.setattr(analyze.subprocess, "Popen", MagicMock(return_value=proc))
+    with pytest.raises(analyze.LoudnessError) as raised:
+        analyze.run("ffmpeg", "/m/a.mkv", 1, duration_ms=1000)
+    assert str(raised.value).endswith(f": {shown}")
+
+
+@pytest.mark.parametrize(
     ("nice", "node", "level", "expected"),
     [
         ("/usr/bin/nice", False, 10, ["/usr/bin/nice", "-n", "10", "ffmpeg", "-i", "/m/a.mkv"]),

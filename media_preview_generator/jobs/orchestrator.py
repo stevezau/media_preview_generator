@@ -937,6 +937,7 @@ def _run_full_scan_multi_server(
     selected_gpus,
     server_id_filter: str | None = None,
     library_ids: list[str] | None = None,
+    library_ids_by_server: dict[str, list[str]] | None = None,
     progress_callback=None,
     cancel_check=None,
     pause_check=None,
@@ -961,6 +962,10 @@ def _run_full_scan_multi_server(
 
     Returns the aggregated ProcessingResult counts keyed by enum value
     (same shape as :func:`_dispatch_webhook_paths_multi_server`).
+
+    ``library_ids_by_server`` (server id -> library ids) scopes each server to its own libraries, like the Intro &
+    Credits runner; only the servers it names are walked, and a file two of them list is one item published to both.
+    ``library_ids`` is the flat list every walked server gets.
 
     ``warnings_out``: optional list the caller passes in to collect
     user-visible warning strings. The function appends one string per
@@ -987,6 +992,19 @@ def _run_full_scan_multi_server(
         )
         return counts
 
+    if library_ids_by_server:
+        if warnings_out is not None:
+            walked = {cfg.id for cfg in candidates}
+            warnings_out.extend(
+                f"Skipped server {sid}: it is disabled or no longer configured"
+                for sid in library_ids_by_server
+                if sid not in walked
+            )
+        candidates = [cfg for cfg in candidates if cfg.id in library_ids_by_server]
+        if not candidates:
+            logger.warning("None of the servers the scan picked libraries on is enabled. Nothing to process.")
+            return counts
+
     filters = ScanFilters.from_config(config)
     all_items, enumeration_errors = _enumerate_items_for_servers(
         candidates,
@@ -994,7 +1012,7 @@ def _run_full_scan_multi_server(
             server_cfg,
             sort_by=getattr(config, "sort_by", None),
             filters=filters,
-            library_ids=library_ids,
+            library_ids=library_ids_by_server[server_cfg.id] if library_ids_by_server else library_ids,
             cancel_check=cancel_check,
             progress_callback=progress_callback,
         ),
@@ -1358,6 +1376,7 @@ def _should_use_multi_server_full_scan(config, pinned_type: str) -> bool:
     Use the multi-server scan when ANY of the following holds (and there are
     no webhook paths — the webhook flow has its own selector):
 
+    * The job picked libraries on several servers (``library_ids_by_server``).
     * Pinned to a non-Plex server.
     * No Plex configured at all.
     * At least one non-Plex server (Emby / Jellyfin) is enabled.
@@ -1372,6 +1391,9 @@ def _should_use_multi_server_full_scan(config, pinned_type: str) -> bool:
     no_webhook_paths = not getattr(config, "webhook_paths", None)
     if not no_webhook_paths:
         return False
+    if getattr(config, "library_ids_by_server", None):
+        # Only this path scopes each server to its own libraries; the Plex-only path would scan every Plex library.
+        return True
     non_plex_pin = bool(pinned_type) and pinned_type != "plex"
     no_plex_at_all = not (config.plex_url and config.plex_token)
     has_non_plex_server = False
@@ -2110,6 +2132,7 @@ def run_processing(
                 selected_gpus=selected_gpus,
                 server_id_filter=sid_filter,
                 library_ids=library_ids or None,
+                library_ids_by_server=getattr(config, "library_ids_by_server", None),
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
                 pause_check=pause_check,

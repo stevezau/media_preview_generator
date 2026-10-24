@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 
 from loguru import logger
 
+from ..logging_config import per_file_logger
 from ..processing.generator import FALLBACK_CODEC, FALLBACK_HWACCEL, CodecNotSupportedError
 from ..shutdown import is_shutting_down, request_shutdown
 from . import protocol
@@ -491,7 +492,9 @@ class _TaskRun:
             message = protocol.relayed_text(line.get("message"))
             if self._path_swap:
                 message = message.replace(*self._path_swap)
-            logger.log(level if level in _LEVELS else "INFO", "{}{}", self._prefix, message)
+            # A line the node tagged as one file's step-by-step story stays out of the app log here too.
+            relay = per_file_logger if line.get("per_file") is True else logger
+            relay.log(level if level in _LEVELS else "INFO", "{}{}", self._prefix, message)
         next_log = state.get("next_log")
         if isinstance(next_log, int):
             self._next_log = next_log

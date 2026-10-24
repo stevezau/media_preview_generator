@@ -1319,6 +1319,78 @@ class TestStartJobAsyncRetryBranchPublisherStatuses:
             f"Explicit config.server_id pin must be preserved on retry; got {retry_config_pin!r}"
         )
 
+    def test_multi_server_picks_are_kept_on_retry_without_a_single_pin(self, app, tmp_path):
+        """A job that picked libraries on two servers has no ``server_id`` pin; its retry must keep the same
+        ``libraries`` pairs (the allow-list for publishing) and still be unpinned."""
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        pairs = [
+            {"server_id": "plex-1", "library_id": "1"},
+            {"server_id": "emby-1", "library_id": "e1"},
+        ]
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(kwargs.get("job_id"))
+            jm = get_job_manager()
+            target = (jm.get_job(kwargs.get("job_id")).config or {}).get("parent_job_id") or kwargs.get("job_id")
+            status = "published_pending_registration" if len(run_calls) == 1 else "published"
+            jm.record_file_result(
+                target,
+                "/data/tv/Show S01E01.mkv",
+                "generated",
+                "",
+                "[GPU 0]",
+                servers=[
+                    {
+                        "server_id": "emby-1",
+                        "server_name": "EmbyTest",
+                        "server_type": "emby",
+                        "status": status,
+                        "message": "",
+                    }
+                ],
+            )
+            return {
+                "outcome": {"generated": 1},
+                "webhook_resolution": {
+                    "unresolved_paths": [],
+                    "skipped_paths": [],
+                    "resolved_count": 1,
+                    "total_paths": 1,
+                    "path_hints": [],
+                },
+            }
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            patch("media_preview_generator.plex_client.trigger_plex_partial_scan", return_value=[]),
+            patch("media_preview_generator.processing.retry_queue.BACKOFF_SCHEDULE", [1, 1, 1, 1, 1]),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="Picks", config={"source": "manual", "libraries": pairs})
+            _start_job_async(
+                job.id,
+                config_overrides={
+                    "libraries": pairs,
+                    "webhook_paths": ["/data/tv/Show S01E01.mkv"],
+                    "webhook_retry_count": 3,
+                    "webhook_retry_delay": 30,
+                },
+            )
+
+        retry_children = [
+            j
+            for j in jm.get_all_jobs()
+            if (j.config or {}).get("is_retry") is True and (j.config or {}).get("parent_job_id") == job.id
+        ]
+        assert retry_children, "Expected a retry to spawn"
+        retry_config = retry_children[0].config or {}
+        assert retry_config.get("libraries") == pairs
+        assert "server_id" not in retry_config
+
     def test_scheduled_scan_without_webhook_retry_count_still_retries(self, app, tmp_path):
         """Scheduled scans, manual reruns, and recently-added scans
         don't inject ``webhook_retry_count`` into their job config

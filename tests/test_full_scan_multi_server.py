@@ -1288,6 +1288,147 @@ class TestMultiPlexDeduping:
         assert merged.get("jf-1") == "jf-id", merged
 
 
+class TestLibraryIdsByServer:
+    """A scan whose libraries were picked on several servers gives each server its own ids (#426)."""
+
+    PATH = "/data/Show/S01E01.mkv"
+
+    def _run(self, library_ids_by_server, enabled=("plex-1", "jf-1", "emby-1")):
+        cfgs = {
+            "plex-1": _server_config("plex-1", ServerType.PLEX),
+            "jf-1": _server_config("jf-1", ServerType.JELLYFIN),
+            "emby-1": _server_config("emby-1", ServerType.EMBY),
+        }
+        registry_mock = MagicMock()
+        registry_mock.configs.return_value = [cfgs[sid] for sid in enabled]
+        procs = {
+            ServerType.PLEX: MagicMock(),
+            ServerType.JELLYFIN: MagicMock(),
+            ServerType.EMBY: MagicMock(),
+        }
+        procs[ServerType.PLEX].list_canonical_paths.return_value = iter(
+            [ProcessableItem(canonical_path=self.PATH, server_id="plex-1", item_id_by_server={"plex-1": "rk-1"})]
+        )
+        procs[ServerType.JELLYFIN].list_canonical_paths.return_value = iter(
+            [ProcessableItem(canonical_path=self.PATH, server_id="jf-1", item_id_by_server={"jf-1": "jf-id"})]
+        )
+        procs[ServerType.EMBY].list_canonical_paths.return_value = iter([])
+        warnings: list[str] = []
+        with (
+            patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
+            patch("media_preview_generator.servers.ServerRegistry") as mock_registry,
+            patch("media_preview_generator.processing.get_processor_for", side_effect=procs.__getitem__),
+            patch("media_preview_generator.processing.multi_server.process_canonical_path") as mock_process,
+        ):
+            mock_sm.return_value.get.return_value = []
+            mock_registry.from_settings.return_value = registry_mock
+            mock_process.return_value = MagicMock(publishers=[])
+            _run_full_scan_multi_server(
+                _config(),
+                selected_gpus=[],
+                library_ids=["ignored"],
+                library_ids_by_server=library_ids_by_server,
+                warnings_out=warnings,
+            )
+        return procs, mock_process, warnings
+
+    def test_each_server_lists_its_own_library_ids_and_a_shared_file_runs_once(self):
+        procs, mock_process, _warnings = self._run({"plex-1": ["1", "2"], "jf-1": ["abc"]})
+
+        assert procs[ServerType.PLEX].list_canonical_paths.call_args.kwargs["library_ids"] == ["1", "2"]
+        assert procs[ServerType.JELLYFIN].list_canonical_paths.call_args.kwargs["library_ids"] == ["abc"]
+        procs[ServerType.EMBY].list_canonical_paths.assert_not_called()
+        assert mock_process.call_count == 1
+        merged = mock_process.call_args.kwargs.get("item_id_by_server") or {}
+        assert merged == {"plex-1": "rk-1", "jf-1": "jf-id"}
+
+    def test_a_picked_server_that_is_not_enabled_is_skipped_with_a_warning(self):
+        procs, _mock_process, warnings = self._run({"plex-1": ["1"], "jf-1": ["abc"]}, enabled=("plex-1",))
+
+        procs[ServerType.JELLYFIN].list_canonical_paths.assert_not_called()
+        assert any("jf-1" in w for w in warnings)
+
+
+class TestPickedServersAllowList:
+    """A job that picked libraries on several servers publishes only to those servers (#426)."""
+
+    PATH = "/data/Show/S01E01.mkv"
+    PICKED = {"plex-1": ["1"], "jf-1": ["abc"]}
+
+    @staticmethod
+    def _registry():
+        configs = {
+            "plex-1": SimpleNamespace(id="plex-1", type=ServerType.PLEX),
+            "jf-1": SimpleNamespace(id="jf-1", type=ServerType.JELLYFIN),
+            "emby-1": SimpleNamespace(id="emby-1", type=ServerType.EMBY),
+        }
+        registry = MagicMock()
+        registry.get_config.side_effect = configs.get
+        return registry
+
+    def _pin(self, server_id, **config_fields):
+        from media_preview_generator.jobs.worker import resolve_per_item_pin
+
+        config = SimpleNamespace(server_id_filter=None, library_ids_by_server=self.PICKED, **config_fields)
+        item = ProcessableItem(canonical_path=self.PATH, server_id=server_id)
+        return resolve_per_item_pin(config, item, self._registry())
+
+    @pytest.mark.parametrize("origin", ["plex-1", ""])
+    def test_plex_origin_and_merged_items_publish_to_the_picked_servers_only(self, origin):
+        assert self._pin(origin) == frozenset({"plex-1", "jf-1"})
+
+    @pytest.mark.parametrize("origin", ["jf-1", "emby-1"])
+    def test_a_jellyfin_or_emby_origin_item_stays_on_its_own_server(self, origin):
+        assert self._pin(origin) == origin
+
+    def test_a_single_server_pin_wins_over_the_picks(self):
+        from media_preview_generator.jobs.worker import resolve_per_item_pin
+
+        config = SimpleNamespace(server_id_filter="plex-1", library_ids_by_server=self.PICKED)
+        item = ProcessableItem(canonical_path=self.PATH, server_id="jf-1")
+        assert resolve_per_item_pin(config, item, self._registry()) == "plex-1"
+
+    def test_without_picks_a_plex_origin_item_still_fans_out(self):
+        from media_preview_generator.jobs.worker import resolve_per_item_pin
+
+        config = SimpleNamespace(server_id_filter=None, library_ids_by_server=None)
+        item = ProcessableItem(canonical_path=self.PATH, server_id="plex-1")
+        assert resolve_per_item_pin(config, item, self._registry()) is None
+
+    def test_pin_includes_covers_none_a_server_and_a_set(self):
+        from media_preview_generator.processing.multi_server import _pin_includes
+
+        assert _pin_includes(None, "x")
+        assert _pin_includes("a", "a") and not _pin_includes("a", "b")
+        assert _pin_includes(frozenset({"a", "b"}), "b") and not _pin_includes(frozenset({"a", "b"}), "c")
+
+    def test_publishers_outside_the_picked_servers_are_dropped(self):
+        from media_preview_generator.processing import multi_server
+        from media_preview_generator.processing.multi_server import MultiServerStatus
+
+        owners = [(SimpleNamespace(id=sid, name=sid), MagicMock(), MagicMock()) for sid in ("plex-2", "emby-1")]
+        with patch.object(multi_server, "_resolve_publishers", return_value=owners):
+            result = multi_server._process_canonical_path_previews(
+                self.PATH,
+                MagicMock(),
+                MagicMock(),
+                server_id_filter=frozenset({"plex-1", "jf-1"}),
+                check_only=True,
+            )
+        assert result.status is MultiServerStatus.NO_OWNERS
+
+    def test_retry_config_libraries_become_the_allow_list(self):
+        from media_preview_generator.jobs.worker import resolve_per_item_pin
+
+        pairs = [{"server_id": "plex-1", "library_id": "1"}, {"server_id": "jf-1", "library_id": "abc"}]
+        by_server: dict[str, list[str]] = {}
+        for pair in pairs:
+            by_server.setdefault(pair["server_id"], []).append(pair["library_id"])
+        config = SimpleNamespace(server_id_filter=None, library_ids_by_server=by_server)
+        item = ProcessableItem(canonical_path=self.PATH, server_id="")
+        assert resolve_per_item_pin(config, item, self._registry()) == frozenset({"plex-1", "jf-1"})
+
+
 class TestOneEntryPerFile:
     """A scan sends each file once; who it publishes to and which items it names follow from who listed it (#420)."""
 

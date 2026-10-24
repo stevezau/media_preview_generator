@@ -841,7 +841,8 @@ def create_job() -> Any:
 
     Accepts any of (in priority order):
     * ``libraries: [{server_id, library_id}]`` — exact libraries, so the same id on two servers stays distinct.
-      One job is created per server, each pinned to its server.
+      Picks on one server make a job pinned to it; picks on several servers make ONE unpinned job carrying the
+      pairs, so a file shared by two servers is processed once and published to each owner.
     * ``library_ids: list[str]`` — flat ids, applied to whichever server the job runs on.
     * ``library_names: list[str]`` — back-compat from older clients.
     * ``library_id: str`` — back-compat single-library shape.
@@ -872,13 +873,14 @@ def create_job() -> Any:
         for sid in ids_by_server:
             if not _resolve_server_context(sid)[0]:
                 return jsonify({"error": f"unknown server {sid!r}"}), 400
+        if len(ids_by_server) == 1:
+            ((server_id, ids),) = ids_by_server.items()
+            job = _create_scan_job(data, raw_config, [], server_id, ids, data.get("library_name", ""))
+            return jsonify(job.to_dict()), 201
         if ids_by_server:
-            library_name = data.get("library_name", "") if len(ids_by_server) == 1 else ""
-            jobs = [
-                _create_scan_job(data, raw_config, [], server_id, ids, library_name)
-                for server_id, ids in ids_by_server.items()
-            ]
-            return jsonify({**jobs[0].to_dict(), "jobs": [j.id for j in jobs]}), 201
+            picks = [{"server_id": sid, "library_id": lid} for sid, ids in ids_by_server.items() for lid in ids]
+            job = _create_scan_job(data, raw_config, [], None, [], "", picks=picks)
+            return jsonify(job.to_dict()), 201
 
     library_ids = list(data.get("library_ids") or [])
     library_names = list(data.get("library_names") or [])
@@ -900,8 +902,13 @@ def _create_scan_job(
     requested_server_id: str | None,
     library_ids: list[str],
     library_name: str,
+    picks: list[dict[str, str]] | None = None,
 ):
-    """Create and start one library-scan job, pinned to ``requested_server_id`` when given."""
+    """Create and start one library-scan job, pinned to ``requested_server_id`` when given.
+
+    ``picks`` (exact ``{server_id, library_id}`` pairs on several servers) make an unpinned job that scans each
+    server's own libraries.
+    """
     priority = data.get("priority", PRIORITY_NORMAL)
     server_id, server_name, server_type = _resolve_server_context(requested_server_id)
 
@@ -933,7 +940,9 @@ def _create_scan_job(
     dropped = sorted(str(k) for k in raw_config if k not in _ALLOWED_OVERRIDES)
     if dropped:
         logger.warning("New job: ignored config key(s) a job can't set: {!r}", dropped)
-    if library_ids:
+    if picks:
+        config_overrides["libraries"] = picks
+    elif library_ids:
         config_overrides["selected_library_ids"] = library_ids
     elif library_names:
         config_overrides["selected_libraries"] = library_names

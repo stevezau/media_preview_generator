@@ -455,3 +455,16 @@ class TestReferenceClips:
 
     def test_the_sizes_are_the_ones_credits_are_read_at(self):
         assert decode_check.SCALES == (1, detector.RETRY_SCALE)
+
+
+def test_a_decode_error_shows_ffmpegs_error_not_its_stats_line():
+    stderr = [
+        "Error opening input files: Invalid data found when processing input",
+        "[out#0/rawvideo @ 0x1] video:0KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB "
+        "muxing overhead: unknown",
+        "Conversion failed!",
+    ]
+    assert (
+        frames._with_ffmpegs_error("ffmpeg exited 183", stderr)
+        == "ffmpeg exited 183: Error opening input files: Invalid data found when processing input"
+    )

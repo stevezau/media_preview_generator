@@ -876,6 +876,13 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     elif key == "selected_library_ids":
                         selected_ids, _ = split_library_selectors(value)
                         config.plex_library_ids = selected_ids or None
+                    elif key == "libraries":
+                        by_server: dict[str, list[str]] = {}
+                        for pair in value or []:
+                            ids = by_server.setdefault(str(pair["server_id"]), [])
+                            if str(pair["library_id"]) not in ids:
+                                ids.append(str(pair["library_id"]))
+                        config.library_ids_by_server = by_server or None
                     elif key == "force_generate":
                         config.regenerate_thumbnails = bool(value)
                     elif key == "webhook_paths":
@@ -1740,6 +1747,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         # ``2f7132d5``, 2026-05-13).
                         if parent_explicit_pin:
                             retry_async_config["server_id"] = parent_explicit_pin
+                        # A multi-server pick has no single pin; the retry keeps the picked servers as its allow-list
+                        # so a file shared with an unpicked server isn't published there.
+                        if job_config.get("libraries"):
+                            retry_async_config["libraries"] = job_config["libraries"]
                         # Preserve vendor-webhook hints on the retry so the
                         # retry takes the orchestrator's hint short-circuit
                         # (skipping a slow Plex resolution roundtrip) instead

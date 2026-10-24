@@ -23,8 +23,9 @@ import pytest
 from loguru import logger
 
 from media_preview_generator.bif_reader import read_bif_metadata
+from media_preview_generator.logging_config import _app_sink_filter
 from media_preview_generator.processing.frame_cache import get_frame_cache, reset_frame_cache
-from media_preview_generator.processing.generator import NO_DECODER_SUMMARY
+from media_preview_generator.processing.generator import NO_DECODER_SUMMARY, CodecNotSupportedError
 from media_preview_generator.processing.multi_server import (
     _PUBLISHED_LIKE_STATUSES,
     MultiServerStatus,
@@ -2079,8 +2080,17 @@ class TestNoFrames:
                 )
             ],
         )
-        warnings: list[str] = []
-        sink = logger.add(lambda m: warnings.append(str(m)), level="WARNING", format="{message}")
+        job_log: list[str] = []
+        app_log: list[str] = []
+        sinks = [
+            logger.add(lambda m: job_log.append(str(m)), level="INFO", format="{message}"),
+            logger.add(
+                lambda m: app_log.append(str(m)),
+                level="INFO",
+                format="{message}",
+                filter=_app_sink_filter("INFO", console=False),
+            ),
+        ]
         try:
             with patch(
                 "media_preview_generator.processing.multi_server.generate_images",
@@ -2090,11 +2100,14 @@ class TestNoFrames:
                     canonical_path=str(media_file), registry=registry, config=mock_config_for_processing
                 )
         finally:
-            logger.remove(sink)
+            for sink in sinks:
+                logger.remove(sink)
 
         assert result.status is MultiServerStatus.NO_FRAMES
         assert message_says in result.message
-        assert any("produced no preview frames" in line for line in warnings) is second_warning, warnings
+        # The job log says it step by step; the app log's line for the file is the FFmpeg run's, not this one.
+        assert any("produced no preview frames" in line for line in job_log) is second_warning, job_log
+        assert not any("produced no preview frames" in line for line in app_log), app_log
 
     @pytest.mark.parametrize("summary", [NO_DECODER_SUMMARY, "Conversion failed!"], ids=["no-decoder", "no-frames"])
     def test_a_file_that_yields_no_frames_is_recorded_for_library_health_until_it_works(
@@ -2240,8 +2253,12 @@ class TestSourceVanishesDuringGeneration:
 
     @pytest.mark.parametrize(
         "exc",
-        [FileNotFoundError("no such file"), RuntimeError("ffmpeg exited 1")],
-        ids=["file-not-found", "another-error"],
+        [
+            FileNotFoundError("no such file"),
+            RuntimeError("ffmpeg exited 1"),
+            CodecNotSupportedError("GPU processing failed", kind="stopped_part_way"),
+        ],
+        ids=["file-not-found", "another-error", "gpu-hand-off"],
     )
     def test_replaced_while_generating_ends_as_replaced_by_a_newer_file(
         self, mock_config_for_processing, tmp_path, exc
@@ -2265,8 +2282,12 @@ class TestSourceVanishesDuringGeneration:
 
     @pytest.mark.parametrize(
         "exc",
-        [FileNotFoundError("no such file"), RuntimeError("ffmpeg exited 1")],
-        ids=["file-not-found", "another-error"],
+        [
+            FileNotFoundError("no such file"),
+            RuntimeError("ffmpeg exited 1"),
+            CodecNotSupportedError("GPU processing failed", kind="stopped_part_way"),
+        ],
+        ids=["file-not-found", "another-error", "gpu-hand-off"],
     )
     def test_gone_while_generating_without_a_replacement_is_retryable_not_found(
         self, mock_config_for_processing, tmp_path, exc
@@ -2286,6 +2307,50 @@ class TestSourceVanishesDuringGeneration:
         warnings = [message for level, message in records if level == "WARNING"]
         assert len(warnings) == 1
         assert warnings[0].startswith(f"Source video file is missing on disk: {source}.")
+
+    @pytest.mark.parametrize("node", [False, True], ids=["app", "node"])
+    def test_gone_while_ffmpeg_reports_zero_frames_ends_as_replaced(self, mock_config_for_processing, tmp_path, node):
+        """The real ``generate_images`` runs over a fake FFmpeg that finds the file gone: no failure line or record.
+
+        A node keeps both (its disk may differ from the app's); the app still ends the file as replaced.
+        """
+        from media_preview_generator.processing import generator
+
+        season = self._season(tmp_path)
+        source = _video(season / self.OLD)
+        gone = [
+            "[in#0 @ 0x1] Error opening input: No such file or directory",
+            "Error opening input files: No such file",
+        ]
+
+        def fake_runner(**_kwargs):
+            def run(*_args, **_run_kwargs):
+                source.unlink()
+                _video(season / self.NEW)
+                return 254, 1.0, "0x", list(gone)
+
+            return run
+
+        def generate(*args, **kwargs):
+            with (
+                patch.object(generator, "MediaInfo") as mock_mediainfo,
+                patch.object(generator, "_probe_max_keyframe_gap", return_value=None),
+                patch("media_preview_generator.processing.ffmpeg_runner.create_ffmpeg_runner", fake_runner),
+                patch.object(generator, "is_node_mode", return_value=node),
+            ):
+                mock_mediainfo.parse.return_value = MagicMock(video_tracks=[MagicMock(hdr_format=None)])
+                return generator.generate_images(*args, **kwargs)
+
+        with generator.failure_scope("gone-mid-run"):
+            result, records, _ = self._run(source, mock_config_for_processing, tmp_path, generate)
+            recorded = generator.get_failures()
+            generator.clear_failures()
+
+        assert result.status is MultiServerStatus.SKIPPED_SOURCE_GONE
+        assert result.message == f"Skipped: replaced by a newer file ({self.NEW})"
+        assert len(recorded) == (1 if node else 0)
+        errors = [message for level, message in records if level == "ERROR"]
+        assert len(errors) == (1 if node else 0)
 
     @pytest.mark.parametrize("replaced", [True, False], ids=["replaced", "not-replaced"])
     def test_outcome_matches_a_file_missing_at_the_up_front_check(self, mock_config_for_processing, tmp_path, replaced):

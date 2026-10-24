@@ -58,6 +58,13 @@ def _readable_video_unknown(monkeypatch):
 
 
 @pytest.fixture
+def every_file_logged(monkeypatch):
+    """Log a file that ends with nothing new to send like any other: for tests of a line's wording, which an
+    unchanged file would otherwise never write."""
+    monkeypatch.setattr(pipeline, "_is_unchanged", lambda notes, rows, *, failed: False)
+
+
+@pytest.fixture
 def app(tmp_path, monkeypatch):
     """Same app fixture as tests/test_routes.py (setup complete, fixed API token)."""
     import json

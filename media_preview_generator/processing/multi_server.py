@@ -32,6 +32,7 @@ import re
 import shutil
 import time
 import unicodedata
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
@@ -47,6 +48,7 @@ from ..config import resolve_frame_interval
 from ..config.paths import expand_path_mapping_candidates
 from ..library_health.failures import clear_failure, record_failure
 from ..library_health.models import Feature
+from ..logging_config import per_file_logger
 from ..markers.external_ids import ids_from_path, is_extra
 from ..markers.fs import gone_from_disk
 from ..markers.missing import disk_roots, library_folders
@@ -1662,6 +1664,21 @@ def _publish_one(
     )
 
 
+def _pin_includes(server_id_filter: str | Collection[str] | None, server_id: str) -> bool:
+    """Whether a dispatch pin lets ``server_id`` publish: no pin = every server, a string = that server, a set of
+    ids = those servers (a multi-server job's picks)."""
+    if not server_id_filter:
+        return True
+    if isinstance(server_id_filter, str):
+        return server_id == server_id_filter
+    return server_id in server_id_filter
+
+
+def _pin_label(server_id_filter: str | Collection[str]) -> str:
+    """The pin as the log and the Files panel show it: one id, or the picked ids joined."""
+    return server_id_filter if isinstance(server_id_filter, str) else ", ".join(sorted(server_id_filter))
+
+
 def _process_canonical_path_previews(
     canonical_path: str,
     registry: ServerRegistry,
@@ -1678,7 +1695,7 @@ def _process_canonical_path_previews(
     use_frame_cache: bool = True,
     schedule_retry_on_not_indexed: bool = True,
     retry_attempt: int = 0,
-    server_id_filter: str | None = None,
+    server_id_filter: str | Collection[str] | None = None,
     phase_callback=None,
     deleted_paths: list[str] | None = None,
     display_name: str | None = None,
@@ -1748,18 +1765,18 @@ def _process_canonical_path_previews(
         # so we only publish previews for that server. Avoids the same-named-
         # library ambiguity when both Plex and Emby own the path.
         before = len(publishers)
-        publishers = [p for p in publishers if p[0].id == server_id_filter]
+        publishers = [p for p in publishers if _pin_includes(server_id_filter, p[0].id)]
         if before and not publishers:
             logger.info(
-                "Dispatch pinned to server {!r} but no library with Previews on there holds {} — skipping. "
-                "(Other servers own this file but the job/webhook is scoped to one server only.)",
-                server_id_filter,
+                "Dispatch pinned to server(s) {} but no library with Previews on there holds {} — skipping. "
+                "(Other servers own this file but the job/webhook is scoped to the pinned server(s) only.)",
+                _pin_label(server_id_filter),
                 canonical_path,
             )
             return MultiServerResult(
                 canonical_path=canonical_path,
                 status=MultiServerStatus.NO_OWNERS,
-                message=f"Pinned server {server_id_filter} does not own this path",
+                message=f"Pinned server(s) {_pin_label(server_id_filter)} don't own this path",
             )
     if not publishers:
         logger.info(
@@ -1848,17 +1865,17 @@ def _process_canonical_path_previews(
             )
             if server_id_filter:
                 before = len(publishers)
-                publishers = [p for p in publishers if p[0].id == server_id_filter]
+                publishers = [p for p in publishers if _pin_includes(server_id_filter, p[0].id)]
                 if before and not publishers:
                     logger.info(
-                        "After sibling-mount rebind, pinned server {!r} no longer owns {} — skipping.",
-                        server_id_filter,
+                        "After sibling-mount rebind, pinned server(s) {} no longer own {} — skipping.",
+                        _pin_label(server_id_filter),
                         canonical_path,
                     )
                     return MultiServerResult(
                         canonical_path=canonical_path,
                         status=MultiServerStatus.NO_OWNERS,
-                        message=f"Pinned server {server_id_filter} does not own the rebound path",
+                        message=f"Pinned server(s) {_pin_label(server_id_filter)} don't own the rebound path",
                     )
             if not publishers:
                 logger.info(
@@ -2258,6 +2275,11 @@ def _process_canonical_path_previews(
                     slow_path_callback=_note_slow_path,
                 )
             except CodecNotSupportedError as exc:
+                if not os.path.isfile(canonical_path):
+                    # The file went away mid-run: no other GPU or CPU can read it, so it isn't a GPU failure.
+                    logger.debug("GPU run stopped for {}: the file is no longer on disk ({})", canonical_path, exc)
+                    moved_to, sibling_candidates = _probe_sibling_mounts(canonical_path, registry)
+                    return _source_missing_result(canonical_path, registry, [] if moved_to else sibling_candidates)
                 # Re-raised so the worker sends the file to another GPU or the CPU; not a publisher failure. Worded by the
                 # real cause: a stall or an I/O error is the disk's, not a codec the GPU doesn't support.
                 logger.info("{}", gpu_fallback_announcement(getattr(exc, "kind", FALLBACK_CODEC), canonical_path))
@@ -2324,6 +2346,11 @@ def _process_canonical_path_previews(
                 canonical_path=canonical_path, status=MultiServerStatus.NO_FRAMES, message=NO_DECODER_SUMMARY
             )
 
+        if frame_count == 0 and not cache_hit and not os.path.isfile(canonical_path):
+            # FFmpeg found the file gone (an upgrade replacing it mid-run): the same outcome as the checks around it.
+            moved_to, sibling_candidates = _probe_sibling_mounts(canonical_path, registry)
+            return _source_missing_result(canonical_path, registry, [] if moved_to else sibling_candidates)
+
         if frame_count == 0:
             # Bake the diagnostic guidance into the message itself, not just
             # the log line. The Files panel's Details cell surfaces this
@@ -2334,7 +2361,7 @@ def _process_canonical_path_previews(
                 "supported by FFmpeg, or video stream is empty. Try playing "
                 "it in a media player to confirm it's intact."
             )
-            logger.warning(
+            per_file_logger.info(
                 "FFmpeg ran but produced no preview frames for {}. "
                 "Most likely the file is corrupt, the codec is not supported by your FFmpeg build, "
                 "or the video stream is zero-length. Try playing the file in a media player to "
@@ -2570,7 +2597,7 @@ def process_canonical_path(
     use_frame_cache: bool = True,
     schedule_retry_on_not_indexed: bool = True,
     retry_attempt: int = 0,
-    server_id_filter: str | None = None,
+    server_id_filter: str | Collection[str] | None = None,
     phase_callback=None,
     chapter_progress_callback=None,
     deleted_paths: list[str] | None = None,
@@ -2611,7 +2638,7 @@ def process_canonical_path(
         if cfg.enabled
         and cfg.type is ServerType.PLEX
         and cfg.output.get("chapter_thumbnails") is True
-        and (not server_id_filter or server_id_filter == cfg.id)
+        and _pin_includes(server_id_filter, cfg.id)
     }
     if not enabled:
         return _process_canonical_path_previews(canonical_path, registry, config, **options)

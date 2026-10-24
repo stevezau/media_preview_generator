@@ -241,7 +241,7 @@ class TestA3dVideoIsReadAgainWithoutItsSei:
 
         assert_failed(outcome, SIDE_DATA_TWICE_EXIT)
         assert all(_reads_without_sei(c) for c in calls[1:])
-        assert any(line.startswith("ERROR|FFmpeg failed while extracting frames") for line in records), records
+        assert any(line.startswith("INFO|FFmpeg failed while extracting frames") for line in records), records
 
     def test_other_codecs_are_not_read_again(self, run):  # noqa: F811
         hevc = H264_3D_STREAM.replace("h264 (High)", "hevc (Main)")
@@ -249,7 +249,7 @@ class TestA3dVideoIsReadAgainWithoutItsSei:
 
         assert not any(_reads_without_sei(c) for c in calls)
         assert_failed(outcome, SIDE_DATA_TWICE_EXIT)
-        assert any(line.startswith("ERROR|FFmpeg failed while extracting frames") for line in records), records
+        assert any(line.startswith("INFO|FFmpeg failed while extracting frames") for line in records), records
 
     def test_a_chapter_grab_is_read_again_without_the_sei(self, tmp_path, mock_config):
         from media_preview_generator.processing.ffmpeg_runner import create_ffmpeg_runner

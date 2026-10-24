@@ -57,6 +57,10 @@ CONSOLE_ONLY = "node_secret"
 HELD = "node_held"
 _WARNING_NO = 30  # loguru's WARNING severity
 
+# Logs a line of one file's step-by-step story (a run's exit, its stderr tail): the job log shows it, the app-wide sinks
+# only at DEBUG, so a failed file's one ERROR is the app log's line for it.
+per_file_logger = logger.bind(**{PER_FILE_LOG: True})
+
 _managed_handler_ids: list[int] = []
 _initial_setup_done: bool = False
 _handler_lock = threading.Lock()

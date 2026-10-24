@@ -41,6 +41,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from loguru import logger
 
+from media_preview_generator.logging_config import _app_sink_filter
 from media_preview_generator.processing import CancellationError, CodecNotSupportedError
 from media_preview_generator.processing.ffmpeg_runner import STALL_WATCHDOG_LINE
 from media_preview_generator.processing.generator import (
@@ -164,6 +165,9 @@ class Outcome:
     frames_left: list[str]
     failures: list[dict]
     warnings: list[str] = field(default_factory=list)
+    # "LEVEL|message" for what the job's own log gets (INFO and up) and what app.log gets at the default INFO level.
+    job_log: list[str] = field(default_factory=list)
+    app_log: list[str] = field(default_factory=list)
 
     @property
     def tiers(self) -> list[str]:
@@ -241,7 +245,18 @@ def run(mock_config, tmp_path):
             **(track_fields or {}),
         )
         warnings: list[str] = []
-        sink = logger.add(lambda m: warnings.append(str(m)), level="WARNING", format="{level}|{message}")
+        job_log: list[str] = []
+        app_log: list[str] = []
+        sinks = [
+            logger.add(lambda m: warnings.append(str(m)), level="WARNING", format="{level}|{message}"),
+            logger.add(lambda m: job_log.append(str(m)), level="INFO", format="{level}|{message}"),
+            logger.add(
+                lambda m: app_log.append(str(m)),
+                level="INFO",
+                format="{level}|{message}",
+                filter=_app_sink_filter("INFO", console=False),
+            ),
+        ]
         job_id = f"partial-output-{uuid.uuid4()}"
         try:
             with (
@@ -268,11 +283,17 @@ def run(mock_config, tmp_path):
                 failures = get_failures()
                 clear_failures()
         finally:
-            logger.remove(sink)
+            for sink in sinks:
+                logger.remove(sink)
         frames_left = sorted(p for p in os.listdir(out) if p.endswith(".jpg"))
-        return Outcome(result, calls, frames_left, failures, warnings)
+        return Outcome(result, calls, frames_left, failures, warnings, job_log, app_log)
 
     return _generate
+
+
+def _job_logged(outcome: Outcome, *fragments: str) -> bool:
+    """Whether the job's own log got a line with all the fragments (the runner's per-run lines go there, not to app.log)."""
+    return any(line.startswith("INFO|") and all(f in line for f in fragments) for line in outcome.job_log)
 
 
 def _warned(outcome: Outcome, *fragments: str) -> bool:
@@ -858,7 +879,7 @@ class TestTheRunnersFailureLines:
 
         assert isinstance(outcome.result, WorkingFolderError)
         said = [line.split("|", 1)[0] for line in outcome.warnings if "couldn't write thumbnails" in line]
-        stderr_dumps = [line for line in outcome.warnings if "stderr lines" in line]
+        stderr_dumps = [line for line in outcome.job_log if "stderr lines" in line]
         if node and handed_back:
             assert (said, stderr_dumps) == (["WARNING"], []), outcome.warnings
             assert not any(line.startswith("ERROR|") for line in outcome.warnings), outcome.warnings
@@ -875,8 +896,8 @@ class TestTheRunnersFailureLines:
     def test_a_sigkill_is_put_down_to_the_out_of_memory_killer(self, run, tmp_path, rc):
         outcome = self._run_real(run, tmp_path, rc, gpu=None)
 
-        assert _warned(outcome, "SIGKILL", "out of memory"), outcome.warnings
-        assert not any("crashed" in line for line in outcome.warnings), outcome.warnings
+        assert _job_logged(outcome, "SIGKILL", "out of memory"), outcome.job_log
+        assert not any("crashed" in line for line in outcome.job_log), outcome.job_log
 
     @pytest.mark.parametrize(
         "rc",
@@ -886,8 +907,8 @@ class TestTheRunnersFailureLines:
     def test_a_crash_signal_is_ffmpeg_crashing_on_the_file(self, run, tmp_path, rc):
         outcome = self._run_real(run, tmp_path, rc, gpu=None)
 
-        assert _warned(outcome, "FFmpeg crashed on", "movie.mkv"), outcome.warnings
-        assert not any("memory" in line.lower() for line in outcome.warnings), outcome.warnings
+        assert _job_logged(outcome, "FFmpeg crashed on", "movie.mkv"), outcome.job_log
+        assert not any("memory" in line.lower() for line in outcome.job_log), outcome.job_log
 
     @pytest.mark.parametrize(
         "rc",
@@ -897,8 +918,8 @@ class TestTheRunnersFailureLines:
     def test_another_signal_says_it_was_stopped_from_outside(self, run, tmp_path, rc):
         outcome = self._run_real(run, tmp_path, rc, gpu=None)
 
-        assert _warned(outcome, "FFmpeg was stopped by"), outcome.warnings
-        assert not any("memory" in line.lower() or "crashed" in line for line in outcome.warnings), outcome.warnings
+        assert _job_logged(outcome, "FFmpeg was stopped by"), outcome.job_log
+        assert not any("memory" in line.lower() or "crashed" in line for line in outcome.job_log), outcome.job_log
 
 
 # The Dolby Vision Profile 5 ladder. (id, gpu, attempts, verdict, tiers run).

@@ -237,6 +237,15 @@ class TestPreviewsSkip:
 
         env.callback.assert_not_called()
 
+    def test_a_multi_server_manual_job_does_not_cover_a_schedule_tick(self, env):
+        pairs = [{"server_id": "plex-1", "library_id": "1"}, {"server_id": "jf-1", "library_id": "f1"}]
+        env.jobs.append(_job(library_name="", config={"libraries": pairs}))
+        schedule = _previews_schedule(env, ["1"], "Movies")
+
+        _fire(schedule, ["1"], "Movies")
+
+        env.callback.assert_called_once()
+
 
 class TestIntroCreditsSkip:
     CONFIG = {"job_type": "intro_credits"}

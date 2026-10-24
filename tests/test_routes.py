@@ -2658,6 +2658,54 @@ class TestJobConfigPathMappings:
         assert cfg.plex_library_ids == ["1", "2"]
         assert cfg.plex_libraries == []
 
+    def test_start_job_libraries_override_sets_library_ids_by_server(self, client, tmp_path):
+        """A multi-server job's ``libraries`` pairs reach the Config grouped per server, with no Plex id filter."""
+        captured_configs = []
+        done = threading.Event()
+
+        def capture_run_processing(config, *args, **kwargs):
+            captured_configs.append(config)
+            done.set()
+
+        mock_config = MagicMock()
+        mock_config.path_mappings = []
+        mock_config.tmp_folder = str(tmp_path)
+        mock_config.plex_url = "http://test"
+        mock_config.plex_token = "token"
+        mock_config.plex_library_ids = None
+        mock_config.plex_libraries = []
+
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set(
+            "media_servers",
+            [
+                {"id": sid, "type": "plex", "name": sid, "enabled": True, "url": "http://x", "auth": {"token": "t"}}
+                for sid in ("plex-1", "plex-2")
+            ],
+        )
+        pairs = [
+            {"server_id": "plex-1", "library_id": "1"},
+            {"server_id": "plex-2", "library_id": "f1"},
+            {"server_id": "plex-2", "library_id": "f2"},
+        ]
+        with (
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=capture_run_processing),
+            patch("media_preview_generator.config.load_config", return_value=mock_config),
+            patch(
+                "media_preview_generator.processing.generator._verify_tmp_folder_health",
+                return_value=(True, []),
+            ),
+            patch("media_preview_generator.utils.setup_working_directory", return_value=str(tmp_path / "work")),
+            patch("media_preview_generator.gpu.detect.detect_all_gpus", return_value=[]),
+        ):
+            resp = client.post("/api/jobs", headers=_api_headers(), json={"libraries": pairs})
+            assert resp.status_code == 201
+            assert done.wait(timeout=2.0), "run_processing was not called"
+        cfg = captured_configs[0]
+        assert cfg.library_ids_by_server == {"plex-1": ["1"], "plex-2": ["f1", "f2"]}
+        assert cfg.plex_library_ids is None
+
     def test_run_processing_returning_none_marks_job_failed(self, client, tmp_path):
         """When orchestrator returns None (e.g. ConnectionError to Plex), the
         job must land as FAILED with an actionable error — not silently as
@@ -8344,7 +8392,7 @@ class TestSettingsValueBounds:
 class TestCreateJobLibraryPairs:
     """Library "1" on server A must not select library "1" on server B."""
 
-    def test_pairs_create_one_pinned_job_per_server(self, client):
+    def _two_plex_servers(self):
         from media_preview_generator.web.settings_manager import get_settings_manager
 
         get_settings_manager().set(
@@ -8354,6 +8402,9 @@ class TestCreateJobLibraryPairs:
                 for sid in ("plex-a", "plex-b")
             ],
         )
+
+    def test_pairs_on_two_servers_create_one_unpinned_job_carrying_the_pairs(self, client):
+        self._two_plex_servers()
         started = []
         with patch(
             "media_preview_generator.web.routes.api_jobs._start_job_async",
@@ -8367,13 +8418,46 @@ class TestCreateJobLibraryPairs:
                         {"server_id": "plex-a", "library_id": "1"},
                         {"server_id": "plex-b", "library_id": "1"},
                         {"server_id": "plex-b", "library_id": "2"},
+                        {"server_id": "plex-b", "library_id": "2"},
                     ]
                 },
             )
         assert resp.status_code == 201
-        assert len(resp.get_json()["jobs"]) == 2
-        by_server = {cfg["server_id"]: cfg["selected_library_ids"] for cfg in started}
-        assert by_server == {"plex-a": ["1"], "plex-b": ["1", "2"]}
+        assert "jobs" not in resp.get_json()
+        assert len(started) == 1
+        assert started[0]["libraries"] == [
+            {"server_id": "plex-a", "library_id": "1"},
+            {"server_id": "plex-b", "library_id": "1"},
+            {"server_id": "plex-b", "library_id": "2"},
+        ]
+        assert "server_id" not in started[0]
+        assert "selected_library_ids" not in started[0]
+        job = resp.get_json()
+        assert not job["server_id"]
+        assert job["config"]["libraries"] == started[0]["libraries"]
+
+    def test_pairs_on_one_server_stay_pinned(self, client):
+        self._two_plex_servers()
+        started = []
+        with patch(
+            "media_preview_generator.web.routes.api_jobs._start_job_async",
+            side_effect=lambda job_id, overrides: started.append(overrides),
+        ):
+            resp = client.post(
+                "/api/jobs",
+                headers=_api_headers(),
+                json={
+                    "libraries": [
+                        {"server_id": "plex-b", "library_id": "1"},
+                        {"server_id": "plex-b", "library_id": "2"},
+                    ]
+                },
+            )
+        assert resp.status_code == 201
+        assert len(started) == 1
+        assert started[0]["server_id"] == "plex-b"
+        assert started[0]["selected_library_ids"] == ["1", "2"]
+        assert "libraries" not in started[0]
 
     @pytest.mark.parametrize("libraries", ["1", [{"server_id": "a"}], ["1"]])
     def test_malformed_pairs_are_a_400(self, client, libraries):

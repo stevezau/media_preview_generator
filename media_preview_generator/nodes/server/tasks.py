@@ -328,9 +328,12 @@ class NodeTask:
 
     # Table side -------------------------------------------------------------------------------------------------
 
-    def _add_line(self, level: str, message: str) -> None:
+    def _add_line(self, level: str, message: str, per_file: bool = False) -> None:
         with self._lock:
-            self._log.append({"seq": self._next_seq, "level": level, "message": message})
+            line: dict[str, Any] = {"seq": self._next_seq, "level": level, "message": message}
+            if per_file:
+                line["per_file"] = True
+            self._log.append(line)
             self._next_seq += 1
 
     def request_cancel(self) -> None:

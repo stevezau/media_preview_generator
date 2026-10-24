@@ -32,8 +32,12 @@ TASK_LOGGED_EXTRA = "node_task_logged"
 # Set (``logger.contextualize``) on lines :func:`held_lines` holds back: no log keeps them, and the code that held them
 # logs them again at the level it chooses. logging_config.HELD is the same name.
 HELD_EXTRA = "node_held"
+# A line that belongs to one file's step-by-step log (the app's own log keeps it only at DEBUG): the task's log carries
+# it as ``per_file`` so the app relays it the same way. logging_config.PER_FILE_LOG is the same name, which the node
+# server doesn't import (it needs the app's console dependencies).
+PER_FILE_EXTRA = "per_file_log"
 
-LineCallback = Callable[[str, str], None]
+LineCallback = Callable[[str, str, bool], None]
 
 
 def _keep(record: Record) -> bool:
@@ -108,10 +112,11 @@ def install() -> NodeLogBuffer:
 
 @contextmanager
 def capture_thread(callback: LineCallback) -> Iterator[None]:
-    """Send every loguru line the calling thread logs (INFO and up) to ``callback(level, message)`` while inside.
+    """Send every loguru line the calling thread logs (INFO and up) to ``callback(level, message, per_file)`` while inside.
 
     Args:
-        callback: Receives the level name and the message.
+        callback: Receives the level name, the message, and whether the line belongs to one file's step-by-step log
+            (``PER_FILE_EXTRA``), which the app's own log keeps only at DEBUG.
 
     Yields:
         Nothing; capture stops on exit.
@@ -122,7 +127,11 @@ def capture_thread(callback: LineCallback) -> Iterator[None]:
         return record["thread"].id == thread_id and _keep(record) and not record["extra"].get(TASK_LOGGED_EXTRA)
 
     handler_id = logger.add(
-        lambda message: callback(message.record["level"].name, message.record["message"]),
+        lambda message: callback(
+            message.record["level"].name,
+            message.record["message"],
+            bool(message.record["extra"].get(PER_FILE_EXTRA)),
+        ),
         level=0,
         format="{message}",
         filter=mine,

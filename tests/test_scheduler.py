@@ -2228,15 +2228,23 @@ class TestScheduleExactLibraryPicks:
             parent_schedule_id=schedule["id"], scan_filters={},
         )  # fmt: skip
 
-    def test_previews_on_two_servers_start_one_pinned_job_per_server(self, scheduler_manager, env):
+    def test_previews_on_two_servers_start_one_unpinned_job_carrying_the_pairs(self, scheduler_manager, env):
         schedule = self._tick(scheduler_manager, "previews", pairs=self.TWO_SERVERS, library_ids=["1", "f1"])
 
-        calls = env.callback.call_args_list
-        assert [(c.kwargs["server_id"], c.kwargs["library_id"]) for c in calls] == [("plex-1", "1"), ("jf-1", "f1")]
-        assert all(c.kwargs["parent_schedule_id"] == schedule["id"] for c in calls)
-        configs = [c.kwargs["config"] for c in calls]
-        assert all("libraries" not in cfg and "job_kinds" not in cfg for cfg in configs)
-        assert configs[0]["schedule_scope"] != configs[1]["schedule_scope"]
+        env.callback.assert_called_once()
+        kwargs = env.callback.call_args.kwargs
+        assert "server_id" not in kwargs
+        assert kwargs["parent_schedule_id"] == schedule["id"]
+        assert kwargs["config"]["libraries"] == self.TWO_SERVERS
+        assert "job_kinds" not in kwargs["config"]
+        assert "selected_library_ids" not in kwargs["config"]
+
+    def test_previews_on_one_server_stay_pinned_without_pairs(self, scheduler_manager, env):
+        self._tick(scheduler_manager, "previews", pairs=self.ONE_SERVER, library_ids=["1", "3"])
+
+        kwargs = env.callback.call_args.kwargs
+        assert kwargs["server_id"] == "plex-1"
+        assert "libraries" not in kwargs["config"]
 
     def test_legacy_loudness_with_flat_ids_and_a_server_keeps_that_pin(self, scheduler_manager, env):
         schedule = self._tick(scheduler_manager, "loudness", library_ids=["1", "3"], server_id="plex-1")

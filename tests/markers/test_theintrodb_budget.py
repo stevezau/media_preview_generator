@@ -270,7 +270,7 @@ class TestSeriesWithNoEntriesIsPaused:
         assert "TheIntroDB has no entry for 3 or more episodes of Rick and Morty (2013) (tvdb:275274)" in message
         assert "aren't looked up there until 2026-10-01 04:00 UTC" in message
 
-    def test_each_skipped_episode_says_why_in_its_source_line(self, store, episodes, loguru_caplog):
+    def test_each_skipped_episode_says_why_in_its_source_line(self, store, episodes, loguru_caplog, every_file_logged):
         self._run_all(store, episodes, FakeClient(NO_DATA))
 
         # Each file's own line opens with its name and is followed by one line per source.

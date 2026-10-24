@@ -174,6 +174,10 @@ class RunNotes:
             server (``_drop_older_reader_answer``): its line says "dropped now", never "asked now" -- the server was
             never contacted.
         logged: Whether the file's lines were written.
+        held: ``(text, level)`` lines of the checking thread's stage not written yet: a file that ends with nothing new
+            to send drops them (like an unchanged preview, which logs nothing), anything else writes them in order.
+        live: Whether the file's lines are written as they happen (a detector read it, so it's real work worth
+            watching); false while the checking thread only re-reads what's stored and asks the online lookups.
     """
 
     asked: set[tuple[Source, str]] = field(default_factory=set)
@@ -192,6 +196,8 @@ class RunNotes:
     logged_sources: set[tuple[Source, str]] = field(default_factory=set)
     dropped: set[tuple[Source, str]] = field(default_factory=set)
     logged: bool = False
+    held: list[tuple[str, str]] = field(default_factory=list)
+    live: bool = False
 
     def answered(self, source: Source, origin: str = "") -> None:
         """Record that ``source`` answered (and the answer was stored) during this job.

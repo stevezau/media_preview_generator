@@ -125,8 +125,8 @@ def is_job_thread_for(thread_id: int, job_id: str) -> bool:
         return _job_thread_to_job_id.get(thread_id) == job_id
 
 
-def resolve_per_item_pin(config, item, registry) -> str | None:
-    """Decide which single server (if any) a dispatch should publish to.
+def resolve_per_item_pin(config, item, registry) -> str | frozenset[str] | None:
+    """Decide which server (or set of servers) a dispatch should publish to.
 
     Shared by the processing path (:meth:`Worker._process_item`) and the
     dispatcher's checking stage so both agree on who publishes — a divergence
@@ -138,17 +138,23 @@ def resolve_per_item_pin(config, item, registry) -> str | None:
     2. No caller pin + non-Plex originator → scope to that originator's id
        (``item.server_id`` carries the vendor that fired the webhook).
     3. No caller pin + Plex originator → fan out (return None).
+
+    A job that picked libraries on several servers (``config.library_ids_by_server``) has no single pin; its picked
+    servers are the allow-list for every item that isn't scoped to its own non-Plex originator (rule 2 still holds),
+    so a file shared with an unpicked server isn't published there.
     """
     from ..servers.base import ServerType as _ST
 
     _config_pin = getattr(config, "server_id_filter", None) or None
     if _config_pin:
         return _config_pin
+    picked = getattr(config, "library_ids_by_server", None)
+    allow_list = frozenset(picked) if isinstance(picked, dict) and picked else None
     if getattr(item, "server_id", None):
         origin_cfg = registry.get_config(item.server_id) if registry else None
         origin_is_plex = bool(origin_cfg and origin_cfg.type is _ST.PLEX)
-        return item.server_id if not origin_is_plex else None
-    return None
+        return item.server_id if not origin_is_plex else allow_list
+    return allow_list
 
 
 def resolve_per_item_regenerate(config: Config, item: ProcessableItem) -> bool:
@@ -629,7 +635,7 @@ class Worker:
             # checking stage share so they agree on who publishes. A Plex-pinned
             # webhook fanning out would silently write Emby/Jellyfin previews too
             # — see resolve_per_item_pin.
-            per_item_pin: str | None = resolve_per_item_pin(config, item, registry)
+            per_item_pin: str | frozenset[str] | None = resolve_per_item_pin(config, item, registry)
 
             # ``webhook_source`` lives on Config when this dispatch came
             # from a webhook (Sonarr/Radarr/Plex/…). Use it as the gate

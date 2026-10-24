@@ -399,7 +399,12 @@ def _run_command(
         raise LoudnessCancelled(f"Loudness analysis of {name} cancelled")
     text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
     if proc.returncode != 0:
-        message = f"ffmpeg exited {proc.returncode} analysing {name} {description}: {text.strip()[-200:]}"
+        from ..processing.generator import (
+            _extract_ffmpeg_error_summary,  # lazy, as markers/credits/frames.py does: keeps the heavy module off this import path
+        )
+
+        error = _extract_ffmpeg_error_summary(text.splitlines()) or text.strip()[-200:]
+        message = f"ffmpeg exited {proc.returncode} analysing {name} {description}: {error}"
         if any(hint in text for hint in _NO_DECODER_HINTS):
             raise LoudnessNoDecoder(message)
         if _FORMAT_CHANGED_HINT in text:
