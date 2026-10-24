@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Iterable
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -426,7 +426,9 @@ def submit_follow_ups(
     job_config = SimpleNamespace(server_id_filter=pin or None)
     groups: dict[str | None, list[ProcessableItem]] = {}
     for item in items:
-        groups.setdefault(resolve_per_item_pin(job_config, item, lookup), []).append(item)
+        # No multi-server picks in this config, so the pin is one server or none, never a set.
+        pin_of_item = cast("str | None", resolve_per_item_pin(job_config, item, lookup))
+        groups.setdefault(pin_of_item, []).append(item)
     queued = []
     for server_id, group in groups.items():
         hints = {item.canonical_path: dict(item.item_id_by_server) for item in group if item.item_id_by_server}
