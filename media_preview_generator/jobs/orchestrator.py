@@ -26,6 +26,14 @@ from .parking import JobParked
 from .worker import JOB_LOG_SKIP, WorkerPool
 
 
+def _exists(path: str) -> bool:
+    """``os.path.exists`` that treats a path the filesystem refuses (too long, odd characters) as absent."""
+    try:
+        return os.path.exists(path)
+    except OSError:
+        return False
+
+
 def _resolve_webhook_path_to_canonical(
     path: str, server_configs: list, *, log_resolution: bool = True
 ) -> tuple[str, list]:
@@ -104,16 +112,7 @@ def _resolve_webhook_path_to_canonical(
     #      view (Sonarr's /data/...) which the publishers' downstream
     #      ownership check (registry.find_owning_servers) doesn't
     #      translate.
-    canonical: str | None = None
-    for cand in matching_candidates:
-        try:
-            if os.path.exists(cand):
-                canonical = cand
-                break
-        except OSError:
-            # Defensive: a malformed path (super long, weird chars)
-            # could raise on some filesystems. Skip it.
-            continue
+    canonical = next((cand for cand in matching_candidates if _exists(cand)), None)
     if canonical is None:
         # Owners matched, so the mapping is correct — yet none of the mapped
         # disks hold the file. That's the stale-bind-mount / unmounted-volume
@@ -123,7 +122,20 @@ def _resolve_webhook_path_to_canonical(
         # that's clearly on the host" points straight at a container mount
         # problem. See project_stale_bindmount_missing_on_disk.
         canonical = matching_candidates[0]
-        if log_resolution:
+        # A folder that's there but lacks the file is a file that left it (Sonarr replaced it, so the webhook names
+        # the old file) or hasn't arrived yet: the dispatch reports that on its own. Only a missing folder too is the
+        # mount problem worth a WARNING.
+        folder_present = any(_exists(os.path.dirname(cand)) for cand in matching_candidates)
+        if log_resolution and folder_present:
+            logger.info(
+                "Path mapping: webhook {!r} matched {}'s library, but the file isn't in its folder on any mapped disk "
+                "(replaced or not there yet) — checked {}. Falling back to {!r}.",
+                path,
+                _owner_label(aggregated, server_configs),
+                ", ".join(matching_candidates),
+                canonical,
+            )
+        elif log_resolution:
             logger.warning(
                 "Path mapping: webhook {!r} matched {}'s library but exists on NONE of the mapped "
                 "disks — checked {}. Falling back to {!r}. If the file is clearly present on the host, "

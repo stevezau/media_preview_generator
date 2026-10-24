@@ -821,6 +821,9 @@ def create_app(config_dir: str | None = None) -> Flask:
     # Silence Werkzeug's per-request HTTP logs (method, path, status) to avoid log noise.
     # Real errors from Werkzeug still log at WARNING+.
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    # A browser tab left open across a restart reconnects with a session id the new process never issued; engine.io
+    # logs the first one at ERROR. The tab simply reconnects, so it's dropped here; other engine.io errors still log.
+    logging.getLogger("engineio.server").addFilter(lambda record: not record.getMessage().startswith("Invalid session"))
 
     # Initialize job manager with SocketIO
     get_job_manager(config_dir=config_dir, socketio=socketio)

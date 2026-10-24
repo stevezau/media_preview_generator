@@ -78,6 +78,22 @@ class TestCanonicalFallbackLogging:
         assert "/data_16tb2/TV Shows" in logged, logged
         assert "/data_16tb3/TV Shows" in logged, logged
 
+    def test_info_not_warning_when_the_folder_is_there_but_the_file_left_it(self, loguru_caplog):
+        """Sonarr replaced the file, so its webhook names the old one: the Season folder is on disk, the file isn't.
+        That's no mount problem, so it's an INFO line, without the bind-mount hint."""
+        configs = [_plex_with_tv_library()]
+        season = "/data_16tb2/TV Shows/Show (2024)/Season 01"
+
+        with patch("media_preview_generator.jobs.orchestrator.os.path.exists", side_effect=lambda p: p == season):
+            canonical, _ = _resolve_webhook_path_to_canonical(WEBHOOK_PATH, configs)
+
+        assert canonical == "/data_16tb/TV Shows/Show (2024)/Season 01/Show - S01E01.mkv"
+        warnings = " ".join(r.msg for r in loguru_caplog.records if r.levelno >= _std_logging.WARNING)
+        assert warnings == ""
+        infos = " ".join(r.msg for r in loguru_caplog.records if r.levelno == _std_logging.INFO)
+        assert "replaced or not there yet" in infos and WEBHOOK_PATH in infos, infos
+        assert "bind-mount" not in infos, infos
+
     def test_info_breadcrumb_when_a_candidate_exists_and_path_translated(self, loguru_caplog):
         """When a candidate exists on disk the picker resolves to it and emits a
         visible INFO ``webhook X → resolved Y`` breadcrumb (never the WARNING).
