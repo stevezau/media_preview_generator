@@ -596,7 +596,7 @@ def files_visible(client: NodeClient, mappings: list[PathMapping], paths: list[s
     Returns:
         Whether every one this app can still read was visible (True when none is left to check).
     """
-    files = []
+    files: list[dict] = []
     for path in paths:
         try:
             st = os.stat(path)
