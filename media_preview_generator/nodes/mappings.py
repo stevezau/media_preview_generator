@@ -582,6 +582,38 @@ def quick_access_check(client: NodeClient, mappings: list[PathMapping], servers:
     return all(bool((results.get(f["path"]) or {}).get("ok")) for f in files)
 
 
+def files_visible(client: NodeClient, mappings: list[PathMapping], paths: list[str]) -> bool:
+    """True when the node now sees each of ``paths`` this app still has, as this app sees it.
+
+    The files a node couldn't see, checked again before its pause is lifted: one file per library passing says
+    nothing about the folder that failed, and lifting the pause on it alone paused the node again minutes later.
+
+    Args:
+        client: The node.
+        mappings: Its saved rows.
+        paths: The files it couldn't see, by this app's paths.
+
+    Returns:
+        Whether every one this app can still read was visible (True when none is left to check).
+    """
+    files = []
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:
+            # Gone here too (a replaced file's old name): there is nothing left for the node to see.
+            continue
+        files.append({"path": path, "size": st.st_size, "mtime_ns": st.st_mtime_ns})
+    if not files:
+        return True
+    try:
+        results, _ = _check(client, mappings, files)
+    except Exception as exc:
+        logger.debug("Re-check of the files a node couldn't see failed: {}", exc)
+        return False
+    return all(bool((results.get(f["path"]) or {}).get("ok")) for f in files)
+
+
 def _folders_this_app_cant_open(folders: list[str], budget_s: float) -> set[str]:
     """The folders whose read failed outright. One still stuck after ``budget_s`` (a stalled mount) isn't counted:
     it may be fine, and it shouldn't hold up the answer."""

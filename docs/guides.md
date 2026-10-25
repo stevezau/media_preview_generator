@@ -694,7 +694,9 @@ same machine at two addresses) or **Turned off**. Only a ready node gets work. A
 workers. Each node also has its own **Setup Health** and **Log** tabs.
 
 If a node goes away mid-file, the file goes back to the queue and runs on another worker. A file the node can't see
-at its mapped path also goes to another worker, and fails only when no other worker can run it.
+at its mapped path also goes to another worker, and fails only when no other worker can run it. Three different files
+it can't see within 10 minutes pause it with **Access problem** until **Test access** passes, or until the check it
+runs every 5 minutes does. A file that changed since this app last looked at it doesn't count.
 
 ### Updating a node
 

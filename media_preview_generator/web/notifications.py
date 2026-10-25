@@ -652,7 +652,8 @@ _NODE_CARD_TEXT = {
     ),
     "access_problem": (
         "{name} can't see your media",
-        "Its workers are paused. Run Test access and fix its folder mappings.",
+        "Its workers are paused until it can see your media again (checked every 5 minutes). Run Test access and fix "
+        "its folder mappings.",
         "Test access",
         # The Media tab, with Test access started.
         "media/test",

@@ -895,3 +895,41 @@ class TestInnerRowsOneRule:
         assert time.monotonic() - started < 2
         assert str(movies) not in read
         assert reg.access_passed(result) is True
+
+
+class TestFilesVisible:
+    ROWS = [PathMapping("/", "/m")]
+
+    def test_it_sends_each_file_with_the_size_and_time_this_app_sees(self, tmp_path):
+        path = tmp_path / "a.mkv"
+        path.write_bytes(b"x" * 10)
+        client = FakeClient()
+
+        assert nm.files_visible(client, self.ROWS, [str(path)]) is True
+
+        st = os.stat(path)
+        assert client.requests == [(self.ROWS, [{"path": str(path), "size": 10, "mtime_ns": st.st_mtime_ns}])]
+
+    def test_one_the_node_still_cant_see_fails_it(self, tmp_path):
+        seen, unseen = tmp_path / "a.mkv", tmp_path / "b.mkv"
+        seen.write_bytes(b"x")
+        unseen.write_bytes(b"x")
+        client = FakeClient(visible=lambda p: p == str(seen))
+
+        assert nm.files_visible(client, self.ROWS, [str(seen), str(unseen)]) is False
+
+    def test_files_gone_from_this_app_too_are_skipped(self, tmp_path):
+        client = FakeClient(visible=lambda p: False)
+
+        assert nm.files_visible(client, self.ROWS, [str(tmp_path / "replaced-old-name.mkv")]) is True
+        assert client.requests == []
+
+    def test_a_node_that_doesnt_answer_fails_it(self, tmp_path):
+        path = tmp_path / "a.mkv"
+        path.write_bytes(b"x")
+
+        class Gone:
+            def access_check(self, mappings, files):
+                raise reg.NodeUnreachableError("gone")
+
+        assert nm.files_visible(Gone(), self.ROWS, [str(path)]) is False

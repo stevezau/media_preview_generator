@@ -1083,6 +1083,27 @@ class TestErrors:
 
         assert registry.reports == []
 
+    @pytest.mark.parametrize(
+        ("reason", "counts"),
+        [
+            (protocol.NOT_VISIBLE_MISSING, True),
+            (protocol.NOT_VISIBLE_UNREADABLE, True),
+            (protocol.NOT_VISIBLE_OUTSIDE_ROOTS, True),
+            (protocol.NOT_VISIBLE_UNMAPPED, False),
+            # Three episodes replaced a minute before, still cached at their old size on the node, paused it all day.
+            (protocol.NOT_VISIBLE_DIFFERENT_FILE, False),
+        ],
+    )
+    def test_which_reasons_count_toward_pausing_the_node(self, media, reason, counts):
+        error = {"kind": protocol.KIND_FILE_NOT_VISIBLE, "message": "x", "reason": reason}
+        registry = _install(ScriptedClient([finished(protocol.STATUS_FILE_NOT_VISIBLE, error=error)]))
+
+        with pytest.raises(FileNotVisibleError) as raised:
+            _run(media)
+
+        assert raised.value.reason == reason
+        assert registry.reports == ([("not_visible", NODE_ID, media, reason)] if counts else [])
+
     def test_file_not_visible_says_why_in_plain_words_without_the_nodes_path(self, media):
         error = {"kind": protocol.KIND_FILE_NOT_VISIBLE, "message": "no such file: /mnt/nas/a.mkv", "reason": "missing"}
         _install(ScriptedClient([finished(protocol.STATUS_FILE_NOT_VISIBLE, error=error)]))

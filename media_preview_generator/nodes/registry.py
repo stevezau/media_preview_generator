@@ -87,6 +87,10 @@ CHECK_ATTEMPTS = 3
 ATTEMPT_GAP_S = 4.0
 NOT_VISIBLE_WINDOW_S = 600.0
 NOT_VISIBLE_LIMIT = 3
+# A node paused for files it couldn't see runs the quick access check this often on its own: files that changed under
+# it (a share still listing a renamed episode's old name) need nothing fixed, and nobody may be there to press Test
+# access.
+ACCESS_PROBLEM_RECHECK_S = 300.0
 # A Test access of rows not saved yet is adopted only if those rows are saved within this long.
 PENDING_ACCESS_TTL_S = 600.0
 GPU_LOST_RECHECK_S = 300.0
@@ -240,6 +244,7 @@ class _Live:
     access_wanted: bool = False
     not_visible: deque = field(default_factory=lambda: deque(maxlen=64))
     access_problem: str = ""
+    next_access_check: float = 0.0
     gpu_lost: str = ""
     lost_device: str = ""
     next_gpu_check: float = 0.0
@@ -401,11 +406,12 @@ def no_id_reason(name: object) -> str:
     )
 
 
-def _default_quick_access(client: NodeClient, mappings: list[PathMapping]) -> bool:
+def _default_quick_access(client: NodeClient, mappings: list[PathMapping], unseen: list[str]) -> bool:
     from ..web.settings_manager import get_settings_manager
-    from .mappings import quick_access_check
+    from .mappings import files_visible, quick_access_check
 
-    return quick_access_check(client, mappings, get_settings_manager().get("media_servers") or [])
+    servers = get_settings_manager().get("media_servers") or []
+    return quick_access_check(client, mappings, servers) and files_visible(client, mappings, unseen)
 
 
 def _renamed(text: str, old: str, new: str) -> str:
@@ -528,7 +534,8 @@ class NodeRegistry:
         client_factory: Builds the client for one record.
         legacy_ping: Asks an address the old Plex helper's ping; answers ``(agent state, version)``.
         record_uid: Persists the ``node_uid`` a node reported, given the address it answered at.
-        quick_access: Checks one file per library on a node; True when every one is visible.
+        quick_access: Checks one file per library on a node, and the files it couldn't see; True when every one is
+            visible.
         served_plex_ids: The machine identifiers of the Plex servers that use a node as their Plex database node.
         app_version: This app's version (a worker node must match it exactly).
         app_build: This app's git commit, "" when unknown (a worker node reporting another one needs an update).
@@ -545,7 +552,7 @@ class NodeRegistry:
         client_factory: Callable[[dict], NodeClient] = _default_client,
         legacy_ping: Callable[[str, str], tuple[str, str]] = _default_legacy_ping,
         record_uid: Callable[[str, str, str], None] = _default_record_uid,
-        quick_access: Callable[[NodeClient, list[PathMapping]], bool] = _default_quick_access,
+        quick_access: Callable[[NodeClient, list[PathMapping], list[str]], bool] = _default_quick_access,
         library_names: Callable[[list[str]], list[str]] = _default_library_names,
         served_plex_ids: Callable[[str], list[str]] = _default_served_plex_ids,
         app_version: Callable[[], str] = _app_version,
@@ -829,9 +836,10 @@ class NodeRegistry:
             name = live.record.get("name") or "The node"
             live.access_problem = (
                 f"{name} couldn't see {len(distinct)} different files{where} in 10 minutes (the last one: "
-                f"{protocol.not_visible_text(reason)}). Its workers are paused: run Test access and fix the folder "
-                "mappings."
+                f"{protocol.not_visible_text(reason)}). Its workers are paused until it can see your media again "
+                "(checked every 5 minutes): run Test access and fix the folder mappings."
             )
+            live.next_access_check = now + ACCESS_PROBLEM_RECHECK_S
             logger.warning(
                 "Node {} couldn't see {} different files{} in 10 minutes; pausing its workers until media access "
                 "is fixed",
@@ -1283,7 +1291,7 @@ class NodeRegistry:
                         # keeps what ``_tie_new_uid`` decided: hearing it again says nothing about its Plex.
                         live.unconfirmed_uid = "" if outcome.uid == record.get("node_uid") else outcome.uid
                     has_access_problem = bool(live.access_problem)
-                    access = access or live.access_wanted
+                    access = access or live.access_wanted or live.next_access_check <= self._clock()
                     live.access_wanted = False
                 if new_uid:
                     self._new_uid(node_id, live, record, outcome)
@@ -1657,17 +1665,27 @@ class NodeRegistry:
         )
 
     def _quick_access_clear(self, node_id: str, live: _Live, client: NodeClient) -> None:
-        mappings = node_mappings(live.record)
+        with self._lock:
+            live.next_access_check = self._clock() + ACCESS_PROBLEM_RECHECK_S
+            problem = live.access_problem
+            mappings = node_mappings(live.record)
+            unseen = sorted({path for _, path in live.not_visible})
         try:
-            passed = self._quick_access(client, mappings)
+            passed = self._quick_access(client, mappings, unseen)
         except Exception as exc:
             logger.debug("Quick access check on node {} failed: {}", node_id, exc)
             return
-        if passed:
-            with self._lock:
-                live.access_problem = ""
-                live.not_visible.clear()
-                self._touch()
+        if not passed:
+            return
+        with self._lock:
+            # A Test access or new mappings meanwhile settled this pause, and files missed since may have raised
+            # another: this check passed on the old one.
+            if self._nodes.get(node_id) is not live or live.access_problem != problem:
+                return
+            live.access_problem = ""
+            live.not_visible.clear()
+            self._touch()
+        logger.info("Node {} can see your media again; its workers resume", live.record.get("name") or node_id)
 
     def _gpu_check(self, node_id: str, device: str | None, raise_unreachable: bool = False) -> None:
         with self._lock:

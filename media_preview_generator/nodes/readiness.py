@@ -293,7 +293,7 @@ def _media_access(details: NodeDetails) -> list[dict[str, Any]]:
                 f"{view.name} couldn't see files it was sent",
                 severity=CRITICAL,
                 ok=False,
-                explanation="Its workers are paused until a Test access passes.",
+                explanation="Its workers are paused until a Test access, or the check every 5 minutes, passes.",
                 reason=view.reason,
                 fix_tab=TAB_MEDIA,
                 fix_label="Test access",

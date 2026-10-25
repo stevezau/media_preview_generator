@@ -90,6 +90,7 @@ class Harness:
         self.uids: list[tuple[str, str]] = []
         self.legacy = ("connected", "1.2.0")
         self.quick = True
+        self.unseen_asked: list[list[str]] = []
         self.libraries: list[str] = []
         self.clock = Clock()
         self.app_build = ""
@@ -99,7 +100,7 @@ class Harness:
             client_factory=self._client,
             legacy_ping=lambda url, key: self.legacy,
             record_uid=lambda node_id, uid, url: self.uids.append((node_id, uid)),
-            quick_access=lambda client, mappings: self.quick,
+            quick_access=lambda client, mappings, unseen: self.unseen_asked.append(unseen) or self.quick,
             library_names=lambda paths: list(self.libraries),
             app_version=lambda: APP_VERSION,
             app_build=lambda: self.app_build,
@@ -702,8 +703,22 @@ class TestAccessProblem:
         asked = []
         monkeypatch.setattr(settings_manager, "get_settings_manager", lambda: Settings())
         monkeypatch.setattr(mappings, "quick_access_check", lambda *args: asked.append(args) or True)
-        assert reg._default_quick_access("client", list(MAPPINGS)) is True
-        assert asked == [("client", list(MAPPINGS), servers)]
+        monkeypatch.setattr(mappings, "files_visible", lambda *args: asked.append(args) or True)
+        assert reg._default_quick_access("client", list(MAPPINGS), ["/data/a.mkv"]) is True
+        assert asked == [("client", list(MAPPINGS), servers), ("client", list(MAPPINGS), ["/data/a.mkv"])]
+
+    def test_the_quick_access_check_fails_when_the_files_the_node_missed_are_still_unseen(self, monkeypatch):
+        from media_preview_generator.nodes import mappings
+        from media_preview_generator.web import settings_manager
+
+        class Settings:
+            def get(self, key, default=None):
+                return []
+
+        monkeypatch.setattr(settings_manager, "get_settings_manager", lambda: Settings())
+        monkeypatch.setattr(mappings, "quick_access_check", lambda *args: True)
+        monkeypatch.setattr(mappings, "files_visible", lambda *args: False)
+        assert reg._default_quick_access("client", list(MAPPINGS), ["/data/a.mkv"]) is False
 
     def test_the_access_problem_reason_is_plain_words(self, h):
         self._ready(h)
@@ -796,6 +811,65 @@ class TestAccessProblem:
         assert h.registry.check_now("n1").state == reg.STATE_ACCESS_PROBLEM
         h.quick = True
         assert h.registry.check_now("n1").state == reg.STATE_READY
+
+    def test_the_health_loop_clears_it_once_a_quick_access_check_passes_five_minutes_on(self, h):
+        """Nothing cleared it but a check the user started: a node paused overnight stayed at 0 workers all day."""
+        self.test_three_different_files_in_ten_minutes_is_an_access_problem(h)
+        live = h.registry._nodes["n1"]
+
+        live.next_check = h.clock.now
+        h.registry._tick()
+        assert _wait_for(lambda: not live.checking)
+        assert h.registry.view("n1").state == reg.STATE_ACCESS_PROBLEM
+
+        h.quick = False
+        h.clock.now += reg.ACCESS_PROBLEM_RECHECK_S
+        live.next_check = h.clock.now
+        h.registry._tick()
+        assert _wait_for(lambda: not live.checking)
+        assert h.registry.view("n1").state == reg.STATE_ACCESS_PROBLEM
+
+        h.quick = True
+        live.next_check = h.clock.now
+        h.registry._tick()
+        assert _wait_for(lambda: not live.checking)
+        assert h.registry.view("n1").state == reg.STATE_ACCESS_PROBLEM
+
+        h.clock.now += reg.ACCESS_PROBLEM_RECHECK_S
+        live.next_check = h.clock.now
+        h.registry._tick()
+        assert _wait_for(lambda: h.registry.view("n1").state == reg.STATE_READY)
+        # The files it couldn't see are checked again, not only one file per library.
+        assert h.unseen_asked[-1] == ["/data/a.mkv", "/data/b.mkv", "/data/c.mkv"]
+
+    def test_the_health_loop_keeps_the_recheck_for_a_node_that_isnt_ready_when_it_is_due(self, h):
+        self.test_three_different_files_in_ten_minutes_is_an_access_problem(h)
+        live = h.registry._nodes["n1"]
+        h.clock.now += reg.ACCESS_PROBLEM_RECHECK_S
+        h.client().infos = [NodeUnreachableError("gone")] * reg.CHECK_ATTEMPTS
+        live.next_check = h.clock.now
+        h.registry._tick()
+        assert _wait_for(lambda: not live.checking)
+        assert h.unseen_asked == []
+
+        h.clock.now += 1
+        live.next_check = h.clock.now
+        h.registry._tick()
+        assert _wait_for(lambda: h.registry.view("n1").state == reg.STATE_READY)
+
+    def test_a_quick_check_that_passes_after_a_new_pause_leaves_the_new_one(self, h):
+        """A Test access cleared the pause it was checking and new misses raised another while it ran."""
+        self.test_three_different_files_in_ten_minutes_is_an_access_problem(h)
+        live = h.registry._nodes["n1"]
+
+        def paused_anew_meanwhile(client, mappings, unseen):
+            live.access_problem = "a newer pause"
+            return True
+
+        h.registry._quick_access = paused_anew_meanwhile
+        view = h.registry.check_now("n1")
+
+        assert (view.state, view.reason) == (reg.STATE_ACCESS_PROBLEM, "a newer pause")
 
     def test_a_library_no_row_covers_is_not_judged_but_a_covered_one_that_is_missing_still_fails(self):
         movies = {"library": "Movies", "checked": 3, "ok": True}
