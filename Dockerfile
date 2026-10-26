@@ -244,6 +244,24 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD exec python3 -c "import urllib.request, os; e = os.environ; node = (e.get('MODE') or '').strip().lower() == 'node'; read = lambda n: (open(e['FILE__' + n], encoding='utf-8-sig').read().strip() if node and e.get('FILE__' + n) else '') or e.get(n, '').strip(); port = read('NODE_PORT') or read('AGENT_PORT') or '9494'; host = read('NODE_HOST') if node else 'localhost'; host = {'': '127.0.0.1', '0.0.0.0': '127.0.0.1', '::': '::1'}.get(host, host); urllib.request.urlopen('http://' + ('[' + host + ']' if ':' in host else host) + ':' + (port + '/v1/health' if node else (e.get('WEB_PORT') or '8080') + '/api/health'), timeout=5)"
 
+# Our own labels: without these the image shows linuxserver/ffmpeg's, inherited from the base (#428). Last, because
+# GIT_SHA changes every commit and a changed LABEL rebuilds every layer after it.
+ARG SETUPTOOLS_SCM_PRETEND_VERSION=""
+LABEL maintainer="stevezau" \
+      build_version="Media Preview Generator ${SETUPTOOLS_SCM_PRETEND_VERSION} (${GIT_SHA})" \
+      org.opencontainers.image.title="Media Preview Generator" \
+      org.opencontainers.image.description="GPU previews, intro/credits and shared results for Plex, Emby and Jellyfin" \
+      org.opencontainers.image.authors="stevezau" \
+      org.opencontainers.image.vendor="stevezau" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.url="https://mediapreviewgenerator.dev" \
+      org.opencontainers.image.documentation="https://mediapreviewgenerator.dev" \
+      org.opencontainers.image.source="https://github.com/stevezau/media_preview_generator" \
+      org.opencontainers.image.version="${SETUPTOOLS_SCM_PRETEND_VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.ref.name="${GIT_BRANCH}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
 # Use LinuxServer's /init for PUID/PGID handling
 ENTRYPOINT ["/init", "/app/wrapper.sh"]
 

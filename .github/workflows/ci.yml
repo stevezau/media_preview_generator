@@ -846,6 +846,11 @@ jobs:
       - name: Show resolved version
         run: echo "Baking version ${{ steps.pkgver.outputs.version }} into ${{ matrix.platform }} image"
 
+      - name: Resolve the build date
+        id: built
+        # The commit's time, not the clock's: both platforms get the same date and a re-run keeps its layer cache.
+        run: echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+
       - name: Generate bundled release notes
         # Fetches GitHub Releases into media_preview_generator/release_notes.json
         # so the docker COPY picks it up. Powers the "What's new" popup
@@ -870,6 +875,7 @@ jobs:
           build-args: |
             GIT_BRANCH=${{ needs.context.outputs.head_branch }}
             GIT_SHA=${{ needs.context.outputs.head_sha }}
+            BUILD_DATE=${{ steps.built.outputs.date }}
             DOCKER_IMAGE_NAME=${{ steps.image.outputs.name }}
             SETUPTOOLS_SCM_PRETEND_VERSION=${{ steps.pkgver.outputs.version }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true

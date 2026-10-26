@@ -143,6 +143,33 @@ def test_the_main_image_exposes_only_the_web_ui_port():
     assert exposed == [["8080"]]
 
 
+# Every label linuxserver/ffmpeg:8.1.2-cli-ls73 sets (`docker image inspect`). The image inherits them, so each one
+# must be overridden or it describes linuxserver's FFmpeg image instead of this one (#428).
+_BASE_IMAGE_LABELS = (
+    "build_version", "maintainer", "org.opencontainers.image.authors", "org.opencontainers.image.created",
+    "org.opencontainers.image.description", "org.opencontainers.image.documentation",
+    "org.opencontainers.image.licenses", "org.opencontainers.image.ref.name", "org.opencontainers.image.revision",
+    "org.opencontainers.image.source", "org.opencontainers.image.title", "org.opencontainers.image.url",
+    "org.opencontainers.image.vendor", "org.opencontainers.image.version",
+)  # fmt: skip
+
+
+def test_the_main_image_overrides_every_label_its_base_image_sets():
+    instructions = _instructions(MAIN)
+    last_from = max(i for i, line in enumerate(instructions) if line.startswith("FROM "))
+    assert instructions[last_from].startswith("FROM linuxserver/ffmpeg:"), instructions[last_from]
+    labels = dict(
+        pair.split("=", 1)
+        for line in instructions[last_from:]
+        if line.startswith("LABEL ")
+        for pair in shlex.split(line)[1:]
+    )
+    assert sorted(set(_BASE_IMAGE_LABELS) - labels.keys()) == []
+    assert not [value for value in labels.values() if "linuxserver" in value.lower()]
+    assert labels["org.opencontainers.image.source"] == "https://github.com/stevezau/media_preview_generator"
+    assert labels["org.opencontainers.image.revision"] == "${GIT_SHA}"
+
+
 @pytest.mark.parametrize("dockerfile", [MAIN, PLEX_DB], ids=["main", "plex-db"])
 def test_the_healthcheck_asks_the_port_a_file_names(dockerfile, tmp_path):
     # The node reads FILE__NODE_PORT before NODE_PORT (nodes/server/wsgi.py); a check of NODE_PORT alone would call
