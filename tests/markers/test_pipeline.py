@@ -1107,7 +1107,7 @@ class TestEvidenceAndDecisions:
         assert [len(c.calls) for c in clients.values()] == [1, 1, 1]  # not due yet: nothing asked again
 
         clients[source.value].result = LookupResult("ok", (Candidate(T.INTRO, start, end, source),))
-        run(first + pipeline.NO_DATA_RETRY + timedelta(days=1))
+        run(first + pipeline.no_data_retry(store.get_file(media).id) + timedelta(days=1))
 
         assert len(clients[source.value].calls) == 2
         decision = store.get_decisions(store.get_file(media).id)[T.INTRO]
@@ -1346,7 +1346,7 @@ class TestOnlineLookups:
             (LookupResult("not_applicable"), timedelta(0), False, True),
             (NO_DATA, timedelta(days=1), False, False),
             (NO_DATA, timedelta(days=14), False, False),
-            (NO_DATA, timedelta(days=14, seconds=1), False, True),
+            (NO_DATA, timedelta(days=28, seconds=1), False, True),
             (NO_DATA, timedelta(days=1), True, True),
             (LookupResult("ok", (TIDB_INTRO,)), timedelta(days=30), False, False),
             (LookupResult("ok", (TIDB_INTRO,)), timedelta(0), True, True),
@@ -1356,7 +1356,7 @@ class TestOnlineLookups:
             "not-applicable",
             "no-data-1d",
             "no-data-14d",
-            "no-data-after-14d",
+            "no-data-after-28d",
             "no-data-force",
             "ok-30d",
             "ok-force",
@@ -1377,6 +1377,13 @@ class TestOnlineLookups:
         _run(ctx, media, {"plex-1": ready_publisher()})
         assert len(client.calls) == (2 if queried_again else 1)
         store.close()
+
+    def test_no_entry_reasks_spread_over_two_weeks(self):
+        # A first run stores thousands of "no entry" answers in a day; consecutive files come due on different days.
+        ages = [pipeline.no_data_retry(file_id) for file_id in range(1, 16)]
+        assert len(set(ages)) == 15
+        assert min(ages) == timedelta(days=14)
+        assert max(ages) == timedelta(days=28)
 
     def test_unavailable_answer_keeps_earlier_evidence(self, store, media):
         reg = _registry(media, ServerType.PLEX)
@@ -2195,7 +2202,7 @@ class TestServerMarkersFromVendors:
             ctx.priority = lambda: 3
             _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(chapters))
             assert store.get_markers(store.get_file(media).id)[T.CREDITS] == marker
-            clock["t"] += pipeline.NO_DATA_RETRY + timedelta(seconds=1)
+            clock["t"] += pipeline.no_data_retry(store.get_file(media).id) + timedelta(seconds=1)
         assert (len(clients["introdb"].calls), len(clients["skipdb"].calls)) == (2, 2)
         assert clients["theintrodb"].calls == []
         store.close()

@@ -586,7 +586,7 @@ partway through completes with one warning per source that ran out (see `GET /ap
 the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
 next scheduled or manual run for the same files asks it again on its own. Recurring checks use user-created **Find markers** cron schedules; there is no automatic weekly online re-check or
 post-reset TheIntroDB job. A database's stored "no entry" is asked again by the next run that includes the file once
-it is more than 14 days old. TheIntroDB also isn't
+it is older than 14 to 28 days (fixed per file, from its `files` row id). TheIntroDB also isn't
 asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry"
 while none has an answer: none recorded in `series_lookups`, and no file under the show's folder with a stored
 TheIntroDB answer holding a marker. The 7 days run from the pause's start (`series_pauses` in `markers.db`); "no

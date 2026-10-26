@@ -173,6 +173,9 @@ from .titles import NO_TITLE, TITLE_CACHE, title_of
 from .titles import look_up as look_up_title
 
 NO_DATA_RETRY = timedelta(days=14)
+# A library's first run stores most "no entry" answers within a day or two. Each file waits 0-14 more days on top, set
+# by its id, so a later run doesn't find them all due at once and spend hours on 2-lookups-a-second rate limits.
+NO_DATA_RETRY_SPREAD_DAYS = 14
 # TheIntroDB's daily budget is small (1,000 lookups with a key) and whole shows are missing from it (talk shows, some
 # anime): once this many episodes of a series got "no entry" and none an answer (nor any file of the show a stored
 # one), the series isn't asked about for SERIES_NO_ENTRY_PAUSE from then; the next pause needs as many new "no entry"
@@ -1174,7 +1177,19 @@ def _needs_lookup(ctx: PipelineContext, rec: FileRecord, source: Source, refresh
     if fetched is None or refresh or ctx.store.evidence_version(rec.id, source) != PARSER_VERSIONS[source]:
         return True
     rows = [r for r in ctx.store.evidence_rows(rec.id) if r.source is source and r.origin == ""]
-    return all(r.type is None for r in rows) and ctx.now() - fetched > NO_DATA_RETRY
+    return all(r.type is None for r in rows) and ctx.now() - fetched > no_data_retry(rec.id)
+
+
+def no_data_retry(file_id: int) -> timedelta:
+    """How old a file's stored "no entry" gets before its source is asked again: 14 to 28 days, fixed per file.
+
+    Args:
+        file_id: The file's ``files`` row id.
+
+    Returns:
+        The file's re-ask age.
+    """
+    return NO_DATA_RETRY + timedelta(days=file_id % (NO_DATA_RETRY_SPREAD_DAYS + 1))
 
 
 # Sources without a switch of their own, each ranked right after the source whose switch they ride on.
