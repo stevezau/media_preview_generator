@@ -46,6 +46,11 @@ jobs:
           # the maintainer review that makes it safe.
           allow-unsafe-pr-checkout: true
 
+      - name: Resolve the build date
+        id: built
+        # The commit's time in UTC, as the published images get it (ci.yml).
+        run: echo "date=$(TZ=UTC0 git log -1 --date=iso-strict-local --format=%cd)" >> "$GITHUB_OUTPUT"
+
       - name: Compute lowercase image name
         id: img
         run: echo "name=${REPO,,}" >> "$GITHUB_OUTPUT"
@@ -79,6 +84,7 @@ jobs:
           build-args: |
             GIT_BRANCH=pr-${{ github.event.pull_request.number }}
             GIT_SHA=${{ github.event.pull_request.head.sha }}
+            BUILD_DATE=${{ steps.built.outputs.date }}
           # No GHA layer cache: since GitHub's 2026 cache hardening, pull_request_target runs on the default
           # branch get a read-only cache token ("refs/heads/dev: read"), so cache-to fails the whole build with
           # "failed to reserve cache" and nothing could ever be written for cache-from to read.

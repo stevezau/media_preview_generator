@@ -849,7 +849,8 @@ jobs:
       - name: Resolve the build date
         id: built
         # The commit's time, not the clock's: both platforms get the same date and a re-run keeps its layer cache.
-        run: echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+        # In UTC, so the date doesn't carry whichever timezone the committer was in.
+        run: echo "date=$(TZ=UTC0 git log -1 --date=iso-strict-local --format=%cd)" >> "$GITHUB_OUTPUT"
 
       - name: Generate bundled release notes
         # Fetches GitHub Releases into media_preview_generator/release_notes.json
@@ -938,7 +939,14 @@ jobs:
         working-directory: /tmp/digests/canonical
         run: |
           # shellcheck disable=SC2046  # the digest list must split into one argument per digest
+          # The list's own labels: registries that read the multi-arch list, not each platform's image, show these.
           docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.title=Media Preview Generator" \
+            --annotation "index:org.opencontainers.image.description=GPU previews, intro/credits and shared results for Plex, Emby and Jellyfin" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/stevezau/media_preview_generator" \
+            --annotation "index:org.opencontainers.image.url=https://mediapreviewgenerator.dev" \
+            --annotation "index:org.opencontainers.image.licenses=MIT" \
+            --annotation "index:org.opencontainers.image.revision=${{ needs.context.outputs.head_sha }}" \
             ${{ needs.context.outputs.docker_tags_canonical }} \
             $(printf '${{ env.DOCKER_IMAGE }}@sha256:%s ' *)
 

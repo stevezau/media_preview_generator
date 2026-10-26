@@ -83,19 +83,6 @@ RUN if [ -n "$SETUPTOOLS_SCM_PRETEND_VERSION" ]; then \
 # =============================================================================
 FROM linuxserver/ffmpeg:8.1.2-cli-ls73
 
-# Build metadata (optional; set via --build-arg in CI)
-ARG GIT_BRANCH=unknown
-ARG GIT_SHA=unknown
-ARG BUILD_DATE=unknown
-
-# Published image name baked in at build time. CI passes one of:
-#   - stevezzau/plex_generate_vid_previews  (deprecated mirror; banner fires)
-#   - stevezzau/media_preview_generator     (canonical name; no banner)
-#   - local                                  (dev / unset; no banner)
-# The runtime reads $DOCKER_IMAGE_NAME and surfaces an in-app deprecation
-# notification when it matches the deprecated name.
-ARG DOCKER_IMAGE_NAME=local
-
 # Runtime dependencies.  Split into two apt passes because we add two
 # third-party repos before pulling jellyfin-ffmpeg + newer Intel drivers.
 #
@@ -198,6 +185,20 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/init-dri-by-path/run && \
 
 # Set working directory
 WORKDIR /app
+
+# Build metadata (optional; set via --build-arg in CI). Declared here, after the apt layers, because every RUN after
+# an ARG is rebuilt when its value changes, and GIT_SHA changes every commit.
+ARG GIT_BRANCH=unknown
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+
+# Published image name baked in at build time. CI passes one of:
+#   - stevezzau/plex_generate_vid_previews  (deprecated mirror; banner fires)
+#   - stevezzau/media_preview_generator     (canonical name; no banner)
+#   - local                                  (dev / unset; no banner)
+# The runtime reads $DOCKER_IMAGE_NAME and surfaces an in-app deprecation
+# notification when it matches the deprecated name.
+ARG DOCKER_IMAGE_NAME=local
 
 # Expose build metadata to the app (non-secret)
 ENV GIT_BRANCH=${GIT_BRANCH} \
