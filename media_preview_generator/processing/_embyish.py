@@ -54,13 +54,24 @@ class _EmbyishProcessor(_MediaServerProcessor):
             **_NO_BOXSET_COLLAPSE,
         }
         wanted = previews_library_ids(server_config, library_ids)
-        if wanted == []:
-            return
-        if wanted:
-            params["ParentId"] = ",".join(wanted)
+        # One query per library: Emby 500s and Jellyfin 400s on a comma-joined
+        # ParentId (#432). None means no saved library list, so walk them all.
+        parent_ids: list[str | None] = list(wanted) if wanted is not None else [None]
 
         cutoff = datetime.now(UTC) - timedelta(hours=lookback_hours)
 
+        for parent_id in parent_ids:
+            query = {**params, "ParentId": parent_id} if parent_id else params
+            yield from self._recent_items(client, query, cutoff, server_config)
+
+    def _recent_items(
+        self,
+        client: EmbyApiClient,
+        params: dict[str, Any],
+        cutoff: datetime,
+        server_config: ServerConfig,
+    ) -> Iterator[ProcessableItem]:
+        """Yield one ProcessableItem per version of each item ``params`` returns that was added after ``cutoff``."""
         # Public query helper introduced for this exact use case — no
         # private-method reach-across required, errors logged at the
         # client layer.

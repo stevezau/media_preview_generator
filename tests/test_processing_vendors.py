@@ -391,24 +391,62 @@ class TestRecentlyAddedSkipsPreviewsOffLibraries:
 
         assert [s.key for s in sections if s.search.called] == walked
 
-    @pytest.mark.parametrize(
-        ("libraries", "library_ids", "parent_id"),
-        [
-            (_LIBS, None, "2"),
-            (_LIBS, ["1", "2"], "2"),
-            ((), None, None),  # no saved library list: every library, as a full scan does
-        ],
-        ids=["all", "asked-for-both", "no-saved-list"],
+    _LIBS_BOTH_ON = (
+        Library(id="1", name="TV", remote_paths=("/r/tv",), enabled=True),
+        Library(id="2", name="Movies", remote_paths=("/r/movies",), enabled=True),
     )
-    def test_emby_queries_only_previews_on_libraries(self, libraries, library_ids, parent_id):
+
+    @pytest.mark.parametrize(
+        ("processor", "client_path"),
+        [
+            (EmbyProcessor, "media_preview_generator.processing.emby.EmbyServer"),
+            (JellyfinProcessor, "media_preview_generator.processing.jellyfin.JellyfinServer"),
+        ],
+        ids=["emby", "jellyfin"],
+    )
+    @pytest.mark.parametrize(
+        ("libraries", "library_ids", "parent_ids"),
+        [
+            (_LIBS, None, ["2"]),
+            (_LIBS, ["1", "2"], ["2"]),
+            # #432: Emby 500s ("Unrecognized Guid format") and Jellyfin 400s on a comma-joined ParentId,
+            # so two Previews-on libraries must be two queries.
+            (_LIBS_BOTH_ON, None, ["1", "2"]),
+            ((), None, [None]),  # no saved library list: every library, as a full scan does
+        ],
+        ids=["all", "asked-for-both", "two-previews-on", "no-saved-list"],
+    )
+    def test_embyish_queries_each_previews_on_library_separately(
+        self, processor, client_path, libraries, library_ids, parent_ids
+    ):
         from dataclasses import replace
 
-        cfg = replace(_config("srv-x", ServerType.EMBY), libraries=libraries)
-        with patch("media_preview_generator.processing.emby.EmbyServer") as klass:
+        server_type = ServerType.EMBY if processor is EmbyProcessor else ServerType.JELLYFIN
+        cfg = replace(_config("srv-x", server_type), libraries=libraries)
+        with patch(client_path) as klass:
             klass.return_value.query_items.return_value = []
-            list(EmbyProcessor().scan_recently_added(cfg, lookback_hours=24, library_ids=library_ids))
+            list(processor().scan_recently_added(cfg, lookback_hours=24, library_ids=library_ids))
 
-        assert klass.return_value.query_items.call_args.args[0].get("ParentId") == parent_id
+        queried = [c.args[0].get("ParentId") for c in klass.return_value.query_items.call_args_list]
+        assert queried == parent_ids
+
+    def test_embyish_yields_recent_items_from_every_library(self):
+        from dataclasses import replace
+        from datetime import datetime
+
+        cfg = replace(_config("srv-x", ServerType.EMBY), libraries=self._LIBS_BOTH_ON)
+        now = datetime.now(UTC).isoformat()
+        rows = {
+            "1": [{"Id": "ep", "Name": "Ep", "Path": "/r/tv/ep.mkv", "DateCreated": now}],
+            "2": [{"Id": "film", "Name": "Film", "Path": "/r/movies/film.mkv", "DateCreated": now}],
+        }
+        with patch("media_preview_generator.processing.emby.EmbyServer") as klass:
+            client = klass.return_value
+            client.query_items.side_effect = lambda params: rows[params["ParentId"]]
+            client.media_item_versions.side_effect = lambda raw: [(raw["Id"], raw["Path"])]
+            items = list(EmbyProcessor().scan_recently_added(cfg, lookback_hours=24))
+
+        assert sorted(i.item_id_by_server["srv-x"] for i in items) == ["ep", "film"]
 
     def test_emby_asked_only_for_a_previews_off_library_queries_nothing(self):
         from dataclasses import replace
