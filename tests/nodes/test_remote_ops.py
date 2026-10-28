@@ -520,6 +520,22 @@ class TestFindCredits:
             )
         assert registry.reports == []
 
+    def test_an_unexpected_node_failure_is_not_its_own_cause(self, media, monkeypatch):
+        # A self-caused error sent gpu_failure_lines round its cause chain forever, holding the GIL (sflix, 2026-10-28).
+        _node(GPU)
+
+        def fake(path, **kwargs):
+            raise ValueError("OCR model exploded")
+
+        monkeypatch.setattr(textdet_helper, "get_textdet_pool", lambda: None)
+        monkeypatch.setattr(detector, "find_credits", fake)
+        with _on_node(), pytest.raises(RuntimeError, match="OCR model exploded") as raised:
+            remote_ops.find_credits(
+                media, duration_ms=1000, is_episode=True, ffmpeg="f", gpu="NVIDIA", gpu_device_path="cuda:0"
+            )
+        assert raised.value.__cause__ is not raised.value
+        assert frames.gpu_failure_lines(raised.value) == ()
+
 
 # --- the real functions both ways on a real clip -------------------------------------------------------------------
 

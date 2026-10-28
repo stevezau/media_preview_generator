@@ -44,7 +44,8 @@ def _rebuilt(exc: NodeTaskError, known: Mapping[str, Rebuild], cancelled: Callab
         return make(exc.message, exc.extra)
     if isinstance(exc, NodeTaskCancelledError):
         return cancelled()
-    return exc
+    # A copy: every caller raises this ``from exc``, and raising exc from itself makes a cause chain with no end.
+    return NodeTaskError(exc.kind, exc.message, error_type=exc.error_type, extra=exc.extra)
 
 
 def _gpu(gpu: str | None, gpu_device_path: str | None) -> tuple[str, str] | None:
