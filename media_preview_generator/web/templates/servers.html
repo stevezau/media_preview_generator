@@ -667,11 +667,11 @@
                                 </div>
                                 <div id="editVendorWebhookAuthBlock" class="sm-warnline">
                                     <i class="bi bi-shield-lock-fill"></i>
-                                    <span><strong>Auth header (required).</strong> Add header <code id="editVendorWebhookHeaderName">X-Auth-Token</code> with value <code id="editVendorWebhookHeaderValuePlaceholder">[THIS APP'S TOKEN]</code>.</span>
-                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to find the token and why a header is safer." data-explain-title="Webhook token header" data-explain-template="infoEditWebhookTokenTpl" aria-label="About the auth header"><i class="bi bi-info-circle"></i></button>
+                                    <span><strong>Auth header (required).</strong> Add header <code id="editVendorWebhookHeaderName">X-Auth-Token</code> with value <code id="editVendorWebhookHeaderValuePlaceholder">[YOUR WEBHOOK SECRET]</code>.</span>
+                                    <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Where to find the webhook secret and why a header is safer." data-explain-title="Webhook auth header" data-explain-template="infoEditWebhookTokenTpl" aria-label="About the auth header"><i class="bi bi-info-circle"></i></button>
 <template id="infoEditWebhookTokenTpl">
-    <p>In your plugin's <strong>Headers</strong> / <strong>Request Headers</strong> section, add a custom header: Name <code>X-Auth-Token</code>, Value this app's web-auth token.</p>
-    <p>Use this app's web-auth token as the value. You can find or rotate it under <a href="/settings#section-auth">Settings → Authentication</a>. Sending the token as a header keeps it out of access logs, screenshots, and clipboard history.</p>
+    <p>In your plugin's <strong>Headers</strong> / <strong>Request Headers</strong> section, add a custom header: Name <code>X-Auth-Token</code>, Value your webhook secret.</p>
+    <p>Set or generate the webhook secret under <a href="/automation#section-webhooks-settings">Automation → Triggers → Settings</a>. Sending it as a header keeps it out of access logs, screenshots, and clipboard history.</p>
 </template>
                                 </div>
                                 <div id="editVendorWebhookPluginHint" class="sm-hint"></div>

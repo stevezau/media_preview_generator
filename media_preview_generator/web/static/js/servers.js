@@ -1312,8 +1312,8 @@
         if (urlInput) urlInput.value = info.webhook_url_per_server || info.webhook_url || '';
         // Header name is static prose (X-Auth-Token) — the API confirms
         // it but never returns the value. We deliberately don't expose
-        // the actual token in this UI: the user looks it up under
-        // Settings → Authentication and pastes it into their plugin.
+        // the webhook secret in this UI: the user copies it from
+        // Automation → Triggers → Settings into their plugin.
         if (headerNameEl) headerNameEl.textContent = info.auth_header_name || 'X-Auth-Token';
         if (hintEl) {
             hintEl.className = 'sm-hint';

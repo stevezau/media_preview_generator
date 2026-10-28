@@ -5,9 +5,11 @@ Plex only. Emby and Jellyfin users had no place to find the webhook
 URL their plugin should POST to.
 
 These routes return the per-server webhook URL + plugin install
-instructions for Emby and Jellyfin. The auth token value is never
-returned; the UI renders a [THIS APP'S TOKEN] placeholder and points
-the user at Settings → Authentication to look it up themselves.
+instructions for Emby and Jellyfin. The webhook secret is never
+returned; the UI renders a [YOUR WEBHOOK SECRET] placeholder and points
+the user at Automation → Triggers → Settings, where it is set (#432:
+the old text pointed at Settings → Authentication, which never shows
+the sign-in token, so users pasted the wrong value).
 
 A companion ``/test`` endpoint that loopback-POSTed synthetic payloads
 was removed — it only proved auth + route worked locally, which is
@@ -40,6 +42,7 @@ def client(tmp_path, monkeypatch):
     from media_preview_generator.web.settings_manager import get_settings_manager
 
     sm = get_settings_manager()
+    sm.set("webhook_secret", "the-webhook-secret-456")
     sm.set(
         "media_servers",
         [
@@ -101,14 +104,14 @@ class TestVendorWebhookInfo:
         assert data["webhook_url_per_server"] == data["webhook_url"]
         # Header name is fine to expose (it's a constant). Value MUST NOT
         # be exposed: it would land in JS state, screen-shares, and any
-        # screenshot of the modal. The user looks up the token via
-        # Settings → Authentication. Keep this assertion as a tripwire —
-        # any future field that smuggles the token back in will fail it.
+        # screenshot of the modal. The user copies the secret from
+        # Automation → Triggers → Settings. Keep this assertion as a tripwire —
+        # any future field that smuggles the secret back in will fail it.
         assert data["auth_header_name"] == "X-Auth-Token"
-        assert data["auth_token_placeholder"] == "[THIS APP'S TOKEN]", (
-            "UI renders the placeholder in place of the real token so the value never appears on screen"
+        assert data["auth_token_placeholder"] == "[YOUR WEBHOOK SECRET]", (
+            "UI renders the placeholder in place of the real secret so the value never appears on screen"
         )
-        assert data["auth_token_present"] is True, "auth_token_present is a boolean — never the token itself"
+        assert data["webhook_secret_set"] is True, "webhook_secret_set is a boolean — never the secret itself"
         assert "auth_header_value" not in data, "auth_header_value MUST NOT be returned (token would leak via JS state)"
         assert "webhook_url_with_token" not in data, (
             "?token= URL fallback removed — both plugins support custom headers"
@@ -122,6 +125,7 @@ class TestVendorWebhookInfo:
         assert "test-token-123" not in body_text, (
             "The actual auth token must NOT appear anywhere in /info; only a placeholder + header name are surfaced"
         )
+        assert "the-webhook-secret-456" not in body_text, "The webhook secret must NOT appear anywhere in /info"
 
         assert expected_plugin_substring in data["plugin"]["plugin_name"], (
             f"plugin info should reference {expected_plugin_substring}"
@@ -133,9 +137,14 @@ class TestVendorWebhookInfo:
         assert any("X-Auth-Token" in step for step in data["plugin"]["config_steps"]), (
             "Plugin steps MUST instruct the user to add the X-Auth-Token header"
         )
-        assert any("[THIS APP'S TOKEN]" in step for step in data["plugin"]["config_steps"]), (
-            "Plugin steps reference the token via placeholder so the live value never appears in surfaced text"
+        assert any(
+            "[YOUR WEBHOOK SECRET]" in step and "Automation → Triggers → Settings" in step
+            for step in data["plugin"]["config_steps"]
+        ), (
+            "Plugin steps must name the webhook secret and where to find it — Settings → Authentication "
+            "never displays the sign-in token, so pointing there left users with no copyable value (#432)"
         )
+        assert not any("Settings → Authentication" in step for step in data["plugin"]["config_steps"])
         assert data["plugin"].get("supports_custom_headers") is True, (
             "Both Emby's built-in Webhooks (4.6+) and the Jellyfin Webhook plugin support custom headers — "
             "this flag tells the UI not to render a fallback path"
@@ -143,6 +152,14 @@ class TestVendorWebhookInfo:
         # Auto-register is NOT yet supported (deferred follow-up).
         # Surface it in the response so the UI doesn't render a dead button.
         assert data["auto_register_supported"] is False
+
+    def test_info_reports_webhook_secret_unset_when_empty(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set("webhook_secret", "")
+        resp = client.get("/api/settings/emby_webhook/info?server_id=emby-1", headers=_hdrs())
+        assert resp.status_code == 200
+        assert resp.get_json()["webhook_secret_set"] is False
 
     def test_info_requires_server_id(self, client):
         resp = client.get("/api/settings/emby_webhook/info", headers=_hdrs())

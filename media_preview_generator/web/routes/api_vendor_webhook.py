@@ -10,9 +10,9 @@ This module exposes:
 
 * ``GET /api/settings/{emby,jellyfin}_webhook/info?server_id=<id>`` —
   returns the per-server webhook URL plus plugin-specific install
-  instructions. The token is never returned; the UI renders a
-  ``[THIS APP'S TOKEN]`` placeholder and points the user at
-  Settings → Authentication to look up the real value.
+  instructions. The secret is never returned; the UI renders a
+  ``[YOUR WEBHOOK SECRET]`` placeholder and points the user at
+  Automation → Triggers → Settings, where the secret is set.
 
 A previous ``/test`` endpoint that loopback-POSTed at our own
 ``/incoming`` route was removed: the only thing it verified was that
@@ -37,12 +37,12 @@ _PLUGIN_INSTRUCTIONS = {
         "install_url": "https://emby.media/support/articles/Webhooks.html",
         # Emby's built-in Webhooks support custom HTTP headers via the
         # 'Request Headers' field, so the token never has to ride in the
-        # URL. Steps reference [THIS APP'S TOKEN] as a placeholder so
-        # the live token never appears in the surfaced instructions.
+        # URL. Steps reference [YOUR WEBHOOK SECRET] as a placeholder so
+        # the live secret never appears in the surfaced instructions.
         "config_steps": [
             "In Emby: Settings → Notifications → Add Webhook (Emby 4.6+ ships this built-in; no plugin install required).",
             "Set 'Url' to the Webhook URL shown above.",
-            "Expand 'Request Headers' and add a header — Name: 'X-Auth-Token', Value: [THIS APP'S TOKEN] (this app's web-auth token; find it under Settings → Authentication).",
+            "Expand 'Request Headers' and add a header — Name: 'X-Auth-Token', Value: [YOUR WEBHOOK SECRET] (set or generate it under Automation → Triggers → Settings).",
             "Tick 'New Media Added' under Events. Add any other events you want to forward.",
             "Save.",
         ],
@@ -58,7 +58,7 @@ _PLUGIN_INSTRUCTIONS = {
             "In Jellyfin: Dashboard → Plugins → Catalog → install 'Webhook' (restart Jellyfin if prompted).",
             "Dashboard → Plugins → Webhook → 'Add Generic Destination'.",
             "Set 'Webhook Url' to the address shown above.",
-            "Expand 'Headers', click 'Add Header', set Key: 'X-Auth-Token', Value: [THIS APP'S TOKEN] (this app's web-auth token; find it under Settings → Authentication).",
+            "Expand 'Headers', click 'Add Header', set Key: 'X-Auth-Token', Value: [YOUR WEBHOOK SECRET] (set or generate it under Automation → Triggers → Settings).",
             "Under 'Notification Type', tick 'Item Added'.",
             "Set 'Item Type' to Movie + Episode at minimum.",
             "Save.",
@@ -119,18 +119,15 @@ def _info_handler(vendor: str):
     instructions = _PLUGIN_INSTRUCTIONS.get(vendor, {})
     webhook_url_per_server = webhook_url(server_id)
 
-    # The plugin authenticates via the X-Auth-Token header. The
-    # value (this app's web-auth token) is never returned by this
-    # endpoint — surfacing it would put it in JS state, HTML inspector
-    # output, and any screen-share of the Edit modal. The user looks
-    # it up themselves under Settings → Authentication, where the
-    # rotate-token form already lives.
-    from ..auth import get_auth_token
+    # The plugin authenticates via the X-Auth-Token header. The value
+    # (the webhook secret) is never returned by this endpoint — surfacing
+    # it would put it in JS state, HTML inspector output, and any
+    # screen-share of the Edit modal. The user sets or generates it under
+    # Automation → Triggers → Settings. Not the sign-in token: although
+    # webhooks accept it, Settings → Authentication never displays it (#432).
+    from ..settings_manager import get_settings_manager
 
-    try:
-        token_present = bool((get_auth_token() or "").strip())
-    except Exception:
-        token_present = False
+    secret_set = bool((get_settings_manager().get("webhook_secret") or "").strip())
 
     return jsonify(
         {
@@ -140,10 +137,10 @@ def _info_handler(vendor: str):
             "webhook_url": webhook_url_per_server,
             "webhook_url_per_server": webhook_url_per_server,
             "auth_header_name": "X-Auth-Token",
-            "auth_token_placeholder": "[THIS APP'S TOKEN]",
+            "auth_token_placeholder": "[YOUR WEBHOOK SECRET]",
             "auth_token_required": True,
-            "auth_token_present": token_present,
-            "auth_token_source": "Settings → Authentication (or check /config/auth.json on the host)",
+            "webhook_secret_set": secret_set,
+            "auth_token_source": "Automation → Triggers → Settings → Webhook Secret",
             "plugin": instructions,
             # Surfaces the auto-register deferral so the UI can render a
             # "Coming soon" hint instead of pretending the button does

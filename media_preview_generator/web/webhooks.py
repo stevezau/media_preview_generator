@@ -228,7 +228,7 @@ def _authenticate_webhook(f):
         logger.warning(
             "Webhook from {} rejected: token did not match (URL={}, supplied via {}). "
             "Other webhooks with the correct secret are still being accepted. "
-            "Check the webhook secret in Settings → Webhooks matches what your sender is sending; "
+            "Check the webhook secret under Automation → Triggers → Settings matches what your sender is sending; "
             "regenerate the secret on this page if you need to rotate it.",
             request.remote_addr,
             request.path,
@@ -2183,7 +2183,7 @@ def plex_webhook():
             "Webhook from {}: Plex request ignored — {} (Content-Type={}). "
             "Other Plex webhooks are still being accepted. "
             "Plex normally sends multipart/form-data with a 'payload' field; if you're seeing this "
-            "repeatedly, re-register the webhook from Settings → Webhooks → Re-register with Plex.",
+            "repeatedly, re-register it from Servers → your Plex server → Webhook & Scanner → Register with Plex.",
             request.remote_addr,
             parse_error,
             request.content_type,
