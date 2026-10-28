@@ -81,10 +81,11 @@ def _pool(*workers: str) -> WorkerPool:
     return pool
 
 
-def _run(pool: WorkerPool, process, *paths: str) -> tuple[JobTracker, list]:
+def _run(pool: WorkerPool, process, *paths: str, check_fn=None) -> tuple[JobTracker, list]:
     """Run ``paths`` through the dispatcher as an Intro & Credits job; returns the tracker and every file row."""
     dispatcher = JobDispatcher(pool)
-    handlers = KindHandlers(check_fn=lambda item, *, cancel_check: None, process_fn=process, outcome_keys=KEYS)
+    check_fn = check_fn or (lambda item, *, cancel_check: None)
+    handlers = KindHandlers(check_fn=check_fn, process_fn=process, outcome_keys=KEYS)
     try:
         with (
             patch("media_preview_generator.processing.generator._notify_file_result") as dispatcher_rows,
@@ -437,10 +438,17 @@ class TestGpuGoesAway:
         pool = _pool("intel", "quadro")
         intel = pool.workers[0]
         handed_back = threading.Event()
+        long_started = threading.Event()
         process = _Decoders({QUADRO: {"/m/hevc.mkv"}}, kind=kind, message=message)
+
+        def check(item, *, cancel_check):
+            # Checks run in parallel and queue in finishing order; hold hevc.mkv so long.mkv takes the Intel worker.
+            if item.canonical_path == "/m/hevc.mkv":
+                assert long_started.wait(timeout=10)
 
         def run(item, *, gpu_device_path=None, **kwargs):
             if item.canonical_path == "/m/long.mkv":
+                long_started.set()
                 assert handed_back.wait(timeout=10)
                 time.sleep(0.2)
                 intel._pending_removal = True  # removed from Settings while the file waits for it
@@ -450,7 +458,7 @@ class TestGpuGoesAway:
 
         streak = MagicMock()
         with patch("media_preview_generator.jobs.worker.get_gpu_fallback_tracker", return_value=streak):
-            tracker, _rows = _run(pool, run, "/m/long.mkv", "/m/hevc.mkv")
+            tracker, _rows = _run(pool, run, "/m/long.mkv", "/m/hevc.mkv", check_fn=check)
 
         assert process.runs_of("/m/hevc.mkv") == [QUADRO, None]
         assert (tracker.successful, tracker.failed) == (2, 0)
@@ -462,14 +470,19 @@ class TestGpuGoesAway:
         pool = _pool("intel", "quadro")
         intel = pool.workers[0]
         handed_back = threading.Event()
+        long_started = threading.Event()
         calls: list[tuple[str, str | None]] = []
 
         def pcp(**kwargs):
             if kwargs.get("check_only"):
+                # Checks run in parallel and queue in finishing order; hold hevc.mkv so long.mkv takes the Intel worker.
+                if kwargs["canonical_path"] == "/m/hevc.mkv":
+                    assert long_started.wait(timeout=10)
                 return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
             path, device = kwargs["canonical_path"], kwargs["gpu_device_path"]
             calls.append((path, device))
             if path == "/m/long.mkv":
+                long_started.set()
                 assert handed_back.wait(timeout=10)
                 time.sleep(0.2)
                 intel._pending_removal = True  # removed from Settings while the file waits for it
