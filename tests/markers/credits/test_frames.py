@@ -821,6 +821,9 @@ class TestRunDecode:
         assert frames.gpu_failure_lines(failure) == ("[hevc @ 0x1] Failed to sync surface",)
         assert frames.gpu_failure_lines(RuntimeError("no ffmpeg ran")) == ()
         assert frames.gpu_failure_lines(frames.GpuReadNothingError()) == ()
+        looped = RuntimeError("raised from itself")
+        looped.__cause__ = looped
+        assert frames.gpu_failure_lines(looped) == ()
 
     LONG_REASON = "Invalid data found when processing input" + " while reading the header of the file" * 8
     # showinfo's per-frame lines, the second of which reads as an error to a summary ("unknown").

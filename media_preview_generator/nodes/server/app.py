@@ -206,8 +206,9 @@ def create_node_app(
 
     log_buffer = nodelog.install()
     if worker and ops is None:
-        from .ops import OPS
+        from .ops import OPS, load_op_code
 
+        load_op_code()
         ops = OPS
     worker_info = None
     if temp_root is not None:

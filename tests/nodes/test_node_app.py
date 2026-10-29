@@ -547,6 +547,49 @@ print(heavy)
         assert done.returncode == 0, done.stderr
         assert done.stdout.strip().splitlines()[-1] == "[]"
 
+    def test_worker_node_loads_the_ops_code_before_two_tasks_can_race_to_import_it(self, tmp_path):
+        # Two first tasks importing it at once deadlocked on its circular imports and one failed (storage, 2026-10-28).
+        script = f"""
+import ast, importlib.util, sys, threading
+from media_preview_generator.nodes.server import ops
+from media_preview_generator.nodes.server.app import create_node_app
+create_node_app(config_dir={str(tmp_path)!r}, roles=["worker"], key="k")
+def is_module(name):
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:  # a name inside a module, not a submodule
+        return False
+# Every module an op imports inside its function body, read from ops.py itself so a new op or import is covered.
+wanted = set()
+for fn in ast.parse(open(ops.__file__).read()).body:
+    if isinstance(fn, ast.FunctionDef):
+        for node in ast.walk(fn):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                module = importlib.util.resolve_name("." * node.level + (node.module or ""), ops.__package__)
+                wanted.add(module)
+                wanted.update(f"{{module}}.{{a.name}}" for a in node.names if is_module(f"{{module}}.{{a.name}}"))
+missing = sorted(m for m in wanted if m not in sys.modules)
+errors = []
+start = threading.Barrier(2)
+def task(module):
+    start.wait()
+    try:
+        __import__(module)
+    except Exception as exc:
+        errors.append(repr(exc))
+threads = [threading.Thread(target=task, args=(m,)) for m in ("media_preview_generator.processing.generator",
+                                                            "media_preview_generator.markers.credits.frames")]
+for t in threads: t.start()
+for t in threads: t.join()
+print(len(wanted) > 10, missing, errors)
+"""
+        env = {**os.environ, "NODE_TEMP_DIR": str(tmp_path / "t")}
+
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=60)
+
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.strip().splitlines()[-1] == "True [] []"
+
 
 def _fake_plex_db(monkeypatch) -> None:
     fake = types.ModuleType("media_preview_generator.nodes.server.plex_db")

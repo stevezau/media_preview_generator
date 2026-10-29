@@ -28,7 +28,7 @@ from loguru import logger
 
 from ...processing.ffmpeg_runner import GPU_CANT_DECODE_VERDICT, SAYS_NOTHING_RE
 from ...processing.hwaccel import hwaccel_decode_args
-from ...utils import dies_with_node, scratch_dir
+from ...utils import cause_chain, dies_with_node, scratch_dir
 from ..freeze import Freeze
 from ..probe import (
     ProbeError,
@@ -152,11 +152,9 @@ class GpuDecodeError(FrameDecodeError):
 def gpu_failure_lines(exc: BaseException) -> tuple[str, ...]:
     """ffmpeg's last lines for a GPU decode failure (``GpuDecodeError.stderr_tail``), from the error itself or the
     one it was raised from (the detector raises the worker's CPU rerun from it); empty for anything else."""
-    seen: BaseException | None = exc
-    while seen is not None:
+    for seen in cause_chain(exc):
         if isinstance(seen, GpuDecodeError):
             return seen.stderr_tail
-        seen = seen.__cause__
     return ()
 
 

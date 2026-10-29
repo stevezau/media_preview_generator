@@ -16,7 +16,7 @@ import tempfile
 import time
 import traceback
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -187,6 +187,20 @@ FFMPEG_LOG_PREFIX = "ffmpeg_output_"
 def node_temp_root() -> str:
     """A node's temp folder: ``NODE_TEMP_DIR``, or ``<system temp>/mpg-node``."""
     return os.environ.get("NODE_TEMP_DIR", "").strip() or os.path.join(tempfile.gettempdir(), "mpg-node")
+
+
+def cause_chain(exc: BaseException) -> Iterator[BaseException]:
+    """``exc`` and the exceptions it was raised from (``__cause__``), each once.
+
+    Stops where the chain loops back, as Python's own traceback printing does: an exception raised from itself made a
+    plain ``while`` walk spin forever, holding the GIL (sflix, 2026-10-28).
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__
 
 
 def scratch_dir() -> str:

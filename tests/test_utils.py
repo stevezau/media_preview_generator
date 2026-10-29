@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from media_preview_generator.utils import (
+    cause_chain,
     format_display_title,
     is_docker_environment,
     is_windows,
@@ -1059,6 +1060,25 @@ class TestScratchDir:
         monkeypatch.delenv("MODE")
         monkeypatch.setenv("NODE_TEMP_DIR", "/elsewhere")  # a node's setting: the app has no use for it
         assert scratch_dir() == str(tmp_path)
+
+
+class TestCauseChain:
+    def test_walks_each_raised_from_exception_in_order(self):
+        root = OSError("disk")
+        middle = ValueError("parse")
+        middle.__cause__ = root
+        top = RuntimeError("job")
+        top.__cause__ = middle
+        assert list(cause_chain(top)) == [top, middle, root]
+
+    def test_stops_where_the_chain_loops_back(self):
+        # A loop made a plain __cause__ walk spin forever while holding the GIL (sflix, 2026-10-28).
+        itself = RuntimeError("raised from itself")
+        itself.__cause__ = itself
+        first, second = ValueError("a"), ValueError("b")
+        first.__cause__, second.__cause__ = second, first
+        assert list(cause_chain(itself)) == [itself]
+        assert list(cause_chain(first)) == [first, second]
 
 
 class TestNiced:

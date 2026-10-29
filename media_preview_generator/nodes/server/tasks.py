@@ -26,7 +26,7 @@ from typing import Any
 
 from loguru import logger
 
-from ...utils import FFMPEG_LOG_PREFIX, node_temp_root
+from ...utils import FFMPEG_LOG_PREFIX, cause_chain, node_temp_root
 from ..protocol import (
     CLIENT_TASK_ID_FIELD,
     CLIENT_TASK_ID_PATTERN,
@@ -529,8 +529,9 @@ class TaskTable:
     def _temp_folder_failure(self, exc: BaseException) -> tuple[str, bool] | None:
         """Why an op stopped, when the temp folder filled up, went read-only or can't be written by the node's user, and
         whether it filled up; else None."""
-        seen: BaseException | None = exc
-        while seen is not None and self.temp_root is not None:
+        if self.temp_root is None:
+            return None
+        for seen in cause_chain(exc):
             if isinstance(seen, OSError):
                 written = seen.filename if isinstance(seen.filename, str) else None
                 if blames_temp_folder(self.temp_root, seen.errno, written):
@@ -540,7 +541,6 @@ class TaskTable:
                         # The preview op holds its JPEGs and their tar there at once.
                         message += "; a preview needs about twice its frames' size there"
                     return message, filled
-            seen = seen.__cause__
         return None
 
     def filled_problem(self) -> str | None:

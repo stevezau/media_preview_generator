@@ -422,6 +422,20 @@ def credits_find(ctx: TaskContext, node_path: str, params: dict) -> dict:
     return {"result": _jsonable(result)}
 
 
+def load_op_code() -> None:
+    """Import the app code the ops run, once, on the thread that starts the node.
+
+    Its modules import each other in a circle: two tasks importing them for the first time at once deadlock on
+    Python's module locks, and one of them fails.
+    """
+    from ...config import validation  # noqa: F401
+    from ...loudness import analyze  # noqa: F401
+    from ...markers import progress  # noqa: F401
+    from ...markers.audio import end_picture, fingerprint  # noqa: F401
+    from ...markers.credits import detector, frames, textdet_helper  # noqa: F401
+    from ...processing import generator  # noqa: F401
+
+
 OPS: dict[str, OpFn] = {
     protocol.OP_PREVIEW_FRAMES: preview_frames,
     protocol.OP_LOUDNESS_ANALYZE: loudness_analyze,
