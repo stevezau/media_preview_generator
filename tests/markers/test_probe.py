@@ -75,7 +75,7 @@ def test_parses_duration_and_chapters_and_passes_exact_args():
         "-show_format",
         "-show_chapters",
         "-show_entries",
-        "stream=codec_type,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic",
+        "stream=codec_type,duration,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_tags=DURATION",
         "/m/a.mkv",
     ]
     assert kwargs == {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
@@ -150,6 +150,56 @@ def test_the_first_video_streams_frame_rate(streams, expected):
 def test_no_stream_list_is_no_frame_rate():
     with patch(RUN, return_value=_ok({"format": {"duration": "60"}, "chapters": []})):
         assert probe_media("/m/a.mkv", ffprobe="ffprobe").frame_rate is None
+
+
+def _tagged(codec_type, duration, attached_pic=0):
+    """A Matroska stream as ffprobe prints it: no ``duration`` of its own, its length in the muxer's DURATION tag."""
+    return {"codec_type": codec_type, "tags": {"DURATION": duration}, "disposition": {"attached_pic": attached_pic}}
+
+
+def test_a_subtitle_track_running_past_the_picture_doesnt_lengthen_the_file():
+    # #434: a Blu-ray rip carrying the broadcast's subtitles, which run 7 min past the end of its video and audio.
+    streams = [
+        _tagged("video", "00:51:59.742000000"),
+        _tagged("audio", "00:51:59.712000000"),
+        {"codec_type": "subtitle", "duration": "3600.997000", "tags": {"DURATION": "00:59:39.621000000"}},
+        {"codec_type": "video", "duration": "3600.997000", "disposition": {"attached_pic": 1}},  # cover art
+    ]
+    with patch(RUN, return_value=_ok({"format": {"duration": "3600.997000"}, "chapters": [], "streams": streams})):
+        assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms == 3_119_742
+
+
+def test_audio_running_on_past_the_video_is_the_files_length():
+    # Video that stops while the audio plays on is a file cut short, and has to read as one.
+    streams = [_tagged("video", "00:43:43.000000000"), _tagged("audio", "00:53:24.500000000")]
+    with patch(RUN, return_value=_ok({"format": {"duration": "3204.5"}, "chapters": [], "streams": streams})):
+        assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms == 3_204_500
+
+
+def test_a_streams_own_duration_is_read_as_an_mp4_gives_it():
+    streams = [
+        {"codec_type": "video", "duration": "1320.400000"},
+        {"codec_type": "audio", "duration": "1321.000000"},
+        {"codec_type": "subtitle", "duration": "1500.000000"},
+    ]
+    with patch(RUN, return_value=_ok({"format": {"duration": "1500.0"}, "chapters": [], "streams": streams})):
+        assert probe_media("/m/a.mp4", ffprobe="ffprobe").duration_ms == 1_321_000
+
+
+@pytest.mark.parametrize(
+    "streams",
+    [
+        [],
+        [{"codec_type": "video"}, {"codec_type": "audio", "duration": "N/A"}],
+        [_tagged("video", "junk"), _tagged("audio", "0")],
+        [{"codec_type": "subtitle", "duration": "60.0"}],
+    ],
+    ids=["no-streams", "none-stated", "unreadable", "subtitles-only"],
+)
+def test_without_a_video_or_audio_length_the_containers_is_taken(streams):
+    # A file whose header was written whole but whose data stops short (no per-stream lengths): as before.
+    with patch(RUN, return_value=_ok({"format": {"duration": "1390.89"}, "chapters": [], "streams": streams})):
+        assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms == 1_390_890
 
 
 def test_missing_duration_is_none():

@@ -759,11 +759,17 @@ def _gives_up(rec: FileRecord, ctx: PipelineContext) -> str | None:
 
 def _cut_short_before(rec: FileRecord, ctx: PipelineContext) -> str | None:
     """The recorded reason (``CUT_SHORT``) when an earlier run found this file as it is now cut short, else None; a
-    forced run reads it again."""
+    forced run reads it again.
+
+    A reason measured against another length than the file's now doesn't hold: older builds took a subtitle track's
+    length as the file's (#434), and the intact files they found cut short are read again once.
+    """
     if ctx.force:
         return None
     failure = ctx.store.get_detector_failure(rec.id, Source.CREDITS_TEXT)
-    return failure if failure is not None and failure.startswith(CUT_SHORT) else None
+    if failure is None or not failure.startswith(CUT_SHORT):
+        return None
+    return failure if failure.endswith(f" of {clock(cast(int, rec.duration_ms))} readable)") else None
 
 
 def _cut_short(

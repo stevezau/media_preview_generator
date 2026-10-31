@@ -178,7 +178,9 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         ProbeTimeoutError: ffprobe ran past ``timeout_s``.
         ProbeError: ffprobe missing, failed or returned invalid JSON.
     """
-    entries = "stream=codec_type,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic"
+    entries = (
+        "stream=codec_type,duration,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_tags=DURATION"
+    )
     cmd = [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_chapters",
            "-show_entries", entries, path]  # fmt: skip
     stdout = _run_ffprobe(cmd, path, timeout_s)
@@ -197,7 +199,7 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         chapters.append(Chapter(start, _ms(raw.get("end_time")), str(tags.get("title") or "")))
     fmt = data.get("format") or {}
     return MediaProbe(
-        duration_ms=_ms(fmt.get("duration")),
+        duration_ms=_picture_and_sound_ms(data.get("streams")) or _ms(fmt.get("duration")),
         chapters=tuple(chapters),
         start_time_ms=_ms(fmt.get("start_time")),
         frame_rate=_video_frame_rate(data.get("streams")),
@@ -213,6 +215,37 @@ def _rate(value: object) -> float | None:
     if denominator <= 0 or numerator <= 0 or not math.isfinite(numerator / denominator):
         return None
     return numerator / denominator
+
+
+def _picture_and_sound_ms(streams: object) -> int | None:
+    """Where the file's video and audio end: the longest of its video and audio streams, cover art aside; None when
+    none states a length.
+
+    The container's duration is its longest track's, and a subtitle track can run far past the picture (#434: a
+    Blu-ray carrying the broadcast's subtitles, 7 min longer than its video and audio). A Matroska stream's length is
+    in its ``DURATION`` tag (``00:51:59.742000000``); an MP4's is the stream's own ``duration``.
+    """
+    ends_s = []
+    for stream in streams if isinstance(streams, list) else []:
+        if not isinstance(stream, dict) or stream.get("codec_type") not in ("video", "audio"):
+            continue
+        if (stream.get("disposition") or {}).get("attached_pic"):
+            continue
+        tags = {str(key).upper(): value for key, value in (stream.get("tags") or {}).items()}
+        seconds = _seconds(stream.get("duration")) or _clock_s(tags.get("DURATION"))
+        if seconds and seconds > 0:
+            ends_s.append(seconds)
+    return _ms(max(ends_s)) if ends_s else None
+
+
+def _clock_s(value: object) -> float | None:
+    """A Matroska ``DURATION`` tag (``h:mm:ss.fffffffff``) in seconds; None when it isn't one."""
+    try:
+        hours, minutes, seconds = (float(part) for part in str(value).split(":"))
+    except ValueError:
+        return None
+    total = hours * 3600 + minutes * 60 + seconds
+    return total if math.isfinite(total) else None
 
 
 def _video_frame_rate(streams: object) -> float | None:

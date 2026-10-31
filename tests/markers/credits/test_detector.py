@@ -1988,6 +1988,14 @@ class TestDetect:
         ctx.force = True
         assert detector.credits_text_needs_worker(rec, ctx) is True
 
+    def test_a_file_cut_short_against_another_length_is_read_again(self, monkeypatch, pool, ctx):
+        # #434: older builds took a subtitle track's length as the file's and recorded intact files as cut short.
+        rec = self._stored(ctx)
+        ctx.store.set_detector_failure(
+            rec.id, Source.CREDITS_TEXT, "the file ends before its stated length (52:30 of 59:39 readable)"
+        )
+        assert detector.credits_text_needs_worker(rec, ctx) is True
+
     def test_a_gpu_that_missed_frames_the_cpu_reads_is_a_gpu_fallback_on_the_workers_row(
         self, monkeypatch, pool, ctx, loguru_caplog
     ):

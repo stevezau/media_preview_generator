@@ -16,6 +16,7 @@ import pytest
 from media_preview_generator.job_kinds import ItemOutcome
 from media_preview_generator.markers import decide, pipeline
 from media_preview_generator.markers.audio.fingerprint import ChromaprintState
+from media_preview_generator.markers.credits.detector import CUT_SHORT
 from media_preview_generator.markers.decide import DECIDE_RULES, DECIDE_RULES_VERSION, DecisionStatus
 from media_preview_generator.markers.job_log import RunNotes
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
@@ -2936,6 +2937,25 @@ class TestRulesVersions:
         assert store.get_markers(rec.id)[T.INTRO] == Marker(T.INTRO, 274_700, 363_900, ("chapters",))
         # With the current version stored nothing is probed again.
         _, probe_mock = _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=probe)
+        assert probe_mock.call_count == 0
+
+    def test_a_file_recorded_as_cut_short_has_its_length_measured_again(self, store, media):
+        # #434: older builds took a subtitle track's length (59:39) as the file's (52:30), found the intact file cut
+        # short, and never measured it again. Measuring again is one ffprobe; the detector reads it once more.
+        reg = _registry(media, ServerType.JELLYFIN)
+        jf = ready_publisher("jellyfin_bridge")
+        raw = {"sources": [{"id": "chapters", "enabled": True}], "detect": {"intro": False, "credits": True}}
+        _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=_probe(duration=3_579_000))
+        rec = store.get_file(media)
+        store.set_detector_failure(rec.id, Source.CREDITS_TEXT, f"{CUT_SHORT} (52:30 of 59:39 readable)")
+        _, probe_mock = _run(
+            _ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=_probe(duration=3_150_000)
+        )
+        assert probe_mock.call_count == 1
+        assert store.get_file(media).duration_ms == 3_150_000
+        # Any other failure keeps the stored length unread.
+        store.set_detector_failure(rec.id, Source.CREDITS_TEXT, "frame decode failed")
+        _, probe_mock = _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=_probe(duration=1))
         assert probe_mock.call_count == 0
 
     # An anime episode whose ED chapter is named "Ending", which the rules read as credits from

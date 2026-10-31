@@ -3078,7 +3078,12 @@ def _attempt(
         ctx._replaced_at_start[path] = existing is not None and not unchanged
     probe = None
     stale_rules = unchanged and ctx.store.evidence_version(unchanged_rec.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
-    if refresh_probe or not unchanged or not unchanged_rec.duration_ms or stale_rules:
+    # A file recorded as cut short is measured again (one ffprobe, no decode): older builds took a subtitle track's
+    # length as the file's (#434), and the detector reads it once more when its length changed.
+    found_cut_short = unchanged and (
+        ctx.store.get_detector_failure(unchanged_rec.id, Source.CREDITS_TEXT) or ""
+    ).startswith(CUT_SHORT)
+    if refresh_probe or not unchanged or not unchanged_rec.duration_ms or stale_rules or found_cut_short:
         phase("Reading chapters…")
         try:
             probe = probe_media(path, ffprobe=ctx.ffprobe)
