@@ -856,7 +856,8 @@ def detect_credits_text(
     A GPU decode that exits cleanly without a frame (``frames.GpuReadNothingError``) isn't taken as the GPU's failure:
     the same file is read again here on the CPU, as the worker's CPU rerun would read it. Frames there make it a GPU
     fallback (on the worker's row, and a warning); none there either, with the file's video stopping before its tail,
-    is a file cut short (``CUT_SHORT``), recorded and not read again until it changes. A CPU worker's reading, or a
+    is a file cut short (``CUT_SHORT``), recorded and not read again until it or its stated length changes. A CPU
+    worker's reading, or a
     CPU rerun's, that finds no frame of the tail is measured the same way.
 
     Args:

@@ -204,11 +204,20 @@ def test_a_streams_own_duration_is_read_as_an_mp4_gives_it():
         [{"codec_type": "video"}, {"codec_type": "audio", "duration": "N/A"}],
         [_tagged("video", "junk"), _tagged("audio", "0")],
         [{"codec_type": "subtitle", "duration": "60.0"}],
+        # A commentary track muxed in later with tags, the picture without: its length isn't the file's.
+        [{"codec_type": "video"}, _tagged("audio", "00:40:00.000000000")],
     ],
-    ids=["no-streams", "none-stated", "unreadable", "subtitles-only"],
+    ids=["no-streams", "none-stated", "unreadable", "subtitles-only", "video-unstated"],
 )
 def test_without_a_video_or_audio_length_the_containers_is_taken(streams):
     # A file whose header was written whole but whose data stops short (no per-stream lengths): as before.
+    with patch(RUN, return_value=_ok({"format": {"duration": "1390.89"}, "chapters": [], "streams": streams})):
+        assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms == 1_390_890
+
+
+def test_a_stream_length_past_the_containers_is_capped_to_it():
+    # A DURATION tag left from an earlier mux can't make the file look longer than it is (and read as cut short).
+    streams = [_tagged("video", "02:00:00.000000000"), _tagged("audio", "00:23:10.000000000")]
     with patch(RUN, return_value=_ok({"format": {"duration": "1390.89"}, "chapters": [], "streams": streams})):
         assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms == 1_390_890
 

@@ -197,7 +197,7 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         chapters.append(Chapter(start, _ms(raw.get("end_time")), str(tags.get("title") or "")))
     fmt = data.get("format") or {}
     return MediaProbe(
-        duration_ms=_picture_and_sound_ms(data.get("streams")) or _ms(fmt.get("duration")),
+        duration_ms=_file_ms(_picture_and_sound_ms(data.get("streams")), _ms(fmt.get("duration"))),
         chapters=tuple(chapters),
         start_time_ms=_ms(fmt.get("start_time")),
         frame_rate=_video_frame_rate(data.get("streams")),
@@ -215,9 +215,17 @@ def _rate(value: object) -> float | None:
     return numerator / denominator
 
 
+def _file_ms(streams_ms: int | None, container_ms: int | None) -> int | None:
+    """The file's length: where its video and audio end, never past the container's own length (a stale tag carried
+    over from an earlier mux can't lengthen the file); the container's when the streams don't all say."""
+    if streams_ms is None or container_ms is None:
+        return streams_ms or container_ms
+    return min(streams_ms, container_ms)
+
+
 def _picture_and_sound_ms(streams: object) -> int | None:
     """Where the file's video and audio end: the longest of its video and audio streams, cover art aside; None when
-    none states a length.
+    any of them states no length (the longest of the rest could end well before the picture).
 
     The container's duration is its longest track's, and a subtitle track can run far past the picture (#434: a
     Blu-ray carrying the broadcast's subtitles, 7 min longer than its video and audio). A Matroska stream's length is
@@ -239,8 +247,9 @@ def _picture_and_sound_ms(streams: object) -> int | None:
             None,
         )
         seconds = _seconds(stream.get("duration")) or _clock_s(tagged)
-        if seconds and seconds > 0:
-            ends_s.append(seconds)
+        if not seconds or seconds <= 0:
+            return None
+        ends_s.append(seconds)
     return _ms(max(ends_s)) if ends_s else None
 
 
