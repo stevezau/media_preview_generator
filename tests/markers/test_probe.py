@@ -75,7 +75,7 @@ def test_parses_duration_and_chapters_and_passes_exact_args():
         "-show_format",
         "-show_chapters",
         "-show_entries",
-        "stream=codec_type,duration,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_tags=DURATION",
+        "stream=codec_type,duration,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_tags",
         "/m/a.mkv",
     ]
     assert kwargs == {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
@@ -174,6 +174,17 @@ def test_audio_running_on_past_the_video_is_the_files_length():
     streams = [_tagged("video", "00:43:43.000000000"), _tagged("audio", "00:53:24.500000000")]
     with patch(RUN, return_value=_ok({"format": {"duration": "3204.5"}, "chapters": [], "streams": streams})):
         assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms == 3_204_500
+
+
+def test_an_older_mkvmerges_language_named_duration_tag_is_read():
+    # mkvmerge v45 writes DURATION-eng (The Porter: video and audio 55:54, a subtitle track to 1:44:14).
+    streams = [
+        {"codec_type": "video", "tags": {"BPS-eng": "8220707", "DURATION-eng": "00:55:54.960000000"}},
+        {"codec_type": "audio", "tags": {"DURATION-eng": "00:55:54.944000000"}},
+        {"codec_type": "subtitle", "duration": "6356.250000", "tags": {"DURATION-eng": "01:44:14.000000000"}},
+    ]
+    with patch(RUN, return_value=_ok({"format": {"duration": "6356.25"}, "chapters": [], "streams": streams})):
+        assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms == 3_354_960
 
 
 def test_a_streams_own_duration_is_read_as_an_mp4_gives_it():

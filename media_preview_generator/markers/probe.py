@@ -178,9 +178,7 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         ProbeTimeoutError: ffprobe ran past ``timeout_s``.
         ProbeError: ffprobe missing, failed or returned invalid JSON.
     """
-    entries = (
-        "stream=codec_type,duration,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_tags=DURATION"
-    )
+    entries = "stream=codec_type,duration,avg_frame_rate,r_frame_rate:stream_disposition=attached_pic:stream_tags"
     cmd = [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_chapters",
            "-show_entries", entries, path]  # fmt: skip
     stdout = _run_ffprobe(cmd, path, timeout_s)
@@ -223,7 +221,8 @@ def _picture_and_sound_ms(streams: object) -> int | None:
 
     The container's duration is its longest track's, and a subtitle track can run far past the picture (#434: a
     Blu-ray carrying the broadcast's subtitles, 7 min longer than its video and audio). A Matroska stream's length is
-    in its ``DURATION`` tag (``00:51:59.742000000``); an MP4's is the stream's own ``duration``.
+    in its ``DURATION`` tag (``00:51:59.742000000``; older mkvmerge names it ``DURATION-eng``); an MP4's is the
+    stream's own ``duration``.
     """
     ends_s = []
     for stream in streams if isinstance(streams, list) else []:
@@ -231,8 +230,15 @@ def _picture_and_sound_ms(streams: object) -> int | None:
             continue
         if (stream.get("disposition") or {}).get("attached_pic"):
             continue
-        tags = {str(key).upper(): value for key, value in (stream.get("tags") or {}).items()}
-        seconds = _seconds(stream.get("duration")) or _clock_s(tags.get("DURATION"))
+        tagged = next(
+            (
+                value
+                for key, value in (stream.get("tags") or {}).items()
+                if str(key).upper().split("-")[0] == "DURATION"
+            ),
+            None,
+        )
+        seconds = _seconds(stream.get("duration")) or _clock_s(tagged)
         if seconds and seconds > 0:
             ends_s.append(seconds)
     return _ms(max(ends_s)) if ends_s else None
