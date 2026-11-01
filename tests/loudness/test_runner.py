@@ -699,3 +699,12 @@ def test_permanent_publisher_failures_do_not_create_retries(run):
     run["publisher_rows"] = {"/m/a.mkv": [{"server_id": "plex-1", "status": job.FAILED}]}
     job.run_loudness_job("j1")
     assert run["retries"] == []
+
+
+def test_a_failed_file_is_named_in_the_job_log(run, loguru_caplog):
+    run["outcomes"] = {"/m/a.mkv": job.FAILED, "/m/b.mkv": job.WRITTEN}
+
+    job.run_loudness_job("j1")
+
+    failed_lines = [r.getMessage() for r in loguru_caplog.records if "Loudness of" in r.getMessage()]
+    assert failed_lines == [f"Loudness of {job.display_name('/m/a.mkv')} failed: "]

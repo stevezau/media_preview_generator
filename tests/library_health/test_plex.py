@@ -708,3 +708,19 @@ def test_a_chapter_versions_row_with_a_non_numeric_media_id_is_ignored_not_fatal
 
     assert rows.chapters[10].starts == [0, 60000]
     assert rows.chapters[10].shown_from == {2}
+
+
+def test_a_file_a_loudness_job_cant_measure_counts_as_cant_not_todo(monkeypatch, tmp_path):
+    items = [
+        _movie("A", "/m/a.mkv", audio=[None]),
+        _movie("B", "/m/b.mkv", audio=[None]),
+        _movie("C", "/m/c.mkv", audio=[_FULL_LOUDNESS]),
+    ]
+    # C was measured after its failure was recorded: measured wins.
+    unreadable = {Feature.LOUDNESS: frozenset({"/m/a.mkv", "/m/c.mkv"})}
+
+    result = _run(monkeypatch, tmp_path, _cfg(tmp_path, [_lib()]), items, unreadable=unreadable)
+
+    cell = _cell(result, "1", Feature.LOUDNESS)
+    assert (cell.total, cell.done, cell.cant_do, cell.todo) == (3, 1, 1, 1)
+    assert [t.path for t in result.todo if t.feature == Feature.LOUDNESS] == ["/m/b.mkv"]

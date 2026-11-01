@@ -1072,3 +1072,62 @@ def test_a_node_drop_leaves_the_file_unwritten_for_the_worker_to_give_back(ctx, 
     with placed_on(Placement("n1", "NAS")), pytest.raises(NodeUnavailableError):
         job.process_item(_item(media), ctx=ctx)
     assert _streams(db) == before
+
+
+@pytest.fixture
+def health_store(tmp_path, monkeypatch):
+    from media_preview_generator.library_health import failures
+    from media_preview_generator.library_health.store import HealthStore
+
+    opened = HealthStore(str(tmp_path / "health.db"))
+    monkeypatch.setattr(failures, "default_store", lambda: opened)
+    return opened
+
+
+def _loudness_failures(store):
+    from media_preview_generator.library_health.models import Feature
+
+    return {path for feature, path in store.failures() if feature == Feature.LOUDNESS}
+
+
+def test_a_track_ffmpeg_cant_read_records_the_file_for_library_health(ctx, db, media, health_store):  # noqa: F811
+    with patch.object(job.analyze, "run", side_effect=job.analyze.LoudnessError("Conversion failed!")):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert outcome.outcome_key == job.FAILED
+    assert _loudness_failures(health_store) == {media}
+
+
+@pytest.mark.parametrize("error", [job.analyze.LoudnessCancelled, job.analyze.LoudnessTimeout])
+def test_a_cancelled_or_timed_out_track_is_not_recorded(ctx, db, media, health_store, error):  # noqa: F811
+    with patch.object(job.analyze, "run", side_effect=error("stopped")):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert outcome.outcome_key == job.FAILED
+    assert _loudness_failures(health_store) == set()
+
+
+def test_a_track_failure_with_a_busy_write_is_not_recorded(ctx, db, media, monkeypatch, health_store):  # noqa: F811
+    def run(ffmpeg, path, index, **kwargs):
+        if index == 1:
+            raise job.analyze.LoudnessError("corrupt first track")
+        return FIELDS
+
+    monkeypatch.setattr(job, "write_stream", MagicMock(side_effect=job.DatabaseBusyError("Plex busy")))
+    with patch.object(job.analyze, "run", side_effect=run):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert outcome.outcome_key == job.FAILED and outcome.publisher_rows[0]["retryable"] is True
+    assert _loudness_failures(health_store) == set()
+
+
+def test_a_file_measured_later_clears_its_record(ctx, db, media, health_store):  # noqa: F811
+    with patch.object(job.analyze, "run", side_effect=job.analyze.LoudnessError("Conversion failed!")):
+        job.process_item(_item(media), ctx=ctx)
+    assert _loudness_failures(health_store) == {media}
+
+    with patch.object(job.analyze, "run", return_value=FIELDS):
+        outcome = job.process_item(_item(media), ctx=ctx)
+
+    assert outcome.outcome_key == job.WRITTEN
+    assert _loudness_failures(health_store) == set()

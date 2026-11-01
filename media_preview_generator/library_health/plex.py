@@ -467,6 +467,8 @@ def _tally_library(
             cell.total += 1
             if _loudness_done(part.part_id, part.bundle_hash, rows):
                 cell.done += 1
+            elif path_key(part.path) in unreadable.get(Feature.LOUDNESS, ()):
+                cell.cant_do += 1
             else:
                 add_todo(Feature.LOUDNESS, part)
         for feature in (Feature.INTRO, Feature.CREDITS):

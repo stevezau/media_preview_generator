@@ -27,6 +27,8 @@ from ..jobs.group_runtime import admission_options, runtime_capacity, wait_for_c
 from ..jobs.orchestrator import _build_multi_server_registry, fold_publisher_rows_into_aggregate
 from ..jobs.parking import JobParked, park_if_unavailable
 from ..jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread, unregister_job_thread
+from ..library_health.failures import clear_failure, record_failure
+from ..library_health.models import Feature
 from ..markers.external_ids import is_extra
 from ..markers.job_log import display_name, write_line
 from ..markers.job_runner import (
@@ -508,6 +510,7 @@ def process_item(
         return ItemOutcome(FAILED, "Loudness analysis cancelled")
     path = item.canonical_path
     rows = []
+    unmeasurable = False
     for cfg in owners(path, ctx.registry, ctx.server_id):
         row, streams, needed = _lookup(ctx, cfg, path)
         if row is not None:
@@ -519,6 +522,7 @@ def process_item(
         for stream in needed:
             todo.setdefault(stream.index, []).append(stream)
         written, errors = 0, []
+        measure_failed = False
         skipped: list[str] = []
         waiting = []
         db, _ = ctx.db(cfg)
@@ -607,6 +611,7 @@ def process_item(
                     if isinstance(fields, analyze.LoudnessError):
                         # A single-track run would hit the same deterministic failure.
                         errors.append(f"stream {index} ({same[0].codec}): {fields}")
+                        measure_failed = measure_failed or _cant_measure(fields)
                         continue
                     if fields is None:
                         run_one = remote_ops.loudness_run if current_placement() else analyze.run
@@ -659,6 +664,7 @@ def process_item(
                         stop_analysis = True
                         break
                     errors.append(f"stream {index} ({same[0].codec}): {exc}")
+                    measure_failed = measure_failed or _cant_measure(exc)
             if stop_analysis:
                 break
         marked = 0
@@ -700,6 +706,7 @@ def process_item(
                 target.append(str(exc))
         if errors:
             rows.append(_row(cfg, FAILED, "; ".join([*errors, *waiting]), retryable=bool(waiting)))
+            unmeasurable = unmeasurable or (measure_failed and not waiting)
         elif waiting:
             rows.append(_row(cfg, WAITING, "; ".join(waiting)))
         elif written:
@@ -712,7 +719,19 @@ def process_item(
             rows.append(_row(cfg, UP_TO_DATE, ", ".join(skipped)))
     if not rows:
         return ItemOutcome(NO_OWNERS, "No Plex server has loudness on for its library")
-    return _settle(rows)
+    outcome = _settle(rows)
+    if outcome.outcome_key == FAILED and unmeasurable:
+        record_failure((Feature.LOUDNESS,), path, outcome.message)
+    elif outcome.outcome_key in (WRITTEN, UP_TO_DATE):
+        clear_failure((Feature.LOUDNESS,), path)
+    return outcome
+
+
+def _cant_measure(exc: Exception) -> bool:
+    """Whether ffmpeg failed on the file itself, so the next run fails the same way (not a cancel or a timeout)."""
+    return isinstance(exc, analyze.LoudnessError) and not isinstance(
+        exc, analyze.LoudnessCancelled | analyze.LoudnessTimeout
+    )
 
 
 def _settle(rows: list[dict]) -> ItemOutcome:
@@ -975,6 +994,8 @@ def _run_loudness_pass(job_id: str) -> bool | None:
                 retry_lock = threading.Lock()
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
+                    if outcome == FAILED:
+                        logger.warning("Loudness of {} failed: {}", display_name(file_path), reason)
                     sender_key = sender_paths.get(file_path, file_path)
                     original = cfg.get("retry_baseline", {}).get("files", {}).get(sender_key, {})
                     pending_server = any(

@@ -2242,8 +2242,8 @@ thumbnails, loudness or Intro & Credits. There is one card per server and one ro
   Intro and Credits, the app looked and found none; for Chapters, files with no chapters in the video, plus files that
   can't get thumbnails (a chapter that starts after the video ends, a version split across several files, one the
   chapter step gave up on until the file changes, a title Plex shows from another version, or a video no preview job
-  could decode). Previews, Intro and Credits count **can't be read** for a file a job found broken (a protected or
-  unknown video codec, no frames, no readable length); it counts again once the file changes. Loudness doesn't count files with no audio.
+  could decode). Previews, Loudness, Intro and Credits count **can't be read** for a file a job found broken (a
+  protected or unknown video codec, no frames, damaged audio, no readable length); it counts again once the file changes. Loudness doesn't count files with no audio.
 - **Other cell text.** **Off for this library** means the feature is turned off in Servers. **Not used for films**
   is Intro on a movie library. **Plex only** is Loudness on Emby or Jellyfin.
 - **Click a number** to list those files. From the list you can open a file in the Inspector, or start the matching
