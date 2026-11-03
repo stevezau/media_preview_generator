@@ -1030,6 +1030,7 @@ async function loadSchedules() {
         // saw an empty list with no hint).
         window._schedulesLoadStatus = data.load_status || { status: 'ok' };
         updateScheduleList();
+        if (typeof loadBuiltinJobs === 'function') loadBuiltinJobs();
     } catch (error) {
         console.error('Failed to load schedules:', error);
     }
@@ -1666,10 +1667,11 @@ function _serverBadge(item) {
         scheduled_recently_added: { cls: 'bg-secondary', label: 'Scheduled scan' },
         theintrodb_recheck: { cls: 'bg-secondary',  label: 'TheIntroDB recheck' },
         version_rerun: { cls: 'bg-secondary',       label: 'App update' },
+        library_health: { cls: 'bg-secondary',      label: 'Library Health', title: 'Started by: Library Health check (built-in)' },
     };
     if (src && triggerPalette[src]) {
         const t = triggerPalette[src];
-        return ` <span class="badge ${t.cls} ms-1" title="Triggered by ${escapeHtml(t.label)}">${escapeHtml(t.label)}</span>`;
+        return ` <span class="badge ${t.cls} ms-1" title="${escapeHtml(t.title || 'Triggered by ' + t.label)}">${escapeHtml(t.label)}</span>`;
     }
     if (src) {
         // Unknown source — render as-is so the user still sees something

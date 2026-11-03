@@ -643,7 +643,7 @@ class TestQuietHoursMultiWindow:
 
 
 class TestLibraryHealthNightly:
-    """The internal 03:00 library-health job."""
+    """The internal library-health job, 03:00 by default."""
 
     def test_registered_at_three_am_and_hidden_from_user_schedules(self, scheduler_manager):
         from apscheduler.triggers.cron import CronTrigger
@@ -684,6 +684,43 @@ class TestLibraryHealthNightly:
             assert manager.scheduler.get_job("__library_health_nightly") is None
         finally:
             manager.stop()
+
+    def test_registers_at_the_saved_time(self, scheduler_manager, monkeypatch):
+        from media_preview_generator.web import builtin_jobs
+
+        monkeypatch.setattr(
+            builtin_jobs,
+            "load_builtin_jobs",
+            lambda: builtin_jobs.read_builtin_jobs({"library_health": {"time": "02:15"}}),
+        )
+        monkeypatch.setattr("media_preview_generator.web.scheduler.load_builtin_jobs", builtin_jobs.load_builtin_jobs)
+
+        scheduler_manager.apply_builtin_jobs()
+
+        fields = {
+            f.name: str(f) for f in scheduler_manager.scheduler.get_job("__library_health_nightly").trigger.fields
+        }
+        assert (fields["hour"], fields["minute"]) == ("2", "15")
+
+    def test_switched_off_removes_the_job_and_apply_brings_it_back(self, scheduler_manager, monkeypatch):
+        from media_preview_generator.web import builtin_jobs
+
+        off = builtin_jobs.read_builtin_jobs({"library_health": {"enabled": False}})
+        monkeypatch.setattr("media_preview_generator.web.scheduler.load_builtin_jobs", lambda: off)
+
+        scheduler_manager.apply_builtin_jobs()
+        scheduler_manager.apply_builtin_jobs()
+
+        assert scheduler_manager.scheduler.get_job("__library_health_nightly") is None
+        assert scheduler_manager.scheduler.get_job("__markers_check_servers_daily") is not None
+
+        monkeypatch.setattr(
+            "media_preview_generator.web.scheduler.load_builtin_jobs",
+            lambda: builtin_jobs.read_builtin_jobs(None),
+        )
+        scheduler_manager.apply_builtin_jobs()
+
+        assert scheduler_manager.scheduler.get_job("__library_health_nightly") is not None
 
     def test_job_next_run_reports_the_fire_time(self, scheduler_manager):
         from media_preview_generator.web.scheduler import job_next_run
@@ -1918,6 +1955,19 @@ class TestDailyCheckServers:
         assert "hour='4'" in str(job.trigger) and "minute='30'" in str(job.trigger)
         assert job.coalesce and job.max_instances == 1 and job.misfire_grace_time == 3600
         assert scheduler_manager.get_all_schedules() == []
+
+    def test_apply_moves_it_to_the_saved_time(self, scheduler_manager, monkeypatch):
+        from media_preview_generator.web import builtin_jobs
+
+        monkeypatch.setattr(
+            "media_preview_generator.web.scheduler.load_builtin_jobs",
+            lambda: builtin_jobs.read_builtin_jobs({"check_servers": {"time": "05:10"}}),
+        )
+
+        scheduler_manager.apply_builtin_jobs()
+
+        trigger = str(scheduler_manager.scheduler.get_job("__markers_check_servers_daily").trigger)
+        assert "hour='5'" in trigger and "minute='10'" in trigger
 
     def test_it_queues_check_servers(self, monkeypatch):
         from media_preview_generator.web.scheduler import run_markers_check_servers_daily

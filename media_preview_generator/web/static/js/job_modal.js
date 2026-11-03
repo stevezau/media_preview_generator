@@ -73,6 +73,10 @@ const _SOURCE_ICON = {
     schedule: 'calendar-event',
     manual:   'person',
     webhook:  'plug',
+    library_health: 'heart-pulse',
+};
+const _SOURCE_LABEL = {
+    library_health: { text: 'Library Health', title: 'Started by: Library Health check (built-in)' },
 };
 function _sourceIcon(source) {
     return _SOURCE_ICON[(source || '').toLowerCase()] || 'globe2';
@@ -149,9 +153,11 @@ function _renderModalHeader(job) {
         chips.push(_jobKindBadgeHtml(job));
     }
     if (cfg.source) {
-        chips.push('<span class="ov-tag">'
+        const sourceLabel = _SOURCE_LABEL[String(cfg.source).toLowerCase()];
+        chips.push('<span class="ov-tag"'
+            + (sourceLabel ? ' title="' + escapeHtml(sourceLabel.title) + '"' : '') + '>'
             + '<i class="bi bi-' + _sourceIcon(cfg.source) + '" aria-hidden="true"></i>'
-            + escapeHtml(cfg.source) + '</span>');
+            + escapeHtml(sourceLabel ? sourceLabel.text : cfg.source) + '</span>');
     }
     if (job.server_name) {
         chips.push('<span class="ov-tag">'

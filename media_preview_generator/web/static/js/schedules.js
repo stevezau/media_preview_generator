@@ -768,3 +768,170 @@ document.addEventListener('DOMContentLoaded', () => {
     const addBtn = document.getElementById('quietHoursAddWindowBtn');
     if (addBtn) addBtn.addEventListener('click', _addQuietHoursWindowRow);
 });
+
+
+// ---------------------------------------------------------------------------
+// Built-in jobs card: the app's own daily Library Health check and Check servers run
+// ---------------------------------------------------------------------------
+
+let _builtinJobs = [];
+
+async function loadBuiltinJobs() {
+    const tbody = document.getElementById('builtinJobList');
+    if (!tbody) return;
+    try {
+        const data = await apiGet('/api/schedules/builtin');
+        _builtinJobs = data.jobs || [];
+    } catch (error) {
+        console.error('Failed to load built-in jobs:', error);
+        return;
+    }
+    _renderBuiltinJobs();
+}
+window.loadBuiltinJobs = loadBuiltinJobs;
+
+function _builtinJobRow(job) {
+    const isHealth = job.id === 'library_health';
+    const active = !isHealth || job.enabled;
+    const idle = !isHealth && !job.intro_credits_on;
+    let statusBadge;
+    if (!active) {
+        statusBadge = '<span class="pill"><i class="bi bi-pause-circle" aria-hidden="true"></i>Disabled</span>';
+    } else if (idle) {
+        statusBadge = '<span class="pill" data-bs-toggle="tooltip" data-bs-placement="top" tabindex="0"'
+            + ' title="Runs only while Intro &amp; Credits is on for a server">'
+            + '<i class="bi bi-moon" aria-hidden="true"></i>Idle</span>';
+    } else {
+        statusBadge = '<span class="pill ok"><i class="bi bi-check-circle-fill" aria-hidden="true"></i>Enabled</span>';
+    }
+
+    const nextDate = job.next_run ? new Date(job.next_run) : null;
+    const nextValid = active && nextDate && !Number.isNaN(nextDate.getTime());
+    const nextRun = nextValid
+        ? '<span class="next"><i class="bi bi-clock" aria-hidden="true"></i>' + escapeHtml(_scheduleNextRunLabel(nextDate)) + '</span>'
+            + '<span class="sched-sub">' + escapeHtml(_formatRelativeToNow(nextDate)) + '</span>'
+        : '<span class="next off">-</span>';
+
+    const kindChip = isHealth
+        ? '<span class="ov-task schedule-kind-badge" data-kind="previews"><i class="bi bi-heart-pulse" aria-hidden="true"></i>Library Health</span>'
+        : '<span class="ov-task schedule-kind-badge" data-kind="intro_credits"><i class="bi bi-skip-forward-btn" aria-hidden="true"></i>Intro &amp; Credits</span>';
+    const servers = isHealth
+        ? '<span class="sched-main">All servers</span><span class="sched-sub">Counts what each library still needs</span>'
+        : '<span class="sched-main">All servers</span><span class="sched-sub">Only while Intro &amp; Credits is on</span>';
+    let startsJobs;
+    if (!isHealth) {
+        startsJobs = '<span class="sched-main">Check servers job</span><span class="sched-sub">Puts back markers a server lost</span>';
+    } else if (job.catch_up) {
+        startsJobs = '<span class="sched-main">Catch-up jobs</span><span class="sched-sub">Libraries with '
+            + escapeHtml(String(job.catch_up_max_files)) + ' files or fewer to do</span>';
+    } else {
+        startsJobs = '<span class="sched-main">None</span><span class="sched-sub">Catch-up jobs are off</span>';
+    }
+
+    const jid = escapeHtml(job.id);
+    const label = escapeHtml(job.name);
+    const toggleButton = isHealth
+        ? '<button type="button" class="ibtn" onclick="toggleBuiltinLibraryHealth(' + (!job.enabled) + ')"'
+            + ' title="' + (job.enabled ? 'Disable' : 'Enable') + '" aria-label="' + (job.enabled ? 'Disable' : 'Enable') + ' ' + label + '">'
+            + '<i class="bi bi-' + (job.enabled ? 'pause' : 'play') + '" aria-hidden="true"></i></button>'
+        : '';
+    return `
+        <tr data-builtin-id="${jid}">
+            <td class="sched-name"><div class="sched-name-text"><span class="sched-title">${label}</span><div class="sched-kinds">${kindChip}</div></div></td>
+            <td>${servers}</td>
+            <td><span class="sched-main">Every day at ${escapeHtml(job.time)}</span></td>
+            <td>${startsJobs}</td>
+            <td>${nextRun}</td>
+            <td>${statusBadge}</td>
+            <td class="text-nowrap">
+                <div class="racts" role="group" aria-label="${label} actions">
+                    <button type="button" class="ibtn" onclick="runBuiltinJob('${jid}')" title="Run now" aria-label="Run ${label} now">
+                        <i class="bi bi-play-fill" aria-hidden="true"></i>
+                    </button>
+                    <button type="button" class="ibtn" onclick="showBuiltinJobModal('${jid}')" title="Edit" aria-label="Edit ${label}">
+                        <i class="bi bi-pencil" aria-hidden="true"></i>
+                    </button>
+                    ${toggleButton}
+                </div>
+            </td>
+        </tr>
+    `;
+}
+
+function _renderBuiltinJobs() {
+    const tbody = document.getElementById('builtinJobList');
+    if (!tbody) return;
+    if (typeof _disposeBootstrapTooltips === 'function') _disposeBootstrapTooltips(tbody);
+    tbody.innerHTML = _builtinJobs.map(_builtinJobRow).join('');
+    if (typeof _initBootstrapTooltips === 'function') _initBootstrapTooltips(tbody);
+}
+
+async function runBuiltinJob(jobId) {
+    const job = _builtinJobs.find(j => j.id === jobId);
+    const name = job ? job.name : 'Built-in job';
+    try {
+        await apiPost(`/api/schedules/builtin/${encodeURIComponent(jobId)}/run`);
+        loadJobs();
+        loadJobStats();
+        showToast('Job Triggered', `${name} has been started`, 'success');
+    } catch (error) {
+        showToast('Error', `Failed to run ${name}: ` + error.message, 'danger');
+    }
+}
+
+async function _saveBuiltinChanges(jobId, changes) {
+    const updated = await apiPut(`/api/schedules/builtin/${encodeURIComponent(jobId)}`, changes);
+    _builtinJobs = _builtinJobs.map(j => (j.id === jobId ? updated : j));
+    _renderBuiltinJobs();
+}
+
+async function toggleBuiltinLibraryHealth(enabled) {
+    try {
+        await _saveBuiltinChanges('library_health', { enabled: enabled });
+        showToast('Built-in Job Updated', `Library Health check ${enabled ? 'enabled' : 'disabled'}`, 'success');
+    } catch (error) {
+        showToast('Error', 'Failed to update built-in job: ' + error.message, 'danger');
+    }
+}
+
+function showBuiltinJobModal(jobId) {
+    const job = _builtinJobs.find(j => j.id === jobId);
+    if (!job) return;
+    document.getElementById('builtinJobId').value = job.id;
+    document.getElementById('builtinJobModalTitle').textContent = job.name;
+    document.getElementById('builtinJobTime').value = job.time;
+    document.getElementById('builtinJobError').hidden = true;
+    const isHealth = job.id === 'library_health';
+    document.getElementById('builtinJobSwitches').hidden = !isHealth;
+    if (isHealth) {
+        document.getElementById('builtinJobCatchUp').checked = !!job.catch_up;
+        document.getElementById('builtinJobEnabled').checked = !!job.enabled;
+    }
+    const modalEl = document.getElementById('builtinJobModal');
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    if (typeof _initBootstrapTooltips === 'function') _initBootstrapTooltips(modalEl);
+}
+
+async function saveBuiltinJob() {
+    const jobId = document.getElementById('builtinJobId').value;
+    const time = document.getElementById('builtinJobTime').value;
+    const errorBox = document.getElementById('builtinJobError');
+    if (!time) {
+        errorBox.querySelector('span').textContent = 'Pick a time.';
+        errorBox.hidden = false;
+        return;
+    }
+    const changes = { time: time };
+    if (jobId === 'library_health') {
+        changes.catch_up = document.getElementById('builtinJobCatchUp').checked;
+        changes.enabled = document.getElementById('builtinJobEnabled').checked;
+    }
+    try {
+        await _saveBuiltinChanges(jobId, changes);
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('builtinJobModal')).hide();
+        showToast('Built-in Job Updated', 'Built-in job saved', 'success');
+    } catch (error) {
+        errorBox.querySelector('span').textContent = error.message;
+        errorBox.hidden = false;
+    }
+}

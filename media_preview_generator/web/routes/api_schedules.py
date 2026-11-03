@@ -3,11 +3,20 @@
 from flask import current_app, jsonify, request
 from loguru import logger
 
+from ...library_health.runner import CATCH_UP_MAX_FILES, get_runner
 from ...scan_filters import normalize_scan_filter_config
 from ..auth import api_token_required
+from ..builtin_jobs import (
+    CHECK_SERVERS_ID,
+    LIBRARY_HEALTH_ID,
+    load_builtin_jobs,
+    save_builtin_job,
+    validate_builtin_update,
+)
 from ..scheduler import (
     _QUIET_HOURS_DAYS,
     _parse_hhmm,
+    _resume_orphaned_check_servers_jobs,
     get_schedule_manager,
     is_now_in_any_quiet_window,
     normalise_quiet_hours,
@@ -256,6 +265,76 @@ def run_schedule_now(schedule_id):
     if schedule_manager.run_now(schedule_id):
         return jsonify({"success": True, "paused": bool(get_settings_manager().processing_paused)})
     return jsonify({"error": "Schedule not found"}), 404
+
+
+def _builtin_job_dict(job_id: str) -> dict:
+    """One built-in job as the Schedules page shows it, with its next run from the live scheduler."""
+    from ...markers.triggers import markers_enabled_anywhere
+    from ..scheduler import _LIBRARY_HEALTH_NIGHTLY, _MARKERS_CHECK_SERVERS_DAILY, job_next_run
+
+    settings = load_builtin_jobs()[job_id]
+    if job_id == LIBRARY_HEALTH_ID:
+        next_run = job_next_run(_LIBRARY_HEALTH_NIGHTLY)
+        return {
+            "id": job_id,
+            "name": "Library Health check",
+            **settings,
+            "catch_up_max_files": CATCH_UP_MAX_FILES,
+            "next_run": next_run.isoformat() if next_run else None,
+        }
+    next_run = job_next_run(_MARKERS_CHECK_SERVERS_DAILY)
+    return {
+        "id": job_id,
+        "name": "Check servers",
+        **settings,
+        "intro_credits_on": markers_enabled_anywhere(),
+        "next_run": next_run.isoformat() if next_run else None,
+    }
+
+
+@api.route("/schedules/builtin")
+@api_token_required
+def get_builtin_jobs():
+    """The app's built-in daily jobs (Library Health check, Check servers) with their saved settings."""
+    return jsonify({"jobs": [_builtin_job_dict(LIBRARY_HEALTH_ID), _builtin_job_dict(CHECK_SERVERS_ID)]})
+
+
+@api.route("/schedules/builtin/<job_id>", methods=["PUT"])
+@api_token_required
+def update_builtin_job(job_id):
+    """Change a built-in job's time or switches; the body holds only the fields to change."""
+    try:
+        changes = validate_builtin_update(job_id, request.get_json(silent=True))
+    except KeyError:
+        return jsonify({"error": "Built-in job not found"}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    # One lock across save and apply, so two quick saves can't register the older settings last.
+    with get_settings_manager().locked():
+        save_builtin_job(job_id, changes)
+        get_schedule_manager().apply_builtin_jobs()
+    return jsonify(_builtin_job_dict(job_id))
+
+
+@api.route("/schedules/builtin/<job_id>/run", methods=["POST"])
+@api_token_required
+def run_builtin_job_now(job_id):
+    """Run a built-in job now, the same way its daily run does."""
+    if job_id == LIBRARY_HEALTH_ID:
+        started, _progress = get_runner().start_check("nightly")
+        if not started:
+            return jsonify({"error": "A Library Health check is already running"}), 409
+    elif job_id == CHECK_SERVERS_ID:
+        from ...markers.reconcile import run_markers_reconcile
+
+        _resume_orphaned_check_servers_jobs()
+        queued = run_markers_reconcile()
+        if queued.job_id is None:
+            return jsonify({"error": "Intro & Credits is off on every server, so there is nothing to check"}), 409
+        return jsonify({"ok": True, "job_id": queued.job_id, "reused": not queued.created})
+    else:
+        return jsonify({"error": "Built-in job not found"}), 404
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------

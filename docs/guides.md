@@ -205,7 +205,12 @@ The Dashboard shows the next scheduled run in **Job statistics**, and **Run next
 - **Stop time** (optional): pauses the schedule's running jobs at that time of day.
 - **Job Priority**, and for a whole library **Processing Order** (Previews and loudness) and the same media filters as **Start new job**.
 
-**Check servers** is not a schedule: it runs by itself every day at 04:30 whenever Intro & Credits is on for a server. During quiet hours or Pause All it waits in the queue until processing resumes.
+**Check servers** is not a schedule: it runs by itself every day, by default at 04:30, whenever Intro & Credits is on for a server. During quiet hours or Pause All it waits in the queue until processing resumes.
+
+**Built-in jobs:** the app runs two daily jobs of its own. They have their own card below your schedules, with **Run now** and **Edit**. They can't be deleted.
+
+- **Library Health check** counts what every library still needs, by default at 03:00. After it, it starts a low-priority **catch-up job** for each Plex library with 500 files or fewer still to do. You can change its time, turn the daily check off, and turn the catch-up jobs off. The 500 limit is fixed. Catch-up jobs show "Library Health" as their source in the job list. **Check now** on the Library Health page works even when the daily check is off.
+- **Check servers** puts back markers a server lost. You can change its time. It has no off switch and sits idle while Intro & Credits is off everywhere.
 
 `/schedules` and `/webhooks` still work: they redirect to the Schedules and Triggers tabs of `/automation`.
 
@@ -1484,7 +1489,7 @@ earlier file), drawn to the length the server reports. With no length anywhere t
 ### Check servers
 
 The checks above only run for files a job looks at. To check everything this app has published, **Intro & Credits ·
-Check servers** runs by itself every day at 04:30 whenever Intro & Credits is on for a server (skipped while processing
+Check servers** runs by itself by default at 04:30 whenever Intro & Credits is on for a server (skipped while processing
 is paused). You can also run it now: `POST /api/markers/reconcile`. A normal Intro & Credits job already re-checks
 servers for the files it covers, so Check servers is the sweep of everything. It runs at Low priority unless you pick
 another. A marker you locked in the Inspector that a server didn't get (it was down or not ready when you saved)

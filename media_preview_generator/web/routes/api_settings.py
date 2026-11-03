@@ -1906,7 +1906,7 @@ def _settings_replaced(settings: Any) -> str | None:
 
 
 def _restored_pause_applied(settings: Any, paused_before: bool) -> None:
-    """Apply the restored settings.json's quiet hours as a start-up does, then do what Pause or Resume does when the
+    """Apply the restored settings.json's quiet hours and built-in jobs as a start-up does, then do what Pause or Resume does when the
     restore pauses processing, or stops pausing it.
 
     Quiet hours pause and resume processing from a once-a-minute recheck that only a start-up or a quiet-hours save
@@ -1927,6 +1927,10 @@ def _restored_pause_applied(settings: Any, paused_before: bool) -> None:
         get_schedule_manager().apply_quiet_hours(settings.get("quiet_hours") or {}, drain=False)
     except Exception:
         logger.exception("Could not apply the restored quiet hours; they apply from the next restart")
+    try:
+        get_schedule_manager().apply_builtin_jobs()
+    except Exception:
+        logger.exception("Could not apply the restored built-in jobs; they apply from the next restart")
     paused = settings.processing_paused
     if paused == paused_before:
         return

@@ -345,6 +345,7 @@ def _filter_jobs_by_query(
         "scheduled_recently_added": "Scheduled scan",
         "theintrodb_recheck": "TheIntroDB recheck",
         "version_rerun": "App update",
+        "library_health": "Library Health",
     }
     kind_labels = {"previews": "Video previews", "intro_credits": "Intro & Credits", "loudness": "Plex loudness"}
     matched = []

@@ -393,6 +393,21 @@ def test_reread_rejected_when_registry_unreadable(store):
     assert (refusal.message, refusal.status) == ("Could not read your media servers", 400)
 
 
+def test_nightly_check_does_nothing_when_the_job_is_switched_off(monkeypatch):
+    from media_preview_generator.web import builtin_jobs
+
+    fake = MagicMock()
+    monkeypatch.setattr(runner_module, "get_runner", lambda: fake)
+    monkeypatch.setattr(
+        "media_preview_generator.web.builtin_jobs.load_builtin_jobs",
+        lambda: builtin_jobs.read_builtin_jobs({"library_health": {"enabled": False}}),
+    )
+
+    runner_module.nightly_check()
+
+    fake.start_check.assert_not_called()
+
+
 def test_nightly_check_never_raises(monkeypatch):
     fake = MagicMock()
     fake.start_check.side_effect = RuntimeError("nope")
@@ -868,6 +883,38 @@ def test_a_nightly_check_starts_one_catch_up_for_previews_and_chapters(store, mo
             "Catch-up for TV Shows",
         )
     ]
+
+
+def test_a_nightly_check_starts_no_catch_up_when_the_switch_is_off(store, monkeypatch):
+    from media_preview_generator.web import builtin_jobs
+
+    monkeypatch.setattr(
+        builtin_jobs,
+        "load_builtin_jobs",
+        lambda: builtin_jobs.read_builtin_jobs({"library_health": {"catch_up": False}}),
+    )
+    runner, started = _catch_up_runner(store, monkeypatch, _catch_up_result("a"))
+
+    _check(runner, "nightly")
+
+    assert started == []
+    assert store.load()[0].libraries
+
+
+def test_catch_up_jobs_are_labelled_as_started_by_the_library_health_check(monkeypatch):
+    from media_preview_generator.web import jobs as jobs_module
+
+    manager = MagicMock()
+    monkeypatch.setattr(jobs_module, "get_job_manager", lambda: manager)
+    started = MagicMock()
+    monkeypatch.setattr("media_preview_generator.web.routes.job_runner._start_job_async", started)
+    cfg = _cfg("a")
+    cfg.output = {}
+
+    runner_module.start_files_job(cfg, [("/tv/p.mkv", "1")], "Catch-up for TV Shows")
+
+    assert manager.create_job.call_args.kwargs["config"]["source"] == "library_health"
+    assert started.call_args.args[1]["source"] == "library_health"
 
 
 def test_a_manual_check_never_starts_jobs(store, monkeypatch):

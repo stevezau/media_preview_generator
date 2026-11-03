@@ -20,11 +20,14 @@ from apscheduler.events import (
     EVENT_JOB_MISSED,
     EVENT_JOB_SUBMITTED,
 )
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
+
+from .builtin_jobs import CHECK_SERVERS_ID, LIBRARY_HEALTH_ID, load_builtin_jobs, parse_time
 
 
 def _parse_hhmm(value: str | None) -> tuple[int, int] | None:
@@ -1750,11 +1753,12 @@ class ScheduleManager:
                 logger.debug("Could not remove leftover scheduler job {}", job.id, exc_info=True)
 
     def _register_markers_check_servers_daily(self) -> None:
-        """Add the internal 04:30 Check servers run; hidden from user schedules by its ``__`` id."""
+        """Add the internal daily Check servers run (04:30 unless changed); hidden from schedules by its ``__`` id."""
         try:
+            hour, minute = parse_time(load_builtin_jobs()[CHECK_SERVERS_ID]["time"])
             self.scheduler.add_job(
                 run_markers_check_servers_daily,
-                CronTrigger(hour=4, minute=30),
+                CronTrigger(hour=hour, minute=minute),
                 id=_MARKERS_CHECK_SERVERS_DAILY,
                 replace_existing=True,
                 coalesce=True,
@@ -1763,6 +1767,11 @@ class ScheduleManager:
             )
         except Exception:
             logger.warning("Could not register the daily Check servers run", exc_info=True)
+
+    def apply_builtin_jobs(self) -> None:
+        """Register both built-in daily jobs again from the saved ``builtin_jobs`` settings."""
+        self._register_library_health_nightly()
+        self._register_markers_check_servers_daily()
 
     def _register_plex_held_rereads(self) -> None:
         """Add the internal job that sends held Plex re-reads once Plex's maintenance window opens."""
@@ -1783,13 +1792,24 @@ class ScheduleManager:
             logger.warning("Could not register the held Plex re-reads job", exc_info=True)
 
     def _register_library_health_nightly(self) -> None:
-        """Add the internal 03:00 library-health check; hidden from user schedules by its ``__`` id."""
+        """Add the internal daily library-health check (03:00 unless changed), or remove it when switched off.
+
+        Hidden from user schedules by its ``__`` id.
+        """
         try:
             from ..library_health.runner import nightly_check
 
+            settings = load_builtin_jobs()[LIBRARY_HEALTH_ID]
+            if not settings["enabled"]:
+                try:
+                    self.scheduler.remove_job(_LIBRARY_HEALTH_NIGHTLY)
+                except JobLookupError:
+                    logger.debug("No library health job to remove")
+                return
+            hour, minute = parse_time(settings["time"])
             self.scheduler.add_job(
                 nightly_check,
-                CronTrigger(hour=3, minute=0),
+                CronTrigger(hour=hour, minute=minute),
                 id=_LIBRARY_HEALTH_NIGHTLY,
                 replace_existing=True,
                 coalesce=True,

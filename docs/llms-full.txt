@@ -1578,15 +1578,24 @@ without changing it or starting a job. The job banner identifies **Plex loudness
 Plex keeps analysing on its own schedule too. The app preserves complete native measurements it finds before
 publication. Once the item's completion mark exists, Plex's non-forced analysis skips the completed item.
 
-Setup Health recommends setting Plex's own **Analyze audio tracks for loudness** to **Never**, because while it's on
-Plex repeats this app's work on the Plex machine's CPU. Keeping it on is still valid if Plex serves music or video
-libraries this app does not cover; dismiss the recommendation in that case.
+Setup Health checks whether Plex also analyses loudness in the libraries this app measures, because there Plex
+repeats this app's work on the Plex machine's CPU. The check passes when Plex's server-wide **Analyze audio tracks for
+loudness** is **Never**, or when **Enable Loudness Analysis** is off in each library this app measures (the library's
+**Edit → Advanced** settings in Plex).
 
-When this app has eligible video libraries selected, its writer is ready, and a CPU device has usable loudness hours, **Set to Never** is a
-separately confirmed action. It changes Plex's server-wide schedule, including music and unselected video libraries;
-it does not enable this app, extend its library selection or erase existing measurements. Keep native analysis on
-if those other libraries need it. The app checks its selection, writer readiness and configured CPU eligibility again when the action runs. Busy
-workers do not prevent this action; absent or unusable CPU hours do.
+The fix depends on what else Plex serves:
+
+- **Plex has other libraries (music, or movie and TV libraries this app doesn't measure):** **Turn off in this app's
+  libraries** turns off Enable Loudness Analysis in only those libraries. Plex keeps analysing the others, so music
+  loudness leveling and smart transitions keep working.
+- **This app measures every movie and TV library and there's no music library:** **Set to Never** changes Plex's
+  server-wide schedule.
+
+Either fix is confirmed separately and is available when this app has eligible video libraries selected, its writer is
+ready, and a CPU device has usable loudness hours. Neither enables this app, extends its library selection or erases
+existing measurements, and Plex keeps using this app's measurements for playback leveling with its own analysis off.
+The app checks its selection, writer readiness and configured CPU eligibility again when the action runs. Busy
+workers do not prevent it; absent or unusable CPU hours do.
 The control is excluded from bulk fixes, and installing or upgrading the app never changes this Plex preference.
 
 ## What it runs
@@ -1948,7 +1957,12 @@ The Dashboard shows the next scheduled run in **Job statistics**, and **Run next
 - **Stop time** (optional): pauses the schedule's running jobs at that time of day.
 - **Job Priority**, and for a whole library **Processing Order** (Previews and loudness) and the same media filters as **Start new job**.
 
-**Check servers** is not a schedule: it runs by itself every day at 04:30 whenever Intro & Credits is on for a server. During quiet hours or Pause All it waits in the queue until processing resumes.
+**Check servers** is not a schedule: it runs by itself every day, by default at 04:30, whenever Intro & Credits is on for a server. During quiet hours or Pause All it waits in the queue until processing resumes.
+
+**Built-in jobs:** the app runs two daily jobs of its own. They have their own card below your schedules, with **Run now** and **Edit**. They can't be deleted.
+
+- **Library Health check** counts what every library still needs, by default at 03:00. After it, it starts a low-priority **catch-up job** for each Plex library with 500 files or fewer still to do. You can change its time, turn the daily check off, and turn the catch-up jobs off. The 500 limit is fixed. Catch-up jobs show "Library Health" as their source in the job list. **Check now** on the Library Health page works even when the daily check is off.
+- **Check servers** puts back markers a server lost. You can change its time. It has no off switch and sits idle while Intro & Credits is off everywhere.
 
 `/schedules` and `/webhooks` still work: they redirect to the Schedules and Triggers tabs of `/automation`.
 
@@ -3227,7 +3241,7 @@ earlier file), drawn to the length the server reports. With no length anywhere t
 ### Check servers
 
 The checks above only run for files a job looks at. To check everything this app has published, **Intro & Credits ·
-Check servers** runs by itself every day at 04:30 whenever Intro & Credits is on for a server (skipped while processing
+Check servers** runs by itself by default at 04:30 whenever Intro & Credits is on for a server (skipped while processing
 is paused). You can also run it now: `POST /api/markers/reconcile`. A normal Intro & Credits job already re-checks
 servers for the files it covers, so Check servers is the sweep of everything. It runs at Low priority unless you pick
 another. A marker you locked in the Inspector that a server didn't get (it was down or not ready when you saved)
@@ -5259,7 +5273,7 @@ webhook job that hasn't read its files yet (renamed "Intro & Credits · N files"
 instead of queuing another: one from the same sender with the same pin, or one already covering its season folder.
 
 **Check servers** (`reconcile: true`, `source: "reconcile"`, named "Intro & Credits · Check servers") is created by
-`POST /api/markers/reconcile`, and by an internal job that runs it every day at 04:30 while Intro & Credits is on
+`POST /api/markers/reconcile`, and by an internal job that runs it by default at 04:30 while Intro & Credits is on
 anywhere (during quiet hours or Pause All the queued job waits for processing to resume). It is not a user schedule. LOW priority unless the request sets one.
 While it runs, its config also carries `check_servers_listing` (the files it listed), so a run revived after a restart checks those same files; the key is dropped when the job ends.
 Only one is queued or running at a time: asking again (a **Re-run** of a finished one included) returns that job. It
@@ -6262,6 +6276,9 @@ job, `400` when the job isn't a retry-chain head, `409` when no retry is waiting
 | DELETE | `/api/schedules/{id}` | Delete schedule |
 | POST | `/api/schedules/{id}/run` | Run now. Returns `{"success": true}`. |
 | POST | `/api/schedules/{id}/enable` · `/api/schedules/{id}/disable` | Turn a schedule on or off without deleting it. Returns the schedule. |
+| GET | `/api/schedules/builtin` | The built-in daily jobs: `{"jobs": [...]}` with `library_health` (`enabled`, `time`, `catch_up`, `catch_up_max_files` (500), `next_run`) and `check_servers` (`time`, `intro_credits_on`, `next_run`). |
+| PUT | `/api/schedules/builtin/{id}` | Change a built-in job. Send only the fields to change: `time` (`HH:MM`), and for `library_health` also `enabled` and `catch_up`. Returns the job. `400` for a bad value or a field the job doesn't have, `404` for an unknown id. |
+| POST | `/api/schedules/builtin/{id}/run` | Run a built-in job now. Returns `{"ok": true}`. `409` when a Library Health check is already running. |
 | POST | `/api/schedules/recover_from_backup` | Restore `schedules.json` from its newest backup after it failed to load. `200` with `{"status": "ok"}`, otherwise `409` with a `status` such as `no_backup`. |
 
 #### POST /api/schedules
@@ -6367,6 +6384,7 @@ For full design and per-vendor details see [Multi-Media-Server](https://mediapre
 | POST | `/api/servers/<id>/plex-library-markers` | Plex only. Setup Health's **Turn on** for a library whose own *Intro markers* / *Credits markers* setting is off (Plex then hides every skip marker of that type there, ours included). Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them on with `PUT /library/sections/{id}/prefs` for that library only. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's **Set server-wide to Never**. Body `{"types": ["intro", "credits"]}` (one or both); sends `PUT /:/prefs?GenerateIntroMarkerBehavior=never&GenerateCreditsMarkerBehavior=never` for the types given, which stops Plex's own detection without hiding any marker. 400 for any other type, a non-Plex server, or a server with Intro & Credits off. Returns `{ok, types}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/plex-loudness-analysis` | Plex only. The recommended **Set to Never** fix, with a confirmation dialog in Setup Health. Body `{}`; sends `PUT /:/prefs?LoudnessAnalysisBehavior=never`. Requires app loudness opt-in, eligible selected video libraries, configured CPU loudness hours outside the global pause schedule and a fresh successful writer-readiness check. Returns 409 if the server is disabled, selection is empty, eligible CPU hours are absent or the writer is unavailable; 400 for a non-Plex server or loudness opt-in off; 404 for an unknown server. Response is `{ok, error}`; inspect `ok` even for HTTP 200 because Plex can refuse the preference update. Affects native analysis in every library, including music; existing measurements are retained. |
+| POST | `/api/servers/<id>/plex-loudness-library-analysis` | Plex only. Setup Health's **Turn off in this app's libraries** fix, offered when Plex has libraries this app doesn't measure. Body `{library_ids: [...]}`, each one of this app's selected loudness libraries; sends `PUT /library/sections/<id>/prefs?enableLoudnessAnalysis=0` for each. Same requirements and status codes as the row above, plus 400 when `library_ids` is empty or names a library outside the selection. Response is `{ok, error}`. Music and other libraries keep Plex's own analysis. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only (400 otherwise). Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
 | POST | `/api/servers/<id>/previews-readiness/dismiss` · `/undismiss` | Hide or show again one recommended Setup Health check. Body `{"check_id": "..."}`. Stored in the server's `health_dismissals`. |
 | GET | `/api/bif/servers/<id>/search?q=<query>` | One server's preview search; returns `preview_kind` (`bif` or `trickplay`) per result. Limited to 10 per minute. The Inspector searches every server through `GET /api/media/search` instead |

@@ -26,6 +26,7 @@ RESTORE_EVERY = 200  # the same cap the page uses before it switches to a whole-
 # A nightly catch-up only mops up stragglers. A library with more files to do is a fresh install or a newly enabled
 # feature, which belongs to the user's own scan or schedule, not to a job nobody asked for.
 CATCH_UP_MAX_FILES = 500
+CATCH_UP_SOURCE = "library_health"
 
 _BUSY_MESSAGE = "A check or re-read is already running"
 _NO_REGISTRY_MESSAGE = "Could not read your media servers"
@@ -210,10 +211,20 @@ class HealthRunner:
                 self._current.total = 0
 
     def _check_then_catch_up(self, reason: str) -> None:
-        """Count every server; after a nightly check, start the catch-up jobs (a manual check never starts jobs)."""
+        """Count every server; after a nightly check, start the catch-up jobs unless that is switched off.
+
+        A manual check never starts jobs. The switch is read now, not when the job was scheduled.
+        """
+        from ..web.builtin_jobs import LIBRARY_HEALTH_ID, load_builtin_jobs
+
         registry = self._registry_factory()
         self._check_servers(None, reason=reason, registry=registry)
-        if reason == "nightly" and registry is not None and self._start_files_job is not None:
+        if (
+            reason == "nightly"
+            and registry is not None
+            and self._start_files_job is not None
+            and load_builtin_jobs()[LIBRARY_HEALTH_ID]["catch_up"]
+        ):
             self._catch_up(registry)
 
     def _catch_up(self, registry: ServerRegistry) -> None:
@@ -487,6 +498,7 @@ def start_files_job(cfg: ServerConfig, files: list[tuple[str, str]], title: str)
             "webhook_paths": list(job_files),
             "webhook_item_id_hints": {path: {cfg.id: item_id} for path, item_id in job_files.items()},
             "force_generate": False,
+            "source": CATCH_UP_SOURCE,
         }
         job = get_job_manager().create_job(
             library_name=f"{title}: {len(job_files):,} files",
@@ -514,6 +526,11 @@ def catch_up_in_progress(cfg: ServerConfig, title: str) -> bool:
 def nightly_check() -> None:
     """Scheduler entry point; logs instead of raising so APScheduler never sees a failure."""
     try:
+        from ..web.builtin_jobs import load_builtin_jobs
+
+        if not load_builtin_jobs()["library_health"]["enabled"]:
+            logger.info("Library Health check is switched off")
+            return
         get_runner().start_check("nightly")
     except Exception:
         logger.exception("Nightly library health check could not start")
