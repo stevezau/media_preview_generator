@@ -115,7 +115,7 @@ def run_scheduled_job(
     _start_job_async(job.id, job_config)
 
 
-def get_cors_origins() -> tuple[str, bool]:
+def get_cors_origins() -> tuple[str | list[str], bool]:
     """Get CORS allowed origins from environment.
 
     Defaults to ``"*"`` (allow all) because this tool is typically accessed
@@ -127,12 +127,15 @@ def get_cors_origins() -> tuple[str, bool]:
     ``CORS_ORIGINS=http://192.168.1.10:8080,http://mynas:8080``.
 
     Returns:
-        Tuple of ``(origins, is_default_wildcard)``. The second field is
-        ``True`` when the wide-open default is in use; callers should warn.
+        Tuple of ``(origins, is_default_wildcard)``. ``origins`` is ``"*"`` or
+        the list of origins; Socket.IO and flask-cors each read a plain string
+        as one origin, so a comma-separated string would match nothing. The
+        second field is ``True`` when the wide-open default is in use; callers
+        should warn.
     """
-    explicit = os.environ.get("CORS_ORIGINS")
+    explicit = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip()]
     if explicit:
-        return explicit, False
+        return ("*" if "*" in explicit else explicit), False
     return "*", True
 
 

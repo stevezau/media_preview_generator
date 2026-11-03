@@ -62,8 +62,42 @@ class TestGetCorsOrigins:
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000")
         origins, is_default = get_cors_origins()
-        assert origins == "http://localhost:3000"
+        assert origins == ["http://localhost:3000"]
         assert is_default is False
+
+    def test_comma_separated_list_is_split_and_trimmed(self, monkeypatch):
+        monkeypatch.setenv("CORS_ORIGINS", "http://192.168.1.10:8080, http://mynas:8080 ,")
+        origins, is_default = get_cors_origins()
+        assert origins == ["http://192.168.1.10:8080", "http://mynas:8080"]
+        assert is_default is False
+
+    def test_explicit_wildcard_stays_a_wildcard(self, monkeypatch):
+        monkeypatch.setenv("CORS_ORIGINS", "*")
+        origins, is_default = get_cors_origins()
+        assert origins == "*"
+        assert is_default is False
+
+    def test_wildcard_inside_a_list_allows_every_origin(self, monkeypatch):
+        """flask-cors reads "*" in a list as allow-all; Socket.IO only matches it as the bare string."""
+        monkeypatch.setenv("CORS_ORIGINS", "*,http://mynas:8080")
+        origins, is_default = get_cors_origins()
+        assert origins == "*"
+        assert is_default is False
+
+    def test_blank_value_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("CORS_ORIGINS", " , ")
+        origins, is_default = get_cors_origins()
+        assert origins == "*"
+        assert is_default is True
+
+    def test_socketio_accepts_each_listed_origin(self, monkeypatch):
+        """The engine Socket.IO runs on must see each origin, not the joined string (#440)."""
+        from engineio.base_server import BaseServer
+
+        monkeypatch.setenv("CORS_ORIGINS", "http://a:8080,http://b:8080")
+        origins, _ = get_cors_origins()
+        server = BaseServer(cors_allowed_origins=origins)
+        assert server._cors_allowed_origins({"HTTP_ORIGIN": "http://b:8080"}) == ["http://a:8080", "http://b:8080"]
 
 
 class TestDeriveSecret:
