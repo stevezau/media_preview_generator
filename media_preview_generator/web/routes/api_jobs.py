@@ -2062,6 +2062,7 @@ def _build_idle_workers_from_config():
         "fallback_reason": None,
         "fallback_title": "",
         "fallback_until": None,
+        "routing_reason": "",
         "ffmpeg_started": False,
         "current_phase": "",
         "chapter_progress": None,

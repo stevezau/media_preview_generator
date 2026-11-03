@@ -10,6 +10,7 @@ pipeline orchestration.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 # MediaInfo's names for the two HDR transfer curves: PQ (SMPTE ST 2084)
 # and HLG (ARIB STD-B67).  The standards' own names are accepted too in
@@ -89,6 +90,31 @@ def is_dv_no_backward_compat(hdr_format: str | None, transfer_characteristics: s
               HLG transfer, ``False`` otherwise.
     """
     return is_dolby_vision(hdr_format) and not is_hdr_transfer(transfer_characteristics)
+
+
+def hdr_reason(path: str, media_info: Any) -> str | None:
+    """The HDR routing rule (``jobs.routing``): why a preview file needs a GPU, or None.
+
+    A CPU worker decodes and tone-maps every frame of an HDR file in software, which is slow. The rule reads the
+    same fields :func:`generate_images` picks its tone mapping from: Dolby Vision, any other ``HDR_Format``, or a
+    PQ or HLG transfer curve.
+
+    Args:
+        path: The file; the rule reads only its details.
+        media_info: Its ``MediaInfo`` details, or None when MediaInfo couldn't open it.
+
+    Returns:
+        "Dolby Vision" or "HDR", or None for SDR or a file without video.
+    """
+    tracks = getattr(media_info, "video_tracks", None) or []
+    if not tracks:
+        return None
+    hdr_format = tracks[0].hdr_format
+    if is_dolby_vision(hdr_format):
+        return "Dolby Vision"
+    if hdr_format not in (None, "", "None") or is_hdr_transfer(tracks[0].transfer_characteristics):
+        return "HDR"
+    return None
 
 
 def detect_dolby_vision_rpu_error(stderr_lines: list[str]) -> bool:

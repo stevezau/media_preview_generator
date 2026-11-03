@@ -435,6 +435,8 @@ class WorkerStatus:
     # When an idle worker stops showing its last file's fallback (time.time()); None: while it runs. The saved
     # statuses can go unrefreshed while no job feeds the workers, so the read ages it out too.
     fallback_until: float | None = None
+    # Why a routing rule sent the current file to this worker (jobs.routing), for its card's "Needs a GPU" pill.
+    routing_reason: str = ""
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""

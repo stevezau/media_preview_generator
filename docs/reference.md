@@ -236,6 +236,7 @@ These are the top-level keys `POST /api/settings` accepts, besides `frame_reuse`
 | `cpu_threads` | none | `1` | Legacy CPU count. Once groups exist, posting it returns `409`; use the worker-groups API. |
 | `incoming_job_priority` | Processing → Job execution → Incoming job priority | `high` | Priority of jobs the app creates itself from webhooks and Recently Added scans. `high`, `normal`, `low` (or `1`, `2`, `3`). |
 | `loudness_nice_level` | Processing → Job execution → Loudness analysis nice level | `10` | How far loudness analysis FFmpeg yields the CPU to previews and Intro & Credits detection when the CPU is busy. `0`–`19`; `0` runs it at the same priority. Read per file, so a change applies to the next file analysed, on remote worker nodes too. |
+| `routing_rules` | Processing → Routing rules | every rule off | Which routing rules are on, by rule id, such as `{"hdr": true}`. A file a rule matches waits for a GPU worker. It goes to any worker when no GPU worker is available ([Routing rules](guides.md#routing-rules)). GET lists every rule. A POST can name just some rules, and the others keep their state. An unknown rule id, or a value that isn't `true` or `false`, returns `400`. Changes apply to preview jobs started afterwards. |
 | `webhook_retry_count` | Processing → Retry policy → Retry count | `5` | Attempts for files a server hasn't indexed yet. The page allows 0–10; `0` turns retries off. |
 | `webhook_retry_delay` | Processing → Retry policy → Initial retry delay | `30` | Base delay in seconds (the page allows 10–300). At 30, retries wait 1 min, 2 min, 5 min, 15 min, then 1 h. |
 | `auto_requeue_on_restart` | Processing → Restart recovery | `true` | Re-queue jobs a restart interrupted. |
@@ -1271,6 +1272,7 @@ Get current settings. Secrets are masked as `"****"`.
   "requeue_max_age_minutes": 720,
   "incoming_job_priority": 1,
   "loudness_nice_level": 10,
+  "routing_rules": {"hdr": false},
   "config_backup_keep": 10,
   "config_backup_max_age_days": 0,
   "frame_reuse": {"enabled": true, "ttl_minutes": 60, "max_cache_disk_mb": 2048},

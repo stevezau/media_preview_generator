@@ -469,6 +469,7 @@ def mock_config():
     config.ffmpeg_path = "/usr/bin/ffmpeg"
     config.ffmpeg_threads = 2
     config.tonemap_algorithm = "hable"
+    config.routing_rules = {}  # every routing rule off, as on a fresh install
     config.log_level = "INFO"
     config.worker_pool_timeout = 30
     # None so get_library_sections filters by plex_libraries (titles), not by ID

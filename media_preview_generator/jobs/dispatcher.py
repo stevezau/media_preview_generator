@@ -30,6 +30,7 @@ from .node_members import (
     note_waiting_for_nodes,
     worker_node_id,
 )
+from .routing import GPU, Requirement, file_requirement
 from .worker import JOB_LOG_SKIP, Worker, WorkerPool, logging_for_job
 
 _submission_counter_lock = threading.Lock()
@@ -64,6 +65,9 @@ NODE_WAIT_CHECK_S = 1.0
 # How long a job whose queued files all wait for a busy GPU skips its sweep while its queue and which workers are busy
 # stay the same: what else frees one of those files (that GPU removed, out of hours or frozen) is noticed within this.
 GPU_WAIT_RECHECK_S = 0.25
+# The refused GPUs of a file that requires a GPU (``JobTracker.requirements``) and no GPU has refused: none, so it
+# waits for any GPU.
+_ANY_GPU: frozenset[str] = frozenset()
 
 
 class StartWait(NamedTuple):
@@ -179,6 +183,11 @@ class JobTracker:
         # Each of those GPUs' error (path -> ``group_resource`` -> error): one that gets the file back later, after the
         # GPU it waited for went away, reruns it on its CPU without trying its GPU again.
         self.gpu_errors: dict[str, dict[str, CodecNotSupportedError]] = {}
+        # What the queued or running files need from their worker, from the job's routing rules (``jobs.routing``).
+        # GPU is the only capability: such a file waits for a GPU worker it can go to while one runs the job's kind,
+        # even a busy one, and goes to any worker once none does. Set as the file is queued and dropped when it
+        # finishes, under ``_trackers_lock``. Not checkpointed: a resumed job checks its files again.
+        self.requirements: dict[str, Requirement] = {}
         # Each file's refused GPUs as one frozenset, kept with ``gpus_refused``: ``JobDispatcher._first_free_file``
         # sweeps thousands of waiting files by it.
         self.refused_keys: dict[str, frozenset[str]] = {}
@@ -189,6 +198,9 @@ class JobTracker:
         # How many of those sit in the queue right now, for the banner's "1 file waiting for another GPU · " (dispatch
         # loop only, refreshed with ``node_wait``).
         self.gpu_waiting = 0
+        # How many queued files require a GPU while a GPU worker runs their kind, and their reasons, for the banner's
+        # "2 files waiting for a GPU (AV1) · " (dispatch loop only, refreshed with ``node_wait``).
+        self.required_gpu_waiting: tuple[int, tuple[str, ...]] = (0, ())
         # Why every queued file waits for workers that are away (outside their hours, offline, still connecting) while
         # nothing of the job runs, else "": the kind still has open capacity on the nodes that can't see the files, so
         # the job never parks. Set by the dispatch loop (``JobDispatcher._node_wait``), read by the banner.
@@ -418,8 +430,9 @@ class JobTracker:
 
         Returns:
             E.g. "Waiting for a free worker", "Checking existing previews… 3/10", "Looking up markers… 3/10",
-            "3/10 completed", "1 file waiting for another GPU · 3/10 completed" or, while every file left waits for a
-            node that is away, "Waiting for a node — nuc: node offline".
+            "3/10 completed", "1 file waiting for another GPU · 3/10 completed", "2 files waiting for a GPU (AV1) ·
+            3/10 completed" or, while every file left waits for a node that is away, "Waiting for a node — nuc: node
+            offline".
         """
         if completed is None:
             completed = self.completed
@@ -433,6 +446,10 @@ class JobTracker:
             if self.gpu_waiting:
                 files = "file" if self.gpu_waiting == 1 else "files"
                 waiting = f"{self.gpu_waiting} {files} waiting for another GPU · "
+            count, reasons = self.required_gpu_waiting
+            if count:
+                files = "file" if count == 1 else "files"
+                waiting += f"{count} {files} waiting for a GPU ({', '.join(reasons)}) · "
             return f"{self.library_prefix}{waiting}{completed}/{self.total_items} completed"
         check_label = self.handlers.check_label if self.handlers else "Checking existing previews…"
         return f"{self.library_prefix}{check_label} {completed}/{self.total_items}"
@@ -705,21 +722,25 @@ def _nodes_off(tracker: JobTracker, path: str) -> set[str]:
     return off
 
 
-def _forget_gpus_refused(tracker: JobTracker, path: str) -> None:
-    """Drop a finished file's refused GPUs: its queue scans (``_queue_head``) needn't reach past it any more.
+def _forget_gpu_waits(tracker: JobTracker, path: str) -> None:
+    """Drop a finished file's refused GPUs and its requirements: its queue scans (``_queue_head``) needn't reach past it
+    any more.
 
     Caller holds ``_trackers_lock``.
     """
     tracker.gpus_refused.pop(path, None)
     tracker.gpu_errors.pop(path, None)
     tracker.refused_keys.pop(path, None)
+    tracker.requirements.pop(path, None)
 
 
 def _queue_head(queue: deque, extra: int = 0) -> list:
     """Copy the first EXCLUDED_SCAN_LIMIT queued files, and ``extra`` more.
 
-    ``extra`` is the number of files waiting for another GPU (``JobTracker.gpus_refused``): they sit at the queue's
-    front, and without it enough of them would hide every file a free worker could take.
+    ``extra`` is the number of files waiting for another GPU (``JobTracker.gpus_refused``), which sit at the queue's
+    front, plus for a sweep (``JobDispatcher._first_free_file``) the files that require a GPU
+    (``JobTracker.requirements``), which can sit anywhere in it: without it enough of them would hide every file a
+    free worker could take.
 
     Checking threads append to the queue's right end without a lock, and even a copy made in C can be interrupted
     (a garbage collection running finalizers lets another thread in), raising "deque mutated during iteration". An
@@ -1132,6 +1153,9 @@ class JobDispatcher:
         for worker in self.worker_pool._snapshot_workers():
             # Read before check_completion frees the worker: once it's idle another assignment can replace it.
             canonical_path = worker.media_file
+            # The file as it was queued: progress on a file found on a sibling mount names that path in media_file, but
+            # its GPU waits and requirements are kept under the queued one.
+            queued_item = worker.current_item
             if not worker.check_completion():
                 continue
 
@@ -1167,7 +1191,7 @@ class JobDispatcher:
                     tracker.record_completion(success, worker.display_name, title, canonical_path=canonical_path)
                     with self._trackers_lock:
                         tracker.active_processing = max(0, tracker.active_processing - 1)
-                        _forget_gpus_refused(tracker, canonical_path)
+                        _forget_gpu_waits(tracker, queued_item.canonical_path if queued_item else canonical_path)
             else:
                 # No tracker for this item — just log
                 success = worker.last_task_succeeded()
@@ -1361,7 +1385,7 @@ class JobDispatcher:
         self.worker_pool.refresh_suspect_nodes()
         back_nodes = self._nodes_back_since_drop()
         with self._trackers_lock:
-            gpu_waits = any(t.gpus_refused for t in self._trackers.values())
+            gpu_waits = any(t.gpus_refused or t.requirements for t in self._trackers.values())
         try:
             self._assign_tasks_locked(stranded, back_nodes, self._frozen_jobs() if gpu_waits else frozenset())
         finally:
@@ -1412,7 +1436,9 @@ class JobDispatcher:
         (counted in ``active_processing`` until it is failed). A worker claimed for a file a cancel has since cleared
         off the queue is given back. A file a GPU couldn't run goes only to a worker on a GPU that hasn't failed it while
         one runs its kind (free, or busy on a job that isn't frozen), so it waits for that GPU and a later file takes the
-        free worker; once none does, any worker takes it.
+        free worker; once none does, any worker takes it. A file a routing rule says needs a GPU (``requirements``)
+        waits the same way for any GPU worker. A free CPU worker takes a later file meanwhile. Once no GPU worker the
+        file can go to runs its kind, any worker takes it.
 
         Args:
             tracker: The job.
@@ -1425,7 +1451,7 @@ class JobDispatcher:
             The claimed worker and the file, or None.
         """
         pool = self.worker_pool
-        if not tracker.excluded_nodes and not tracker.dropped_on and not tracker.gpus_refused:
+        if not (tracker.excluded_nodes or tracker.dropped_on or tracker.gpus_refused or tracker.requirements):
             worker = pool._find_available_worker(claim=True, kind=tracker.kind)
             if worker is None:
                 return None
@@ -1435,19 +1461,22 @@ class JobDispatcher:
                 return None
             return worker, item
         now = time.monotonic()
-        # Thousands of files can wait for one busy GPU, nearly all with the same GPUs refused, and this runs under both
-        # locks on every pass of the dispatch loop: a job without node limits sweeps past them in one go
+        # Thousands of files can wait for one busy GPU, nearly all with the same GPUs refused (or none), and this runs
+        # under both locks on every pass of the dispatch loop: a pass with a free worker sweeps past them in one go
         # (``_first_free_file``), skips the sweep while nothing that could free one has changed, and each answer below
         # is worked out once per pass, not once per file.
         any_node_limits = bool(tracker.excluded_nodes or tracker.dropped_on or tracker.start_waits)
-        sweep = bool(tracker.gpus_refused) and not any_node_limits
+        gpu_waits = bool(tracker.gpus_refused or tracker.requirements)
+        sweep = gpu_waits and pool._find_available_worker(kind=tracker.kind) is not None
+        if gpu_waits and not sweep and not any_node_limits:
+            return None  # no free worker for this kind at all
         state = (len(tracker.item_queue), tuple(worker.is_busy for worker in pool.workers))
-        if sweep:
-            if pool._find_available_worker(kind=tracker.kind) is None:
-                return None
-            if state == tracker.all_waiting_state and now - tracker.all_waiting_at < GPU_WAIT_RECHECK_S:
-                return None
-        head = _queue_head(tracker.item_queue, len(tracker.gpus_refused))
+        if sweep and state == tracker.all_waiting_state and now - tracker.all_waiting_at < GPU_WAIT_RECHECK_S:
+            return None
+        # A file that requires a GPU can sit anywhere in the queue, so a sweep reaches past every one of them. With no
+        # worker free, a job with node limits still looks at its head file by file: a file there may have no worker
+        # left that can run it.
+        head = _queue_head(tracker.item_queue, len(tracker.gpus_refused) + (len(tracker.requirements) if sweep else 0))
         start = 0
         if sweep:
             first_free = self._first_free_file(tracker, head, frozen_jobs)
@@ -1460,21 +1489,28 @@ class JobDispatcher:
         no_free_gpu: set[frozenset[str]] = set()
         for index, item in enumerate(itertools.islice(head, start, None), start):
             refused = tracker.gpus_refused.get(item.canonical_path) or {}
-            if refused and not any_node_limits and tracker.refused_keys.get(item.canonical_path) in no_free_gpu:
-                continue
+            requirement = tracker.requirements.get(item.canonical_path)
             excluded = tracker.excluded_nodes.get(item.canonical_path) or {}
             dropped_on = tracker.dropped_on.get(item.canonical_path)
             waits = tracker.start_waits.get(item.canonical_path) or {}
+            # A file without node limits of its own finds no free GPU when the last one with its refused GPUs didn't.
+            gpu_key = tracker.refused_keys.get(item.canonical_path) if refused else _ANY_GPU if requirement else None
+            if gpu_key is not None and gpu_key in no_free_gpu and not (excluded or waits or dropped_on is not None):
+                continue
             waiting = {node for node, wait in waits.items() if wait.retry_at > now}
             skip_gpus: dict[str, str] = {}
+            requires: Collection[str] = ()
+            gpu_bound = False
             node_limits = False
-            if refused:
+            if refused or requirement:
                 off = frozenset(_nodes_off(tracker, item.canonical_path))
                 key = (frozenset(refused), off)
                 if key not in other_gpu_runs:
                     other_gpu_runs[key] = pool.runs_kind_on_other_gpu(tracker.kind, refused, off, frozen_jobs)
                 if other_gpu_runs[key]:
                     skip_gpus = refused
+                    requires = requirement.capabilities if requirement else ()
+                    gpu_bound = True
                     node_limits = bool(off)
                     if not off and key[0] in no_free_gpu:
                         continue
@@ -1482,7 +1518,11 @@ class JobDispatcher:
             if dropped_on is not None:
                 avoid = {*excluded, dropped_on}
                 worker = pool._find_available_worker(
-                    claim=True, kind=tracker.kind, exclude_nodes=avoid | waiting, exclude_gpus=skip_gpus
+                    claim=True,
+                    kind=tracker.kind,
+                    exclude_nodes=avoid | waiting,
+                    exclude_gpus=skip_gpus,
+                    requires=requires,
                 )
                 back = dropped_on in back_nodes and tracker.stays_off.get(item.canonical_path) != dropped_on
                 if worker is None and (
@@ -1496,7 +1536,11 @@ class JobDispatcher:
                     continue
             if worker is None:
                 worker = pool._find_available_worker(
-                    claim=True, kind=tracker.kind, exclude_nodes={*excluded, *waiting}, exclude_gpus=skip_gpus
+                    claim=True,
+                    kind=tracker.kind,
+                    exclude_nodes={*excluded, *waiting},
+                    exclude_gpus=skip_gpus,
+                    requires=requires,
                 )
             if worker is not None:
                 if _take_queued(tracker, index, item) is None:
@@ -1507,7 +1551,7 @@ class JobDispatcher:
                 else:
                     tracker.sent_back.pop(item.canonical_path, None)
                 return worker, item
-            if skip_gpus:
+            if gpu_bound:
                 if not node_limits:
                     no_free_gpu.add(frozenset(skip_gpus))
                 continue
@@ -1524,10 +1568,11 @@ class JobDispatcher:
     def _first_free_file(self, tracker: JobTracker, head: list, frozen_jobs: Collection[str]) -> int | None:
         """Where ``head``'s first file that doesn't wait for a busy GPU is, or None when every file does.
 
-        For a job without node limits: whether a waiting file can go anywhere then turns on its refused GPUs alone, so
-        each distinct set is asked about once and the files are swept at C speed rather than one by one. A file missing
-        from ``refused_keys`` counts as free here; :meth:`_claim_worker`'s per-file pass decides it. Caller holds both
-        locks.
+        Whether a waiting file can go anywhere then turns on its refused GPUs alone (none for a file that requires a GPU
+        no GPU has refused, which waits for any GPU), so each distinct set is asked about once and the files are swept in
+        one go rather than one by one. A file with node limits of its own may wait for a GPU on a node it can't go to,
+        or for none, so it counts as free here, as does a refused file missing from ``refused_keys``:
+        :meth:`_claim_worker`'s per-file pass decides those. Caller holds both locks.
 
         Args:
             tracker: The job.
@@ -1538,13 +1583,21 @@ class JobDispatcher:
             The index into ``head``, or None.
         """
         pool = self.worker_pool
-        keys = list(map(tracker.refused_keys.get, map(operator.attrgetter("canonical_path"), head)))
+        paths = list(map(operator.attrgetter("canonical_path"), head))
+        keys = list(map(tracker.refused_keys.get, paths))
+        required = tracker.requirements
+        limited = {*tracker.excluded_nodes, *tracker.dropped_on, *tracker.start_waits}
+        if required or limited:
+            keys = [
+                None if path in limited else _ANY_GPU if key is None and path in required else key
+                for key, path in zip(keys, paths, strict=True)
+            ]
         busy_gpus = {
             key
             for key in set(keys)
             if key is not None
             and pool.runs_kind_on_other_gpu(tracker.kind, key, (), frozen_jobs)
-            and pool._find_available_worker(kind=tracker.kind, exclude_gpus=key) is None
+            and pool._find_available_worker(kind=tracker.kind, exclude_gpus=key, requires=(GPU,)) is None
         }
         free = map(operator.not_, map(busy_gpus.__contains__, keys))
         return next(itertools.compress(itertools.count(), free), None)
@@ -1594,6 +1647,8 @@ class JobDispatcher:
                     if item.canonical_path in tracker.gpus_refused:
                         tracker.gpu_waiting = max(0, tracker.gpu_waiting - 1)
                     self._stamp_pick(tracker)
+                    requirement = tracker.requirements.get(item.canonical_path)
+                    matched = requirement is not None and requirement.capabilities <= worker.capabilities
                     progress_callback = partial(self.worker_pool._update_worker_progress, worker)
                     try:
                         worker.assign_task(
@@ -1616,6 +1671,7 @@ class JobDispatcher:
                                 tracker.kind,
                                 exclude_nodes=frozenset(_nodes_off(tracker, item.canonical_path)),
                             ),
+                            routing_reason=requirement.reason if matched and requirement else "",
                         )
                     except Exception as exc:
                         tracker.active_processing -= 1
@@ -1627,6 +1683,37 @@ class JobDispatcher:
                         tracker.job_id[:8],
                         worker.display_name,
                     )
+            if requirement is not None:
+                self._log_routing(tracker, worker, item, requirement, matched)
+
+    def _log_routing(self, tracker: JobTracker, worker: Worker, item, requirement: Requirement, matched: bool) -> None:
+        """Log where a file a routing rule matched went, in its job's log. Called without the dispatcher's locks.
+
+        DEBUG when its worker offers what it needs; INFO when it went to another one because none was available.
+
+        Args:
+            tracker: The file's job.
+            worker: The worker it went to.
+            item: The :class:`ProcessableItem`.
+            requirement: What its labels need.
+            matched: The worker offers it.
+        """
+        title = getattr(item, "title", "") or item.canonical_path
+        try:
+            with logging_for_job(tracker.job_id):
+                if matched:
+                    logger.debug(
+                        "{} goes to {}, as its routing rule asks ({})", title, worker.display_name, requirement.reason
+                    )
+                else:
+                    logger.info(
+                        "{} matches a routing rule ({}), but no GPU worker is available. {} takes it.",
+                        title,
+                        requirement.reason,
+                        worker.display_name,
+                    )
+        except Exception as exc:  # a log line must never stop files being assigned
+            logger.debug("Dispatcher: couldn't log where {} went: {}", item.canonical_path, exc)
 
     def _fail_unstarted_item(self, worker: Worker, tracker: JobTracker, item, exc: Exception) -> None:
         """Count an item its worker couldn't start as failed, with its Files-panel row, and give the worker back.
@@ -1671,7 +1758,7 @@ class JobDispatcher:
 
         failed = ProcessingResult.FAILED.value
         with self._trackers_lock:
-            _forget_gpus_refused(tracker, item.canonical_path)
+            _forget_gpu_waits(tracker, item.canonical_path)
         with tracker._counts_lock:
             tracker.outcome_counts[failed] = tracker.outcome_counts.get(failed, 0) + 1
         try:
@@ -1872,9 +1959,9 @@ class JobDispatcher:
                 )
 
                 if result.status is MultiServerStatus.NEEDS_GENERATION:
-                    # Guard: never re-queue into a job cancel() already drained.
-                    if not tracker.is_cancelled() and not tracker.done_event.is_set():
-                        tracker.item_queue.append(item)
+                    self._queue_for_generation(
+                        tracker, item, getattr(result, "canonical_path", "") or item.canonical_path
+                    )
                 elif not tracker.done_event.is_set():
                     tracker.record_check_result(item, result)
             except Exception as exc:
@@ -1893,9 +1980,42 @@ class JobDispatcher:
                     type(exc).__name__,
                     exc,
                 )
-                if not tracker.is_cancelled() and not tracker.done_event.is_set():
-                    tracker.item_queue.append(item)
+                self._queue_for_generation(tracker, item, item.canonical_path)
                 return
+
+    def _queue_for_generation(self, tracker: JobTracker, item, probe_path: str) -> None:
+        """Queue a checked preview file for the processing workers, unless its job was cancelled or finished meanwhile.
+
+        The job's routing rules check the file first (``jobs.routing.file_requirement``). That reads the file, so it
+        runs here on the checking thread: the dispatch loop does no file I/O. A matched file is logged with its reason
+        and queued with its requirement under the locks the dispatch loop takes files under. So the loop never sees
+        it without its requirement, and a cancel that cleared the queue meanwhile keeps it out. Nothing after the
+        append can raise: ``_run_check`` queues the file again when this raises.
+
+        Args:
+            tracker: The file's job.
+            item: The :class:`ProcessableItem`.
+            probe_path: Where the file is: the check's path, which a sibling mount the file moved to can change.
+        """
+        requirement = file_requirement(probe_path, tracker.config)
+        # Guard: never re-queue into a job cancel() already drained.
+        if tracker.is_cancelled() or tracker.done_event.is_set():
+            return
+        if requirement is None:
+            tracker.item_queue.append(item)
+            return
+        logger.info(
+            "{} matches a routing rule ({}), so it goes to a GPU worker",
+            getattr(item, "title", "") or item.canonical_path,
+            requirement.reason,
+        )
+        # The counts lock is what JobTracker.cancel clears the queue under; it's taken after _trackers_lock, as in
+        # _take_queued.
+        with self._trackers_lock, tracker._counts_lock:
+            if tracker.cancelled or tracker.done_event.is_set():
+                return
+            tracker.requirements[item.canonical_path] = requirement
+            tracker.item_queue.append(item)
 
     def _run_custom_check(self, tracker: JobTracker, item) -> None:
         """Check stage for a non-preview kind: terminal outcome → record; None or an exception → worker queue.
@@ -1983,14 +2103,23 @@ class JobDispatcher:
             active = [t for t in self._trackers.values() if not t.done_event.is_set()]
         now = time.monotonic()
         for tracker in active:
-            # Only nodes fill excluded_nodes and dropped_on, and only GPUs that failed a file fill gpus_refused.
-            if not tracker.excluded_nodes and not tracker.dropped_on and not tracker.gpus_refused:
+            # Only nodes fill excluded_nodes and dropped_on, only GPUs that failed a file fill gpus_refused, and only the
+            # routing rules a job's settings switch on fill requirements.
+            if not (tracker.excluded_nodes or tracker.dropped_on or tracker.gpus_refused or tracker.requirements):
                 tracker.node_wait = ""
                 tracker.gpu_waiting = 0
+                tracker.required_gpu_waiting = (0, ())
             elif now - tracker.node_wait_checked_at >= NODE_WAIT_CHECK_S:
                 tracker.node_wait_checked_at = now
                 tracker.node_wait = self._node_wait(tracker)
                 tracker.gpu_waiting = self._gpu_waiting(tracker)
+                was_waiting = tracker.required_gpu_waiting[0]
+                tracker.required_gpu_waiting = self._required_gpu_waiting(tracker)
+                count, reasons = tracker.required_gpu_waiting
+                if count and not was_waiting:
+                    with logging_for_job(tracker.job_id):
+                        files = "1 file is" if count == 1 else f"{count} files are"
+                        logger.debug("{} waiting for a GPU worker ({})", files, ", ".join(reasons))
             tracker.emit_progress(min_interval=3.0)
 
     def _frozen_jobs(self) -> frozenset[str]:
@@ -2027,6 +2156,36 @@ class JobDispatcher:
                 return 0
             head = _queue_head(tracker.item_queue, len(tracker.gpus_refused))
             return sum(map(tracker.gpus_refused.__contains__, map(operator.attrgetter("canonical_path"), head)))
+
+    def _required_gpu_waiting(self, tracker: JobTracker) -> tuple[int, tuple[str, ...]]:
+        """How many of the job's queued files require a GPU while a GPU worker runs their kind, and their reasons.
+
+        A file that a GPU also refused is counted as waiting for another GPU instead (:meth:`_gpu_waiting`). The whole
+        queue is read, once per ``NODE_WAIT_CHECK_S``: these files can sit anywhere in it.
+
+        Args:
+            tracker: The job.
+
+        Returns:
+            The count, and each distinct reason in queue order.
+        """
+        with self._trackers_lock:
+            if not tracker.requirements:
+                return 0, ()
+            required, refused = tracker.requirements, tracker.gpus_refused
+            reasons = [
+                required[path].reason
+                for path in map(
+                    operator.attrgetter("canonical_path"), _queue_head(tracker.item_queue, len(tracker.item_queue))
+                )
+                if path in required and path not in refused
+            ]
+        # Asked of the pool after the dispatcher's lock is released, as _node_wait asks it.
+        if not reasons or not self.worker_pool.runs_kind_on_other_gpu(
+            tracker.kind, (), frozen_jobs=self._frozen_jobs()
+        ):
+            return 0, ()
+        return len(reasons), tuple(dict.fromkeys(reasons))
 
     def _node_wait(self, tracker: JobTracker) -> str:
         """Why the job's queued files all wait for workers that are away, or ``""`` when any of them can run now.
@@ -2149,6 +2308,7 @@ class JobDispatcher:
                 task_ended_at = getattr(worker, "task_ended_at", 0.0)
                 fallback_title = worker.media_title or ""
                 fallback_reason = getattr(worker, "fallback_reason", None)
+                routing_reason = (getattr(worker, "routing_reason", "") or "") if has_task else ""
                 member_id = worker.member_id
                 retiring = worker._pending_removal
                 node_id = worker_node_id(worker)
@@ -2203,6 +2363,8 @@ class JobDispatcher:
                     # The fallback file's title outlives is_busy: a quick CPU rerun ends before the next poll.
                     "fallback_title": fallback_title if fallback_active else "",
                     "fallback_until": time.time() + shown_for if fallback_active and not is_busy else None,
+                    # Why a routing rule sent the file to this worker, for the card's "Needs a GPU" pill.
+                    "routing_reason": routing_reason,
                     # ffmpeg_started + current_phase drive the UI's pre-FFmpeg branch; without them
                     # the card renders "Working…" and hides the speed/ETA chips for the whole run.
                     "ffmpeg_started": ffmpeg_started,

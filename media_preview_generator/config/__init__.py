@@ -111,6 +111,10 @@ class Config:
     # Valid values: reinhard, mobius, hable, clip, gamma, linear
     tonemap_algorithm: str = "hable"
 
+    # The routing rules switched on, by rule id (jobs.routing): a rule labels the preview files it matches with what
+    # they need from their worker. A rule missing here is off.
+    routing_rules: dict[str, bool] = field(default_factory=dict)
+
     # Per-GPU configuration: list of dicts with keys
     # device, name, type, enabled, workers, ffmpeg_threads
     gpu_config: list[dict[str, Any]] = field(default_factory=list)
@@ -517,6 +521,11 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
             plex_bif_frame_interval = get_value("__never_set__", "PLEX_BIF_FRAME_INTERVAL", 10, int)
     thumbnail_quality = get_value("thumbnail_quality", "THUMBNAIL_QUALITY", 4, int)
     tonemap_algorithm = get_value("tonemap_algorithm", "TONEMAP_ALGORITHM", "hable", str).strip().lower()
+    # Settings-only, with no env var to seed it: a rule is on only when it is saved as true.
+    saved_rules = ui_settings.get("routing_rules")
+    routing_rules = (
+        {str(rule): enabled is True for rule, enabled in saved_rules.items()} if isinstance(saved_rules, dict) else {}
+    )
     regenerate_thumbnails = get_value("regenerate_thumbnails", "REGENERATE_THUMBNAILS", False, bool)
 
     sort_by_raw = get_value("sort_by", "SORT_BY", "newest", str)
@@ -707,6 +716,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
         plex_bif_frame_interval=plex_bif_frame_interval,
         thumbnail_quality=thumbnail_quality,
         tonemap_algorithm=tonemap_algorithm,
+        routing_rules=routing_rules,
         regenerate_thumbnails=regenerate_thumbnails,
         sort_by=sort_by,
         gpu_threads=gpu_threads,
@@ -737,6 +747,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
     logger.debug("PLEX_BIF_FRAME_INTERVAL = {}", config.plex_bif_frame_interval)
     logger.debug("THUMBNAIL_QUALITY = {}", config.thumbnail_quality)
     logger.debug("TONEMAP_ALGORITHM = {}", config.tonemap_algorithm)
+    logger.debug("routing_rules = {}", config.routing_rules)
     logger.debug("PLEX_CONFIG_FOLDER = {}", config.plex_config_folder)
     logger.debug("TMP_FOLDER = {}", config.tmp_folder)
     logger.debug("PLEX_TIMEOUT = {}", config.plex_timeout)
