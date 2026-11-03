@@ -2774,6 +2774,59 @@ class PlexServer(MediaServer):
         logger.info("Set {} to never on {!r}", PLEX_LOUDNESS_PREF, self.name)
         return None
 
+    def set_library_loudness_analysis_off(self, library_ids: Collection[str]) -> str | None:
+        """Turn Plex's per-library "Enable Loudness Analysis" off for the given movie and TV libraries.
+
+        Leaves the server-wide schedule alone, so music and every other library keep Plex's analysis.
+        ``PUT /library/sections/{id}/prefs?enableLoudnessAnalysis=0`` per library.
+
+        Args:
+            library_ids: Section keys.
+
+        Returns:
+            None on success, otherwise a plain reason naming the library that failed.
+        """
+        from urllib.parse import quote
+
+        from ..plex_client import retry_plex_call
+        from . import plex_scheduled_jobs
+
+        try:
+            plex = self._connect()
+            sections = retry_plex_call(plex.library.sections)
+        except Exception as exc:
+            return f"couldn't list Plex's libraries: {redact_secrets(str(exc))}"
+        by_key = {str(getattr(s, "key", "") or ""): s for s in sections}
+        pref = next(job.library_pref for job in plex_scheduled_jobs.PLEX_JOBS if job.key == "loudness")
+        try:
+            for library_id in dict.fromkeys(str(i) for i in library_ids):
+                section = by_key.get(library_id)
+                if section is None:
+                    return f"library {library_id} not found on this Plex"
+                title = str(getattr(section, "title", "") or library_id)
+                if str(getattr(section, "type", "") or "") not in ("movie", "show"):
+                    return f"{title} is not a movie or TV library"
+                try:
+                    plex.query(
+                        f"/library/sections/{quote(library_id, safe='')}/prefs?{pref}=0", method=plex._session.put
+                    )
+                except Exception as exc:
+                    error = redact_secrets(str(exc))
+                    logger.warning(
+                        "Could not turn off Plex's loudness analysis in library {} ({}) on {!r}: {}",
+                        library_id,
+                        title,
+                        self.name,
+                        error,
+                    )
+                    return f"{title}: {error}"
+                logger.info(
+                    "Turned off Plex's loudness analysis in library {} ({}) on {!r}", library_id, title, self.name
+                )
+            return None
+        finally:
+            plex_scheduled_jobs.invalidate(self.id)
+
     def set_jobs_for_previews(self, prefs: dict[str, str]) -> str | None:
         """Set Plex's server-wide job settings (``{pref id: value}``) in one ``PUT /:/prefs``.
 

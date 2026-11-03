@@ -163,3 +163,75 @@ def test_plex_error_masks_credentials_in_response_and_log(client, seed, conn):
     assert response.get_json() == {"ok": False, "error": "Failed /:/prefs?X-Plex-Token=****"}
     assert "private-review-token" not in "\n".join(messages)
     conn.query.assert_called_once_with("/:/prefs?LoudnessAnalysisBehavior=never", method=conn._session.put)
+
+
+LIB_URL = "/api/servers/plex-1/plex-loudness-library-analysis"
+
+
+@pytest.fixture
+def live_off(monkeypatch):
+    from media_preview_generator.web.routes import api_servers
+
+    live = MagicMock()
+    live.set_library_loudness_analysis_off.return_value = None
+    monkeypatch.setattr(api_servers, "_instantiate_for_probe", lambda cfg: live)
+    return live
+
+
+def test_library_off_turns_off_the_chosen_libraries(client, seed, live_off):  # noqa: F811
+    seed(_loudness_plex())
+    resp = client.post(LIB_URL, json={"library_ids": ["1"]})
+    assert resp.get_json() == {"ok": True, "error": ""}
+    live_off.set_library_loudness_analysis_off.assert_called_once_with(["1"])
+
+
+@pytest.mark.parametrize("body", [{}, {"library_ids": []}, {"library_ids": "1"}, {"library_ids": [1]}])
+def test_library_off_needs_a_nonempty_list_of_ids(client, seed, live_off, body):  # noqa: F811
+    seed(_loudness_plex())
+    assert client.post(LIB_URL, json=body).status_code == 400
+    live_off.set_library_loudness_analysis_off.assert_not_called()
+
+
+def test_library_off_refuses_ids_outside_the_selection(client, seed, live_off):  # noqa: F811
+    seed({**_loudness_plex(), "loudness": {"enabled": True, "library_ids": ["1"]}})
+    resp = client.post(LIB_URL, json={"library_ids": ["1", "2"]})
+    assert resp.status_code == 400
+    live_off.set_library_loudness_analysis_off.assert_not_called()
+
+
+def test_library_off_refuses_when_loudness_is_off(client, seed, live_off):  # noqa: F811
+    seed(_loudness_plex(enabled=False))
+    resp = client.post(LIB_URL, json={"library_ids": ["1"]})
+    assert resp.status_code == 400 and "Loudness is off" in resp.get_json()["error"]
+    live_off.set_library_loudness_analysis_off.assert_not_called()
+
+
+def test_library_off_reports_plexs_refusal(client, seed, live_off):  # noqa: F811
+    seed(_loudness_plex())
+    live_off.set_library_loudness_analysis_off.return_value = "Filmer: (401) unauthorized"
+    assert client.post(LIB_URL, json={"library_ids": ["1"]}).get_json() == {
+        "ok": False,
+        "error": "Filmer: (401) unauthorized",
+    }
+
+
+def test_library_off_needs_a_ready_writer(client, seed, live_off, ready_writer):  # noqa: F811
+    seed(_loudness_plex())
+    ready_writer.return_value = CapabilityReport(next(c for c in Capability if c is not Capability.READY), "Not ready")
+    assert client.post(LIB_URL, json={"library_ids": ["1"]}).status_code == 409
+    live_off.set_library_loudness_analysis_off.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("server", "url", "status"),
+    [
+        ({**JELLYFIN, "type": "emby"}, LIB_URL, 400),
+        (JELLYFIN, LIB_URL, 400),
+        (_loudness_plex(), "/api/servers/nope/plex-loudness-library-analysis", 404),
+    ],
+    ids=["emby", "jellyfin", "unknown-id"],
+)
+def test_library_off_refuses_non_plex_and_unknown_servers(client, seed, live_off, server, url, status):  # noqa: F811
+    seed(server)
+    assert client.post(url, json={"library_ids": ["1"]}).status_code == status
+    live_off.set_library_loudness_analysis_off.assert_not_called()

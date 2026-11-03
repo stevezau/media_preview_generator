@@ -2023,3 +2023,73 @@ def get_output_status(server_id: str):
             "missing_paths": missing,
         }
     )
+
+
+@api.route("/servers/<server_id>/plex-loudness-library-analysis", methods=["POST"])
+@setup_or_auth_required
+def set_plex_loudness_library_analysis_off(server_id: str):
+    """Turn Plex's per-library loudness analysis off in this app's loudness libraries (Setup Health's fix).
+
+    Body: ``{"library_ids": [...]}``, each one of the server's selected loudness libraries. Same guards as
+    :func:`set_plex_loudness_analysis_never`. Returns ``{"ok": bool, "error": str}``.
+    """
+    from ...loudness.guard import loudness_capability
+    from ...loudness.settings import load_server_loudness, loudness_libraries
+    from ...utils import redact_secrets
+
+    body = request.get_json(silent=True) or {}
+    library_ids = body.get("library_ids")
+    if (
+        not isinstance(library_ids, list)
+        or not library_ids
+        or not all(isinstance(i, str) and i.strip() for i in library_ids)
+    ):
+        return jsonify({"ok": False, "error": "library_ids must be a non-empty list of library ids"}), 400
+
+    cfg, refused = _plex_marker_target(server_id)
+    if refused is not None:
+        return refused
+    cfg = cast(ServerConfig, cfg)
+    if not load_server_loudness(cfg).enabled:
+        return jsonify({"ok": False, "error": "Loudness is off for this server"}), 400
+    selected = loudness_libraries(cfg)
+    if not selected:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Choose at least one movie or TV library for this app's loudness analysis first",
+            }
+        ), 409
+    if not set(library_ids) <= {str(lib.id) for lib in selected}:
+        return jsonify({"ok": False, "error": "library_ids must be libraries this app's loudness analysis uses"}), 400
+    from ..settings_manager import get_settings_manager
+    from .api_worker_groups import future_job_capacity
+
+    if not future_job_capacity(get_settings_manager(), "loudness"):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Configure a CPU worker group for Loudness with hours outside global quiet hours first",
+            }
+        ), 409
+    live = _instantiate_for_probe(cfg)
+    if live is None or not hasattr(live, "set_library_loudness_analysis_off"):
+        return jsonify({"ok": False, "error": "could not instantiate server client"}), 400
+    try:
+        report = loudness_capability(live, cfg)
+    except Exception as exc:
+        logger.debug("Loudness readiness probe failed for {} ({})", cfg.id, type(exc).__name__)
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Could not check loudness analysis. Check the Plex connection and try Setup Health again.",
+            }
+        ), 409
+    if not report.ready:
+        return jsonify({"ok": False, "error": redact_secrets(report.message)}), 409
+    try:
+        error = live.set_library_loudness_analysis_off(library_ids)
+    except Exception as exc:
+        logger.warning("Turning off Plex's loudness analysis per library on {!r} raised: {}", cfg.name or cfg.id, exc)
+        return jsonify({"ok": False, "error": redact_secrets(str(exc))}), 200
+    return jsonify({"ok": not error, "error": error or ""}), 200

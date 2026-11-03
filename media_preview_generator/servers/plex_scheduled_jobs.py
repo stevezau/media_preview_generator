@@ -84,14 +84,19 @@ def _settings_from_prefs(prefs: dict[str, Any], libraries: dict[str, dict[str, b
     )
 
 
-def read_library_prefs(server: PlexServer) -> dict[str, dict[str, bool]]:
-    """Each movie and TV library's per-library job switches; raises when Plex can't be read."""
+def read_library_prefs(server: PlexServer, sections: list[Any] | None = None) -> dict[str, dict[str, bool]]:
+    """Each movie and TV library's per-library job switches; raises when Plex can't be read.
+
+    ``sections`` are the server's library sections when the caller already listed them.
+    """
     from ..plex_client import retry_plex_call
     from .plex import _pref_bool
 
     wanted = {job.library_pref for job in PLEX_JOBS if job.library_pref}
     libraries: dict[str, dict[str, bool]] = {}
-    for section in retry_plex_call(server._connect().library.sections, max_retries=0):
+    if sections is None:
+        sections = retry_plex_call(server._connect().library.sections, max_retries=0)
+    for section in sections:
         if str(getattr(section, "type", "") or "") not in ("movie", "show"):
             continue
         switches: dict[str, bool] = {}

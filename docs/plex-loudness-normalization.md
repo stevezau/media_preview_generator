@@ -73,15 +73,24 @@ without changing it or starting a job. The job banner identifies **Plex loudness
 Plex keeps analysing on its own schedule too. The app preserves complete native measurements it finds before
 publication. Once the item's completion mark exists, Plex's non-forced analysis skips the completed item.
 
-Setup Health recommends setting Plex's own **Analyze audio tracks for loudness** to **Never**, because while it's on
-Plex repeats this app's work on the Plex machine's CPU. Keeping it on is still valid if Plex serves music or video
-libraries this app does not cover; dismiss the recommendation in that case.
+Setup Health checks whether Plex also analyses loudness in the libraries this app measures, because there Plex
+repeats this app's work on the Plex machine's CPU. The check passes when Plex's server-wide **Analyze audio tracks for
+loudness** is **Never**, or when **Enable Loudness Analysis** is off in each library this app measures (the library's
+**Edit → Advanced** settings in Plex).
 
-When this app has eligible video libraries selected, its writer is ready, and a CPU device has usable loudness hours, **Set to Never** is a
-separately confirmed action. It changes Plex's server-wide schedule, including music and unselected video libraries;
-it does not enable this app, extend its library selection or erase existing measurements. Keep native analysis on
-if those other libraries need it. The app checks its selection, writer readiness and configured CPU eligibility again when the action runs. Busy
-workers do not prevent this action; absent or unusable CPU hours do.
+The fix depends on what else Plex serves:
+
+- **Plex has other libraries (music, or movie and TV libraries this app doesn't measure):** **Turn off in this app's
+  libraries** turns off Enable Loudness Analysis in only those libraries. Plex keeps analysing the others, so music
+  loudness leveling and smart transitions keep working.
+- **This app measures every movie and TV library and there's no music library:** **Set to Never** changes Plex's
+  server-wide schedule.
+
+Either fix is confirmed separately and is available when this app has eligible video libraries selected, its writer is
+ready, and a CPU device has usable loudness hours. Neither enables this app, extends its library selection or erases
+existing measurements, and Plex keeps using this app's measurements for playback leveling with its own analysis off.
+The app checks its selection, writer readiness and configured CPU eligibility again when the action runs. Busy
+workers do not prevent it; absent or unusable CPU hours do.
 The control is excluded from bulk fixes, and installing or upgrading the app never changes this Plex preference.
 
 ## What it runs

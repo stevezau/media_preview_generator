@@ -3166,6 +3166,13 @@
                 const r = await api('POST', `/api/servers/${encoded}/plex-loudness-analysis`, {});
                 return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
             }
+            case 'set_plex_loudness_library_off': {
+                // Plex's per-library loudness analysis off in this app's libraries only.
+                const r = await api('POST', `/api/servers/${encoded}/plex-loudness-library-analysis`, {
+                    library_ids: Array.isArray(args.library_ids) ? args.library_ids : [],
+                });
+                return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
+            }
             case 'set_plex_jobs_for_previews': {
                 // Plex's scheduled jobs to the values that let new previews show without waiting for its window.
                 const r = await api('POST', `/api/servers/${encoded}/plex-scheduled-jobs`, {});

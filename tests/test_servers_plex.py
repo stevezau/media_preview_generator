@@ -2251,6 +2251,35 @@ class TestPlexMarkerHelpers:
             == "(400) bad_request"
         )
 
+    def test_library_loudness_off_writes_each_librarys_switch_and_forgets_cached_settings(self, plex_server_under_test):
+        from media_preview_generator.servers import plex_scheduled_jobs
+
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [self._section("1", "movie"), self._section("2", "show")]
+        with patch.object(plex_scheduled_jobs, "invalidate") as invalidate:
+            assert plex_server_under_test.set_library_loudness_analysis_off(["1", "2"]) is None
+        assert [c.args for c in conn.query.call_args_list] == [
+            ("/library/sections/1/prefs?enableLoudnessAnalysis=0",),
+            ("/library/sections/2/prefs?enableLoudnessAnalysis=0",),
+        ]
+        assert all(c.kwargs == {"method": conn._session.put} for c in conn.query.call_args_list)
+        invalidate.assert_called_once_with(plex_server_under_test.id)
+
+    def test_library_loudness_off_refuses_a_music_library_and_names_it(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [self._section("5", "artist")]
+        assert (
+            plex_server_under_test.set_library_loudness_analysis_off(["5"]) == "Library 5 is not a movie or TV library"
+        )
+        conn.query.assert_not_called()
+
+    def test_library_loudness_off_names_the_library_plex_refused_and_masks_tokens(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [self._section("1", "movie")]
+        conn.query.side_effect = RuntimeError("(401) /prefs?X-Plex-Token=secret-token")
+        error = plex_server_under_test.set_library_loudness_analysis_off(["1"])
+        assert error == "Library 1: (401) /prefs?X-Plex-Token=****"
+
     def test_nothing_can_turn_a_librarys_markers_off_any_more(self, plex_server_under_test):
         # Off hides every skip marker in the library, ours included (proven on production 2026-09-24).
         assert not hasattr(plex_server_under_test, "turn_off_library_marker_detection")
