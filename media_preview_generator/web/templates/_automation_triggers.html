@@ -560,7 +560,11 @@ async function saveWebhookSettings() {
         payload.webhook_secret = secretVal;
     }
 
-    await apiPost('/api/settings', payload);
+    const result = await apiPost('/api/settings', payload);
+    const reregistered = (result && result.plex_webhooks_reregistered) || [];
+    if (reregistered.length) {
+        showToast('Plex webhook updated', 'Re-registered on plex.tv with the new secret: ' + reregistered.join(', ') + '.', 'info');
+    }
 }
 
 function copyUrl(elementId) {

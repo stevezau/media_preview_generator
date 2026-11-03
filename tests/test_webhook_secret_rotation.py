@@ -21,10 +21,12 @@ This file pins:
      doesn't block the others or fail the settings save itself
   5. Servers without webhook_public_url are skipped (nothing to re-register)
   6. Servers without an auth token are skipped
+  7. A webhook the user unregistered stays unregistered (#438)
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -68,6 +70,28 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
     return create_app(config_dir=str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def plex_tv_webhooks():
+    """The webhooks plex.tv lists per Plex token: every test URL, unless a test says otherwise. Never reaches plex.tv."""
+    listed = {
+        "plex-tok": [
+            "http://app:8080/api/webhooks/plex?token=old",
+            "http://app:8080/api/webhooks/plex-b?token=old",
+            "http://app:8080/api/webhooks/plex-live?token=old",
+        ],
+        "other-tok": ["http://app:8080/api/webhooks/plex-b?token=old"],
+        "broken-tok": ["http://app:8080/api/webhooks/plex?token=old"],
+    }
+
+    def account(token):
+        if isinstance(listed.get(token), Exception):
+            raise listed[token]
+        return SimpleNamespace(webhooks=lambda: list(listed.get(token, [])))
+
+    with patch("media_preview_generator.web.plex_webhook_registration._account", side_effect=account):
+        yield listed
 
 
 def _seed_servers(media_servers: list[dict]) -> None:
@@ -186,13 +210,13 @@ class TestReregisterAfterSecretRotation:
         must NOT block the others. Each server is best-effort.
         """
         with app.app_context():
-            _seed_servers([_plex_entry("plex-broken"), _plex_entry("plex-healthy")])
+            _seed_servers([_plex_entry("plex-broken", token="broken-tok"), _plex_entry("plex-healthy")])
 
-            call_count = {"n": 0}
+            attempted: list[str] = []
 
             def maybe_fail(token, url, *, auth_token=None, server_id=None):
-                call_count["n"] += 1
-                if server_id == "plex-broken":
+                attempted.append(token)
+                if token == "broken-tok":
                     raise RuntimeError("network unreachable")
 
             with (
@@ -206,12 +230,63 @@ class TestReregisterAfterSecretRotation:
                 ),
             ):
                 # Must NOT raise — best-effort per server.
-                _reregister_plex_webhooks_after_secret_rotation(get_settings_manager())
+                reregistered = _reregister_plex_webhooks_after_secret_rotation(get_settings_manager())
 
-        assert call_count["n"] == 2, (
-            f"Both servers must be ATTEMPTED even if one fails; got {call_count['n']} attempts. "
+        assert attempted == ["broken-tok", "plex-tok"], (
+            f"Both servers must be ATTEMPTED even if one fails; got {attempted}. "
             f"A regression that bailed on first failure would leave plex-healthy with the old token."
         )
+        assert reregistered == ["Plex plex-healthy"]
+
+    def test_unregistered_webhook_stays_unregistered(self, app, plex_tv_webhooks):
+        """Unregister leaves webhook_public_url on the card; rotation must not put the webhook back (#438)."""
+        plex_tv_webhooks["removed-tok"] = []  # the user removed it on plex.tv
+        with app.app_context():
+            _seed_servers(
+                [
+                    _plex_entry("plex-removed", token="removed-tok"),
+                    _plex_entry("plex-live", public_url="http://app:8080/api/webhooks/plex-live"),
+                ]
+            )
+
+            with (
+                patch("media_preview_generator.web.plex_webhook_registration.register") as mock_register,
+                patch(
+                    "media_preview_generator.web.routes.api_plex_webhook._plex_webhook_auth_token",
+                    return_value="rotated-token",
+                ),
+            ):
+                reregistered = _reregister_plex_webhooks_after_secret_rotation(get_settings_manager())
+
+        mock_register.assert_called_once_with(
+            "plex-tok", "http://app:8080/api/webhooks/plex-live", auth_token="rotated-token"
+        )
+        assert reregistered == ["Plex plex-live"]
+
+    def test_plex_tv_lookup_failure_warns_instead_of_reading_as_unregistered(self, app, plex_tv_webhooks):
+        """A plex.tv outage mid-rotation must reach the manual re-register warning, not a quiet skip."""
+        from media_preview_generator.web.plex_webhook_registration import PlexWebhookError
+
+        plex_tv_webhooks["plex-tok"] = PlexWebhookError("Failed to list Plex webhooks: timeout", reason="unknown")
+        warnings: list[str] = []
+        with app.app_context():
+            _seed_servers([_plex_entry("plex-a")])
+            with (
+                patch("media_preview_generator.web.plex_webhook_registration.register") as mock_register,
+                patch(
+                    "media_preview_generator.web.routes.api_plex_webhook._plex_webhook_auth_token",
+                    return_value="rotated-token",
+                ),
+                patch(
+                    "media_preview_generator.web.routes.api_settings.logger.warning",
+                    side_effect=lambda msg, *a, **kw: warnings.append(msg),
+                ),
+            ):
+                reregistered = _reregister_plex_webhooks_after_secret_rotation(get_settings_manager())
+
+        mock_register.assert_not_called()
+        assert reregistered == []
+        assert any("Could not re-register Plex webhook" in w for w in warnings)
 
     def test_no_register_calls_when_no_plex_servers_configured(self, app):
         """Pure Emby/Jellyfin install — rotation is a no-op for the Plex side."""
@@ -243,6 +318,7 @@ class TestPostSettingsTriggersReregistration:
 
             with patch(
                 "media_preview_generator.web.routes.api_settings._reregister_plex_webhooks_after_secret_rotation",
+                return_value=[],
             ) as mock_hook:
                 response = client.post(
                     "/api/settings",
@@ -266,3 +342,61 @@ class TestPostSettingsTriggersReregistration:
         assert passed_settings.get("webhook_secret") == "brand-new-secret", (
             f"re-register hook must see the freshly-saved secret; got {passed_settings.get('webhook_secret')!r}"
         )
+
+    def test_save_response_names_reregistered_servers(self, app):
+        client = app.test_client()
+
+        with app.app_context():
+            _seed_servers([_plex_entry("plex-a")])
+
+            with patch(
+                "media_preview_generator.web.routes.api_settings._reregister_plex_webhooks_after_secret_rotation",
+                return_value=["Plex plex-a"],
+            ):
+                response = client.post(
+                    "/api/settings",
+                    json={"webhook_secret": "brand-new-secret"},
+                    headers={"X-Auth-Token": "test-token-12345678"},
+                )
+
+        assert response.status_code == 200
+        assert response.get_json()["plex_webhooks_reregistered"] == ["Plex plex-a"]
+
+    def test_save_response_omits_field_when_nothing_reregistered(self, app):
+        client = app.test_client()
+
+        with app.app_context():
+            _seed_servers([_plex_entry("plex-a")])
+
+            with patch(
+                "media_preview_generator.web.routes.api_settings._reregister_plex_webhooks_after_secret_rotation",
+                return_value=[],
+            ):
+                response = client.post(
+                    "/api/settings",
+                    json={"webhook_secret": "brand-new-secret"},
+                    headers={"X-Auth-Token": "test-token-12345678"},
+                )
+
+        assert response.status_code == 200
+        assert "plex_webhooks_reregistered" not in response.get_json()
+
+    def test_resending_the_stored_secret_is_not_a_rotation(self, app):
+        """The secret field keeps its text, so every auto-save of another webhook field resends it."""
+        client = app.test_client()
+
+        with app.app_context():
+            _seed_servers([_plex_entry("plex-a")])  # stored secret: "rotated-token"
+
+            with patch(
+                "media_preview_generator.web.routes.api_settings._reregister_plex_webhooks_after_secret_rotation",
+                return_value=[],
+            ) as mock_hook:
+                response = client.post(
+                    "/api/settings",
+                    json={"webhook_secret": "rotated-token", "webhook_delay": 5},
+                    headers={"X-Auth-Token": "test-token-12345678"},
+                )
+
+        assert response.status_code == 200
+        mock_hook.assert_not_called()

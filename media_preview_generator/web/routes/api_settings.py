@@ -691,18 +691,26 @@ def _validate_and_coerce_settings_updates(
     return updates, None
 
 
-def _reregister_plex_webhooks_after_secret_rotation(settings) -> None:
-    """Re-register every Plex server's direct webhook so Plex picks up the new token.
+def _reregister_plex_webhooks_after_secret_rotation(settings) -> list[str]:
+    """Re-register each Plex server's direct webhook that is still on plex.tv, so Plex picks up the new token.
 
     Rotating ``webhook_secret`` invalidates the ``?token=`` query embedded in
     every previously-registered Plex webhook URL. Without re-registering, Plex
     Media Server keeps posting with the stale token and we silently start
     rejecting all of its events.
 
+    A saved ``webhook_public_url`` outlives Unregister (it pre-fills the user's
+    host on the server card), so only a webhook plex.tv still lists is
+    re-registered: one the user removed stays removed (#438).
+
     Best-effort per server — one failed registration shouldn't block the
-    others or the save itself. Each failure logs a tracback so the operator
+    others or the save itself. Each failure logs a traceback so the operator
     can re-register manually from Servers → Edit → Webhook & Scanner.
+
+    Returns:
+        The names of the servers whose webhook was re-registered.
     """
+    reregistered: list[str] = []
     try:
         from .. import plex_webhook_registration as pwh
         from .api_plex_webhook import _plex_webhook_auth_token
@@ -718,21 +726,26 @@ def _reregister_plex_webhooks_after_secret_rotation(settings) -> None:
             new_auth = _plex_webhook_auth_token()
             if not new_auth:
                 continue
+            name = entry.get("name") or entry.get("id")
             try:
+                # list_webhooks, not is_registered: that one reads a plex.tv failure as "not registered", which
+                # would skip the warning below and leave Plex posting with the old token.
+                target = pwh._base_url(public_url)
+                if not any(pwh._base_url(url) == target for url in pwh.list_webhooks(token)):
+                    logger.info("Plex webhook for {!r} isn't registered on plex.tv; leaving it unregistered", name)
+                    continue
                 # No ``server_id=`` kwarg — the per-server path already
                 # encodes it; appending it as a query would land a
                 # redundant ``&server_id=`` on the URL plex.tv stores.
                 pwh.register(token, public_url, auth_token=new_auth)
-                logger.info(
-                    "Plex webhook re-registered for {!r} after secret rotation",
-                    entry.get("name") or entry.get("id"),
-                )
+                reregistered.append(str(name))
+                logger.info("Plex webhook re-registered for {!r} after secret rotation", name)
             except Exception:
                 logger.warning(
                     "Could not re-register Plex webhook for {!r} after secret rotation. "
                     "Plex will keep posting with the OLD token until you re-register from "
                     "Servers → Edit → Webhook & Scanner.",
-                    entry.get("name") or entry.get("id"),
+                    name,
                     exc_info=True,
                 )
     except Exception:
@@ -740,6 +753,7 @@ def _reregister_plex_webhooks_after_secret_rotation(settings) -> None:
             "Webhook secret rotation re-registration failed unexpectedly.",
             exc_info=True,
         )
+    return reregistered
 
 
 def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str]) -> dict:
@@ -760,8 +774,9 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
        ``incoming_field_keys`` rather than ``updates`` so the hook still
        fires when those fields get re-routed into ``media_servers[0]``.
     4. **Webhook secret rotation** — if ``webhook_secret`` changed, re-
-       register every Plex server's direct webhook so PMS picks up the
-       new token (otherwise it keeps posting with the stale token).
+       register each Plex server's direct webhook still on plex.tv so PMS
+       picks up the new token (otherwise it keeps posting with the stale
+       token), and report which servers were re-registered.
     5. **Logging reconfiguration** — if any log_* field changed, rebuild
        the loguru handlers with the new level/rotation/retention.
     6. **Thumbnail interval propagation** — if ``thumbnail_interval`` changed,
@@ -771,7 +786,8 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
 
     Returns:
         Extra fields for the JSON response: ``warning`` when no workers are
-        configured, and ``cpu_workers_retiring`` when ``cpu_threads`` was saved.
+        configured, ``cpu_workers_retiring`` when ``cpu_threads`` was saved,
+        and ``plex_webhooks_reregistered`` (server names) after a secret rotation.
     """
     response_fields: dict = {}
     grouped = isinstance(settings.get("worker_groups"), list)
@@ -820,7 +836,9 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
         clear_library_cache()
 
     if "webhook_secret" in updates:
-        _reregister_plex_webhooks_after_secret_rotation(settings)
+        reregistered = _reregister_plex_webhooks_after_secret_rotation(settings)
+        if reregistered:
+            response_fields["plex_webhooks_reregistered"] = reregistered
 
     log_fields = {"log_level", "log_rotation_size", "log_retention_count"}
     if log_fields & updates.keys():
@@ -966,6 +984,9 @@ def save_settings():
     if error_response is not None:
         body, status = error_response
         return body, status
+    # The secret field keeps its text after a save, so every later auto-save resends it: only a new value rotates.
+    if "webhook_secret" in updates and updates["webhook_secret"] == settings.get("webhook_secret"):
+        del updates["webhook_secret"]
 
     # Route Plex-flavoured legacy fields into media_servers[0] instead of
     # writing them as top-level keys. Readers already prefer the
