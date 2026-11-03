@@ -792,10 +792,9 @@ window.loadBuiltinJobs = loadBuiltinJobs;
 
 function _builtinJobRow(job) {
     const isHealth = job.id === 'library_health';
-    const active = !isHealth || job.enabled;
     const idle = !isHealth && !job.intro_credits_on;
     let statusBadge;
-    if (!active) {
+    if (!job.enabled) {
         statusBadge = '<span class="pill"><i class="bi bi-pause-circle" aria-hidden="true"></i>Disabled</span>';
     } else if (idle) {
         statusBadge = '<span class="pill" data-bs-toggle="tooltip" data-bs-placement="top" tabindex="0"'
@@ -806,7 +805,7 @@ function _builtinJobRow(job) {
     }
 
     const nextDate = job.next_run ? new Date(job.next_run) : null;
-    const nextValid = active && nextDate && !Number.isNaN(nextDate.getTime());
+    const nextValid = job.enabled && nextDate && !Number.isNaN(nextDate.getTime());
     const nextRun = nextValid
         ? '<span class="next"><i class="bi bi-clock" aria-hidden="true"></i>' + escapeHtml(_scheduleNextRunLabel(nextDate)) + '</span>'
             + '<span class="sched-sub">' + escapeHtml(_formatRelativeToNow(nextDate)) + '</span>'
@@ -815,32 +814,26 @@ function _builtinJobRow(job) {
     const kindChip = isHealth
         ? '<span class="ov-task schedule-kind-badge" data-kind="previews"><i class="bi bi-heart-pulse" aria-hidden="true"></i>Library Health</span>'
         : '<span class="ov-task schedule-kind-badge" data-kind="intro_credits"><i class="bi bi-skip-forward-btn" aria-hidden="true"></i>Intro &amp; Credits</span>';
-    const servers = isHealth
-        ? '<span class="sched-main">All servers</span><span class="sched-sub">Counts what each library still needs</span>'
-        : '<span class="sched-main">All servers</span><span class="sched-sub">Only while Intro &amp; Credits is on</span>';
-    let startsJobs;
+    const librarySub = isHealth ? 'Counts work left' : 'Restores markers';
+    let scheduleSub;
     if (!isHealth) {
-        startsJobs = '<span class="sched-main">Check servers job</span><span class="sched-sub">Puts back markers a server lost</span>';
-    } else if (job.catch_up) {
-        startsJobs = '<span class="sched-main">Catch-up jobs</span><span class="sched-sub">Libraries with '
-            + escapeHtml(String(job.catch_up_max_files)) + ' files or fewer to do</span>';
+        scheduleSub = '';
     } else {
-        startsJobs = '<span class="sched-main">None</span><span class="sched-sub">Catch-up jobs are off</span>';
+        scheduleSub = job.catch_up ? 'Then catch-up jobs' : 'No catch-up jobs';
     }
+    // Both jobs queue their work at Low priority (Check servers: run_markers_reconcile's default).
+    const lowPriority = 3;
+    const priorityBadge = '<span class="badge ' + PRIORITY_BADGE_CLASS[lowPriority] + ' priority-badge">' + PRIORITY_LABELS[lowPriority] + '</span>';
 
     const jid = escapeHtml(job.id);
     const label = escapeHtml(job.name);
-    const toggleButton = isHealth
-        ? '<button type="button" class="ibtn" onclick="toggleBuiltinLibraryHealth(' + (!job.enabled) + ')"'
-            + ' title="' + (job.enabled ? 'Disable' : 'Enable') + '" aria-label="' + (job.enabled ? 'Disable' : 'Enable') + ' ' + label + '">'
-            + '<i class="bi bi-' + (job.enabled ? 'pause' : 'play') + '" aria-hidden="true"></i></button>'
-        : '';
+    const toggleLabel = job.enabled ? 'Disable' : 'Enable';
     return `
         <tr data-builtin-id="${jid}">
             <td class="sched-name"><div class="sched-name-text"><span class="sched-title">${label}</span><div class="sched-kinds">${kindChip}</div></div></td>
-            <td>${servers}</td>
-            <td><span class="sched-main">Every day at ${escapeHtml(job.time)}</span></td>
-            <td>${startsJobs}</td>
+            <td><span class="sched-main">All libraries</span><span class="sched-sub">${librarySub}</span></td>
+            <td><span class="sched-main">${'Daily at ' + escapeHtml(job.time)}</span>${scheduleSub ? '<span class="sched-sub">' + scheduleSub + '</span>' : ''}</td>
+            <td>${priorityBadge}</td>
             <td>${nextRun}</td>
             <td>${statusBadge}</td>
             <td class="text-nowrap">
@@ -851,7 +844,10 @@ function _builtinJobRow(job) {
                     <button type="button" class="ibtn" onclick="showBuiltinJobModal('${jid}')" title="Edit" aria-label="Edit ${label}">
                         <i class="bi bi-pencil" aria-hidden="true"></i>
                     </button>
-                    ${toggleButton}
+                    <button type="button" class="ibtn" onclick="toggleBuiltinJob('${jid}', ${!job.enabled})"
+                            title="${toggleLabel}" aria-label="${toggleLabel} ${label}">
+                        <i class="bi bi-${job.enabled ? 'pause' : 'play'}" aria-hidden="true"></i>
+                    </button>
                 </div>
             </td>
         </tr>
@@ -885,14 +881,34 @@ async function _saveBuiltinChanges(jobId, changes) {
     _renderBuiltinJobs();
 }
 
-async function toggleBuiltinLibraryHealth(enabled) {
+async function toggleBuiltinJob(jobId, enabled) {
+    const job = _builtinJobs.find(j => j.id === jobId);
+    const name = job ? job.name : 'Built-in job';
     try {
-        await _saveBuiltinChanges('library_health', { enabled: enabled });
-        showToast('Built-in Job Updated', `Library Health check ${enabled ? 'enabled' : 'disabled'}`, 'success');
+        await _saveBuiltinChanges(jobId, { enabled: enabled });
+        showToast('Built-in Job Updated', `${name} ${enabled ? 'enabled' : 'disabled'}`, 'success');
     } catch (error) {
         showToast('Error', 'Failed to update built-in job: ' + error.message, 'danger');
     }
 }
+
+const _BUILTIN_OFF_HINTS = {
+    library_health: 'Off: Library Health shows the counts from its last run until you press Check now.',
+    check_servers: 'Off: markers a server drops stay missing until you run Check servers yourself.',
+};
+
+function _updateBuiltinOffHint() {
+    const jobId = document.getElementById('builtinJobId').value;
+    const hint = document.getElementById('builtinJobOffHint');
+    const off = !document.getElementById('builtinJobEnabled').checked;
+    hint.textContent = _BUILTIN_OFF_HINTS[jobId] || '';
+    hint.hidden = !off;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const toggle = document.getElementById('builtinJobEnabled');
+    if (toggle) toggle.addEventListener('change', _updateBuiltinOffHint);
+});
 
 function showBuiltinJobModal(jobId) {
     const job = _builtinJobs.find(j => j.id === jobId);
@@ -902,11 +918,13 @@ function showBuiltinJobModal(jobId) {
     document.getElementById('builtinJobTime').value = job.time;
     document.getElementById('builtinJobError').hidden = true;
     const isHealth = job.id === 'library_health';
-    document.getElementById('builtinJobSwitches').hidden = !isHealth;
+    document.getElementById('builtinJobCatchUpSection').hidden = !isHealth;
+    document.getElementById('builtinJobCheckServersSection').hidden = isHealth;
     if (isHealth) {
         document.getElementById('builtinJobCatchUp').checked = !!job.catch_up;
-        document.getElementById('builtinJobEnabled').checked = !!job.enabled;
     }
+    document.getElementById('builtinJobEnabled').checked = !!job.enabled;
+    _updateBuiltinOffHint();
     const modalEl = document.getElementById('builtinJobModal');
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
     if (typeof _initBootstrapTooltips === 'function') _initBootstrapTooltips(modalEl);
@@ -921,10 +939,9 @@ async function saveBuiltinJob() {
         errorBox.hidden = false;
         return;
     }
-    const changes = { time: time };
+    const changes = { time: time, enabled: document.getElementById('builtinJobEnabled').checked };
     if (jobId === 'library_health') {
         changes.catch_up = document.getElementById('builtinJobCatchUp').checked;
-        changes.enabled = document.getElementById('builtinJobEnabled').checked;
     }
     try {
         await _saveBuiltinChanges(jobId, changes);

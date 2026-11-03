@@ -3,7 +3,7 @@
 Stored under the top-level ``builtin_jobs`` key of ``settings.json``::
 
     {"library_health": {"enabled": true, "time": "03:00", "catch_up": true},
-     "check_servers": {"time": "04:30"}}
+     "check_servers": {"enabled": true, "time": "04:30"}}
 
 Every field falls back to its default when missing or invalid, so older settings files need no ``upgrade.py``
 migration. Times are ``HH:MM`` in the same timezone the scheduler's other daily crons use.
@@ -18,7 +18,7 @@ CHECK_SERVERS_ID = "check_servers"
 
 DEFAULT_BUILTIN_JOBS: dict[str, dict[str, Any]] = {
     LIBRARY_HEALTH_ID: {"enabled": True, "time": "03:00", "catch_up": True},
-    CHECK_SERVERS_ID: {"time": "04:30"},
+    CHECK_SERVERS_ID: {"enabled": True, "time": "04:30"},
 }
 
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")

@@ -110,11 +110,14 @@
             const newest = checked.reduce(function (a, b) { return b.checked_at > a.checked_at ? b : a; });
             html += `<span class="lh-when">Last checked <b>${escapeHtml(whenText(newest.checked_at))}</b> · took ${newest.duration_s < 1 ? 'under 1' : n(Math.round(newest.duration_s))} s</span>`;
         }
-        if (data && data.next_nightly_at) {
+        if (data && data.nightly_enabled === false) {
+            html += '<span class="lh-when">The nightly check is off. '
+                + '<a href="/automation?tab=schedules#section-schedules-builtin">Turn it on in Schedules</a></span>';
+        } else if (data && data.next_nightly_at) {
             const next = new Date(data.next_nightly_at);
             if (!isNaN(next)) {
                 html += `<span class="lh-when">Checks every night at ${escapeHtml(clock(next))}`
-                    + tip('Runs automatically every night.') + '</span>';
+                    + tip('Runs automatically every night. Change the time in Automation → Schedules → Built-in jobs.') + '</span>';
             }
         }
         setHtml('lhSide', html);

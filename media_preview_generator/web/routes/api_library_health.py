@@ -9,6 +9,7 @@ from ...library_health.runner import get_runner
 from ...library_health.store import default_store
 from ...servers.base import ServerType
 from ..auth import api_token_required
+from ..builtin_jobs import LIBRARY_HEALTH_ID, load_builtin_jobs
 from ..scheduler import _LIBRARY_HEALTH_NIGHTLY, job_next_run
 from . import api
 
@@ -73,6 +74,7 @@ def get_library_health():
             "running": progress.to_dict() if progress else None,
             "last_error": runner.last_error(),
             "next_nightly_at": _next_nightly_iso(),
+            "nightly_enabled": load_builtin_jobs()[LIBRARY_HEALTH_ID]["enabled"],
             "path_job_limit": PATH_JOB_LIMIT,
         }
     )

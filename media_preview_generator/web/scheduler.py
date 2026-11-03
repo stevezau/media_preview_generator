@@ -751,7 +751,8 @@ def _resume_orphaned_check_servers_jobs() -> None:
 def run_markers_check_servers_daily() -> None:
     """Scheduler entry point: queue Intro & Credits · Check servers.
 
-    Does nothing when Intro & Credits is off everywhere, and joins a Check servers job that hasn't finished
+    Does nothing when switched off in the built-in job settings (a stale jobstore entry can still fire), or when
+    Intro & Credits is off everywhere, and joins a Check servers job that hasn't finished
     (``run_markers_reconcile``). Quiet hours and Pause All don't skip it: a queued job waits out a pause at admission.
     A paused job left by a deleted legacy Check servers schedule is resumed first, or it would hold the check forever.
     Logs instead of raising so APScheduler never sees a failure.
@@ -759,6 +760,9 @@ def run_markers_check_servers_daily() -> None:
     try:
         from ..markers.reconcile import run_markers_reconcile
 
+        if not load_builtin_jobs()[CHECK_SERVERS_ID]["enabled"]:
+            logger.info("Daily Check servers is switched off; skipping")
+            return
         _resume_orphaned_check_servers_jobs()
         run_markers_reconcile()
     except Exception:
@@ -1753,9 +1757,19 @@ class ScheduleManager:
                 logger.debug("Could not remove leftover scheduler job {}", job.id, exc_info=True)
 
     def _register_markers_check_servers_daily(self) -> None:
-        """Add the internal daily Check servers run (04:30 unless changed); hidden from schedules by its ``__`` id."""
+        """Add the internal daily Check servers run (04:30 unless changed), or remove it when switched off.
+
+        Hidden from user schedules by its ``__`` id.
+        """
         try:
-            hour, minute = parse_time(load_builtin_jobs()[CHECK_SERVERS_ID]["time"])
+            settings = load_builtin_jobs()[CHECK_SERVERS_ID]
+            if not settings["enabled"]:
+                try:
+                    self.scheduler.remove_job(_MARKERS_CHECK_SERVERS_DAILY)
+                except JobLookupError:
+                    logger.debug("No Check servers job to remove")
+                return
+            hour, minute = parse_time(settings["time"])
             self.scheduler.add_job(
                 run_markers_check_servers_daily,
                 CronTrigger(hour=hour, minute=minute),

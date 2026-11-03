@@ -267,3 +267,17 @@ def test_chapters_job_refused_when_chapters_off(client, auth_headers, fakes, cha
     )
     assert resp.status_code == 400 and "off" in resp.get_json()["error"]
     assert started == []
+
+
+def test_get_reports_whether_the_nightly_check_is_on(client, auth_headers, fakes, monkeypatch):
+    from media_preview_generator.web.routes import api_library_health as mod
+
+    monkeypatch.setattr(mod, "job_next_run", lambda _id: None)
+    monkeypatch.setattr(
+        mod, "load_builtin_jobs", lambda: {"library_health": {"enabled": False, "time": "03:00", "catch_up": True}}
+    )
+    assert client.get("/api/library-health", headers=auth_headers).get_json()["nightly_enabled"] is False
+    monkeypatch.setattr(
+        mod, "load_builtin_jobs", lambda: {"library_health": {"enabled": True, "time": "03:00", "catch_up": True}}
+    )
+    assert client.get("/api/library-health", headers=auth_headers).get_json()["nightly_enabled"] is True

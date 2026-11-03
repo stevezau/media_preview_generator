@@ -71,23 +71,23 @@
             </div>
         </div>
 
-        <!-- Built-in jobs: the app's own daily jobs. Time (and for Library Health, the switches) can change; they can't be deleted. -->
+        <!-- Built-in jobs: the app's own daily jobs. Time and on/off can change; they can't be deleted. -->
         <div class="card section-card" id="section-schedules-builtin">
             <div role="heading" aria-level="2" class="card-header">
                 <span><i class="bi bi-gear-wide-connected me-2"></i>Built-in jobs
-                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The app runs these on its own to keep counts and markers up to date. You can move their time. They can't be deleted." aria-label="The app runs these on its own to keep counts and markers up to date. You can move their time. They can't be deleted."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
+                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The app runs these itself. You can change their time or switch them off, but not delete them." aria-label="The app runs these itself. You can change their time or switch them off, but not delete them."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                 </span>
             </div>
             <div class="card-body">
-                <p class="text-body-secondary small mb-3">The app runs these on its own to keep counts and markers up to date. You can move their time or turn the Library Health check off. They can't be deleted.</p>
+                <p class="text-body-secondary small mb-3">The app runs these itself. You can change their time or switch them off, but not delete them.</p>
                 <div class="table-responsive">
                     <table class="table mb-0 sched-table">
                         <thead>
                             <tr>
                                 <th>Name</th>
-                                <th>Servers</th>
+                                <th>Library</th>
                                 <th>Schedule</th>
-                                <th>Starts jobs</th>
+                                <th>Priority</th>
                                 <th>Next Run</th>
                                 <th>Status</th>
                                 <th>Actions</th>
@@ -103,7 +103,7 @@
             </div>
         </div>
 
-<!-- Built-in job edit modal: the time, and for the Library Health check its two switches. -->
+<!-- Built-in job edit modal: the time, the on/off switch in the footer, and for Library Health the catch-up switch. -->
 <div class="modal fade ov-modal" id="builtinJobModal" tabindex="-1" aria-labelledby="builtinJobModalTitle">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -112,40 +112,38 @@
                 <h5 class="modal-title" id="builtinJobModalTitle">Built-in job</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body d-grid gap-4">
                 <input type="hidden" id="builtinJobId" value="">
+                <section class="ov-sec" id="builtinJobCheckServersSection" hidden>
+                    <p class="ov-hint">Each day, checks that every server still has the intro and credits markers this app put there, and puts back any it lost. Runs only while Intro &amp; Credits is on.</p>
+                </section>
                 <section class="ov-sec">
-                    <div class="ov-fld ov-narrow">
+                    <div class="ov-fld">
                         <label for="builtinJobTime" class="ov-lbl">Time
                             <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="The time of day it runs, every day." aria-label="The time of day it runs, every day."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                         </label>
-                        <input type="time" class="form-control" id="builtinJobTime" required>
+                        <input type="time" class="form-control ov-narrow" id="builtinJobTime" required>
                         <div class="ov-hint">Every day. Pick a time clear of your host's other nightly work.</div>
                         <div class="ov-err" id="builtinJobError" role="alert" hidden><i class="bi bi-exclamation-circle" aria-hidden="true"></i><span></span></div>
                     </div>
                 </section>
-                <section class="ov-sec" id="builtinJobSwitches" hidden>
+                <section class="ov-sec" id="builtinJobCatchUpSection" hidden>
                     <div class="ov-fld">
                         <div class="d-flex align-items-center gap-1">
                             <label class="ov-switch" for="builtinJobCatchUp">
-                            <input type="checkbox" id="builtinJobCatchUp"><span class="ov-track" aria-hidden="true"></span>Start catch-up jobs after the check
-                        </label>
+                                <input type="checkbox" id="builtinJobCatchUp"><span class="ov-track" aria-hidden="true"></span>Start catch-up jobs after the check
+                            </label>
                             <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Starts a low-priority Previews job for each Plex library with only a few files still to do." aria-label="Starts a low-priority Previews job for each Plex library with only a few files still to do."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                         </div>
                         <div class="ov-hint">For each Plex library with 500 files or fewer still to do, start a low-priority Previews job for just those files. A library with more is left for your own schedules. Files that fail are retried the usual way.</div>
                     </div>
-                    <div class="ov-fld">
-                        <div class="d-flex align-items-center gap-1">
-                            <label class="ov-switch" for="builtinJobEnabled">
-                            <input type="checkbox" id="builtinJobEnabled"><span class="ov-track" aria-hidden="true"></span>Run this check
-                        </label>
-                            <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Turns the daily check off or on. Check now on the Library Health page still works." aria-label="Turns the daily check off or on. Check now on the Library Health page still works."><i class="bi bi-info-circle" aria-hidden="true"></i></button>
-                        </div>
-                        <div class="ov-hint">Off: Library Health shows the counts from its last run until you press Check now.</div>
-                    </div>
                 </section>
+                <div class="ov-hint ov-warn" id="builtinJobOffHint" hidden></div>
             </div>
             <div class="modal-footer">
+                <label class="ov-switch" for="builtinJobEnabled">
+                    <input type="checkbox" id="builtinJobEnabled" checked><span class="ov-track" aria-hidden="true"></span>Enable
+                </label>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" id="builtinJobSaveBtn" onclick="saveBuiltinJob()">
                     <i class="bi bi-check me-1"></i>Save

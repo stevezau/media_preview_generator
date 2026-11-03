@@ -39,7 +39,7 @@ def _library_action(libraries_on: list[Library]) -> dict[str, Any]:
             "phrase": "",
             "body": (
                 f"Turns off Plex's <em>Enable Loudness Analysis</em> in {titles} (Library settings → Advanced). "
-                "Plex keeps analysing music and every other library. Existing measurements, this app's included, "
+                "Plex keeps analysing every other library. Existing measurements, this app's included, "
                 "stay in use for playback leveling. You can turn it back on in each library's settings."
             ),
         },

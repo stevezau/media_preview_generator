@@ -1,5 +1,6 @@
 """Built-in jobs API: GET shape, PUT validation and effect on the scheduler, run now."""
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -55,7 +56,7 @@ def test_get_lists_both_jobs_with_defaults(client, auth_headers, scheduler, monk
     assert (check["id"], check["name"], check["time"]) == ("check_servers", "Check servers", "04:30")
     assert check["intro_credits_on"] is False
     assert check["next_run"] is not None
-    assert "enabled" not in check
+    assert check["enabled"] is True
 
 
 def test_put_changes_the_time_and_the_next_run(client, auth_headers, scheduler):
@@ -103,8 +104,20 @@ def test_put_rejects_bad_input_with_a_plain_message(client, auth_headers, schedu
     assert response.get_json()["error"]
 
 
-def test_put_check_servers_has_no_off_switch(client, auth_headers, scheduler):
+def test_put_check_servers_off_switch_removes_the_job_and_on_brings_it_back(client, auth_headers, scheduler):
     response = client.put("/api/schedules/builtin/check_servers", headers=auth_headers, json={"enabled": False})
+
+    assert response.status_code == 200
+    assert scheduler.scheduler.get_job("__markers_check_servers_daily") is None
+    check = client.get("/api/schedules/builtin", headers=auth_headers).get_json()["jobs"][1]
+    assert (check["enabled"], check["next_run"]) == (False, None)
+
+    client.put("/api/schedules/builtin/check_servers", headers=auth_headers, json={"enabled": True})
+    assert scheduler.scheduler.get_job("__markers_check_servers_daily") is not None
+
+
+def test_put_check_servers_rejects_catch_up(client, auth_headers, scheduler):
+    response = client.put("/api/schedules/builtin/check_servers", headers=auth_headers, json={"catch_up": False})
 
     assert response.status_code == 400
 
@@ -163,7 +176,13 @@ def test_run_check_servers_is_409_when_intro_and_credits_is_off_everywhere(clien
     assert response.get_json() == {"error": "Intro & Credits is off on every server, so there is nothing to check"}
 
 
-def test_restoring_settings_with_the_health_check_off_removes_its_job(client, auth_headers, scheduler, tmp_path):
+@pytest.mark.parametrize(
+    ("job_id", "scheduler_job_id"),
+    [("library_health", "__library_health_nightly"), ("check_servers", "__markers_check_servers_daily")],
+)
+def test_restoring_settings_with_a_builtin_job_off_removes_its_job(
+    client, auth_headers, scheduler, tmp_path, job_id, scheduler_job_id
+):
     from media_preview_generator.web.settings_manager import get_settings_manager
 
     sm = get_settings_manager()
@@ -171,9 +190,9 @@ def test_restoring_settings_with_the_health_check_off_removes_its_job(client, au
     sm.settings_file = tmp_path / "settings.json"
     sm.settings_file.write_text("{}")
     (tmp_path / "settings.json.20260101-100000.bak").write_text(
-        '{"builtin_jobs": {"library_health": {"enabled": false}}}'
+        json.dumps({"builtin_jobs": {job_id: {"enabled": False}}})
     )
-    assert scheduler.scheduler.get_job("__library_health_nightly") is not None
+    assert scheduler.scheduler.get_job(scheduler_job_id) is not None
 
     response = client.post(
         "/api/settings/backups/restore",
@@ -182,7 +201,7 @@ def test_restoring_settings_with_the_health_check_off_removes_its_job(client, au
     )
 
     assert response.status_code == 200
-    assert scheduler.scheduler.get_job("__library_health_nightly") is None
+    assert scheduler.scheduler.get_job(scheduler_job_id) is None
 
 
 def test_run_unknown_job_is_404(client, auth_headers):

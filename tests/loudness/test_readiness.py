@@ -178,7 +178,7 @@ def test_music_library_gets_a_per_library_fix_for_only_the_libraries_still_on():
     action = row["actions"]["disable"]
     assert action["action"] == "set_plex_loudness_library_off"
     assert action["args"] == {"library_ids": ["2"]}
-    assert "music" in action["confirm"]["body"] and "TV" in action["confirm"]["body"]
+    assert "every other library" in action["confirm"]["body"] and "TV" in action["confirm"]["body"]
     assert row["bulk"] is False
 
 

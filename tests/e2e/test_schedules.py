@@ -745,6 +745,7 @@ def _mock_builtin_jobs(page: Page) -> list[tuple[str, dict]]:
         "check_servers": {
             "id": "check_servers",
             "name": "Check servers",
+            "enabled": True,
             "time": "04:30",
             "intro_credits_on": False,
             "next_run": "2030-01-01T04:30:00+00:00",
@@ -777,19 +778,23 @@ class TestBuiltinJobsCard:
         expect(page.locator("#builtinJobList tr[data-builtin-id]")).to_have_count(2, timeout=5000)
         return puts
 
-    def test_card_lists_both_jobs_and_check_servers_has_no_disable_button(
+    def test_card_uses_the_schedule_table_columns_and_both_jobs_have_a_disable_button(
         self, authed_page: Page, app_url: str
     ) -> None:
         self._open(authed_page, app_url)
 
+        headers = authed_page.locator("#section-schedules-builtin thead th")
+        expect(headers).to_have_text(["Name", "Library", "Schedule", "Priority", "Next Run", "Status", "Actions"])
         health = authed_page.locator('tr[data-builtin-id="library_health"]')
         check = authed_page.locator('tr[data-builtin-id="check_servers"]')
-        expect(health).to_contain_text("Every day at 03:00")
-        expect(check).to_contain_text("Every day at 04:30")
-        expect(health.locator('button[title="Disable"]')).to_have_count(1)
-        expect(check.locator('button[title="Disable"]')).to_have_count(0)
-        expect(check.locator('button[title="Run now"]')).to_have_count(1)
-        expect(check.locator('button[title="Edit"]')).to_have_count(1)
+        expect(health).to_contain_text("Daily at 03:00")
+        expect(check).to_contain_text("Daily at 04:30")
+        expect(health.locator(".priority-badge")).to_have_text("Low")
+        expect(check.locator(".priority-badge")).to_have_text("Low")
+        for row in (health, check):
+            expect(row.locator('button[title="Disable"]')).to_have_count(1)
+            expect(row.locator('button[title="Run now"]')).to_have_count(1)
+            expect(row.locator('button[title="Edit"]')).to_have_count(1)
         expect(check.locator(".pill")).to_contain_text("Idle")
 
     def test_editing_the_library_health_time_saves_and_updates_the_row(self, authed_page: Page, app_url: str) -> None:
@@ -800,17 +805,52 @@ class TestBuiltinJobsCard:
         authed_page.locator("#builtinJobTime").fill("02:15")
         authed_page.locator("#builtinJobSaveBtn").click()
 
-        expect(authed_page.locator('tr[data-builtin-id="library_health"]')).to_contain_text("Every day at 02:15")
+        expect(authed_page.locator('tr[data-builtin-id="library_health"]')).to_contain_text("Daily at 02:15")
         assert puts[-1][0] == "library_health"
         assert puts[-1][1]["time"] == "02:15"
 
-    def test_check_servers_edit_dialog_shows_only_the_time(self, authed_page: Page, app_url: str) -> None:
+    def test_catch_up_switch_is_only_in_the_library_health_dialog(self, authed_page: Page, app_url: str) -> None:
         self._open(authed_page, app_url)
 
         authed_page.locator('tr[data-builtin-id="check_servers"] button[title="Edit"]').click()
-
         expect(authed_page.locator("#builtinJobTime")).to_have_value("04:30", timeout=3000)
-        expect(authed_page.locator("#builtinJobSwitches")).to_be_hidden()
+        expect(authed_page.locator("#builtinJobCatchUp")).to_be_hidden()
+        expect(authed_page.locator("#builtinJobEnabled")).to_be_attached()
+        authed_page.locator("#builtinJobModal .btn-close").click()
+        expect(authed_page.locator("#builtinJobModal")).to_be_hidden()
+
+        authed_page.locator('tr[data-builtin-id="library_health"] button[title="Edit"]').click()
+        expect(authed_page.locator("#builtinJobCatchUp")).to_be_visible(timeout=3000)
+
+    @pytest.mark.parametrize("job_id", ["library_health", "check_servers"])
+    def test_the_dialog_enable_switch_saves_and_shows_the_off_hint(
+        self, authed_page: Page, app_url: str, job_id: str
+    ) -> None:
+        puts = self._open(authed_page, app_url)
+
+        authed_page.locator(f'tr[data-builtin-id="{job_id}"] button[title="Edit"]').click()
+        expect(authed_page.locator("#builtinJobEnabled")).to_be_checked(timeout=3000)
+        expect(authed_page.locator("#builtinJobOffHint")).to_be_hidden()
+        authed_page.locator('label[for="builtinJobEnabled"]').click()
+        expect(authed_page.locator("#builtinJobOffHint")).to_be_visible()
+        authed_page.locator("#builtinJobSaveBtn").click()
+
+        row = authed_page.locator(f'tr[data-builtin-id="{job_id}"]')
+        expect(row.locator(".pill")).to_contain_text("Disabled", timeout=3000)
+        assert puts[-1][0] == job_id
+        assert puts[-1][1]["enabled"] is False
+
+    def test_disabling_check_servers_persists(self, authed_page: Page, app_url: str) -> None:
+        puts = self._open(authed_page, app_url)
+
+        authed_page.locator('tr[data-builtin-id="check_servers"] button[title="Disable"]').click()
+
+        row = authed_page.locator('tr[data-builtin-id="check_servers"]')
+        expect(row.locator(".pill")).to_contain_text("Disabled", timeout=3000)
+        assert puts[-1] == ("check_servers", {"enabled": False})
+        authed_page.reload()
+        expect(row.locator(".pill")).to_contain_text("Disabled", timeout=5000)
+        expect(row.locator('button[title="Enable"]')).to_have_count(1)
 
     def test_turning_catch_up_off_persists(self, authed_page: Page, app_url: str) -> None:
         puts = self._open(authed_page, app_url)
@@ -820,11 +860,11 @@ class TestBuiltinJobsCard:
         authed_page.locator('label[for="builtinJobCatchUp"]').click()
         authed_page.locator("#builtinJobSaveBtn").click()
 
-        expect(authed_page.locator('tr[data-builtin-id="library_health"]')).to_contain_text("Catch-up jobs are off")
+        expect(authed_page.locator('tr[data-builtin-id="library_health"]')).to_contain_text("No catch-up jobs")
         assert puts[-1][1]["catch_up"] is False
         authed_page.reload()
         expect(authed_page.locator('tr[data-builtin-id="library_health"]')).to_contain_text(
-            "Catch-up jobs are off", timeout=5000
+            "No catch-up jobs", timeout=5000
         )
 
     def test_disabling_library_health_shows_a_disabled_pill_and_an_enable_button(

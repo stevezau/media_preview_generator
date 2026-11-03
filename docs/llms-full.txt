@@ -1957,12 +1957,12 @@ The Dashboard shows the next scheduled run in **Job statistics**, and **Run next
 - **Stop time** (optional): pauses the schedule's running jobs at that time of day.
 - **Job Priority**, and for a whole library **Processing Order** (Previews and loudness) and the same media filters as **Start new job**.
 
-**Check servers** is not a schedule: it runs by itself every day, by default at 04:30, whenever Intro & Credits is on for a server. During quiet hours or Pause All it waits in the queue until processing resumes.
+**Check servers** is a built-in job (see Built-in jobs below): it runs every day, by default at 04:30, whenever Intro & Credits is on for a server. During quiet hours or Pause All it waits in the queue until processing resumes.
 
-**Built-in jobs:** the app runs two daily jobs of its own. They have their own card below your schedules, with **Run now** and **Edit**. They can't be deleted.
+**Built-in jobs:** the app runs two daily jobs of its own. They have their own card below your schedules, with **Run now**, **Edit** and **Disable**. You can change their time or switch them off, but not delete them.
 
 - **Library Health check** counts what every library still needs, by default at 03:00. After it, it starts a low-priority **catch-up job** for each Plex library with 500 files or fewer still to do. You can change its time, turn the daily check off, and turn the catch-up jobs off. The 500 limit is fixed. Catch-up jobs show "Library Health" as their source in the job list. **Check now** on the Library Health page works even when the daily check is off.
-- **Check servers** puts back markers a server lost. You can change its time. It has no off switch and sits idle while Intro & Credits is off everywhere.
+- **Check servers** puts back markers a server lost. You can change its time or switch it off. It sits idle while Intro & Credits is off everywhere. **Run now** works even when it is off.
 
 `/schedules` and `/webhooks` still work: they redirect to the Schedules and Triggers tabs of `/automation`.
 
@@ -6276,8 +6276,8 @@ job, `400` when the job isn't a retry-chain head, `409` when no retry is waiting
 | DELETE | `/api/schedules/{id}` | Delete schedule |
 | POST | `/api/schedules/{id}/run` | Run now. Returns `{"success": true}`. |
 | POST | `/api/schedules/{id}/enable` · `/api/schedules/{id}/disable` | Turn a schedule on or off without deleting it. Returns the schedule. |
-| GET | `/api/schedules/builtin` | The built-in daily jobs: `{"jobs": [...]}` with `library_health` (`enabled`, `time`, `catch_up`, `catch_up_max_files` (500), `next_run`) and `check_servers` (`time`, `intro_credits_on`, `next_run`). |
-| PUT | `/api/schedules/builtin/{id}` | Change a built-in job. Send only the fields to change: `time` (`HH:MM`), and for `library_health` also `enabled` and `catch_up`. Returns the job. `400` for a bad value or a field the job doesn't have, `404` for an unknown id. |
+| GET | `/api/schedules/builtin` | The built-in daily jobs: `{"jobs": [...]}` with `library_health` (`enabled`, `time`, `catch_up`, `catch_up_max_files` (500), `next_run`) and `check_servers` (`enabled`, `time`, `intro_credits_on`, `next_run`). |
+| PUT | `/api/schedules/builtin/{id}` | Change a built-in job. Send only the fields to change: `time` (`HH:MM`) and `enabled`, and for `library_health` also `catch_up`. Returns the job. `400` for a bad value or a field the job doesn't have, `404` for an unknown id. |
 | POST | `/api/schedules/builtin/{id}/run` | Run a built-in job now. Returns `{"ok": true}`. `409` when a Library Health check is already running. |
 | POST | `/api/schedules/recover_from_backup` | Restore `schedules.json` from its newest backup after it failed to load. `200` with `{"status": "ok"}`, otherwise `409` with a `status` such as `no_backup`. |
 

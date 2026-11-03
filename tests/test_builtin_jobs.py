@@ -18,7 +18,7 @@ class TestReadBuiltinJobs:
     def test_saved_fields_are_kept(self):
         raw = {
             "library_health": {"enabled": False, "time": "02:15", "catch_up": False},
-            "check_servers": {"time": "05:00"},
+            "check_servers": {"enabled": False, "time": "05:00"},
         }
 
         assert read_builtin_jobs(raw) == raw
@@ -29,12 +29,12 @@ class TestReadBuiltinJobs:
         result = read_builtin_jobs(raw)
 
         assert result["library_health"] == {"enabled": True, "time": "03:00", "catch_up": False}
-        assert result["check_servers"] == {"time": "04:30"}
+        assert result["check_servers"] == {"enabled": True, "time": "04:30"}
 
     def test_unknown_fields_are_dropped(self):
-        result = read_builtin_jobs({"check_servers": {"time": "05:00", "enabled": False}, "other": {}})
+        result = read_builtin_jobs({"check_servers": {"time": "05:00", "enabled": False}, "other": {}, "x": 1})
 
-        assert result == {**DEFAULT_BUILTIN_JOBS, "check_servers": {"time": "05:00"}}
+        assert result == {**DEFAULT_BUILTIN_JOBS, "check_servers": {"enabled": False, "time": "05:00"}}
 
     def test_the_defaults_are_not_shared_with_the_result(self):
         read_builtin_jobs(None)["library_health"]["time"] = "09:00"
@@ -56,10 +56,11 @@ class TestValidateBuiltinUpdate:
     def test_a_partial_update_is_returned_as_is(self):
         assert validate_builtin_update("library_health", {"catch_up": False}) == {"catch_up": False}
 
-    def test_check_servers_accepts_only_time(self):
+    def test_check_servers_accepts_time_and_enabled_but_not_catch_up(self):
         assert validate_builtin_update("check_servers", {"time": "05:00"}) == {"time": "05:00"}
+        assert validate_builtin_update("check_servers", {"enabled": False}) == {"enabled": False}
         with pytest.raises(ValueError, match="Unknown field"):
-            validate_builtin_update("check_servers", {"enabled": False})
+            validate_builtin_update("check_servers", {"catch_up": False})
 
     def test_unknown_job_is_a_key_error(self):
         with pytest.raises(KeyError):

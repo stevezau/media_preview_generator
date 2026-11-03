@@ -1609,8 +1609,8 @@ job, `400` when the job isn't a retry-chain head, `409` when no retry is waiting
 | DELETE | `/api/schedules/{id}` | Delete schedule |
 | POST | `/api/schedules/{id}/run` | Run now. Returns `{"success": true}`. |
 | POST | `/api/schedules/{id}/enable` · `/api/schedules/{id}/disable` | Turn a schedule on or off without deleting it. Returns the schedule. |
-| GET | `/api/schedules/builtin` | The built-in daily jobs: `{"jobs": [...]}` with `library_health` (`enabled`, `time`, `catch_up`, `catch_up_max_files` (500), `next_run`) and `check_servers` (`time`, `intro_credits_on`, `next_run`). |
-| PUT | `/api/schedules/builtin/{id}` | Change a built-in job. Send only the fields to change: `time` (`HH:MM`), and for `library_health` also `enabled` and `catch_up`. Returns the job. `400` for a bad value or a field the job doesn't have, `404` for an unknown id. |
+| GET | `/api/schedules/builtin` | The built-in daily jobs: `{"jobs": [...]}` with `library_health` (`enabled`, `time`, `catch_up`, `catch_up_max_files` (500), `next_run`) and `check_servers` (`enabled`, `time`, `intro_credits_on`, `next_run`). |
+| PUT | `/api/schedules/builtin/{id}` | Change a built-in job. Send only the fields to change: `time` (`HH:MM`) and `enabled`, and for `library_health` also `catch_up`. Returns the job. `400` for a bad value or a field the job doesn't have, `404` for an unknown id. |
 | POST | `/api/schedules/builtin/{id}/run` | Run a built-in job now. Returns `{"ok": true}`. `409` when a Library Health check is already running. |
 | POST | `/api/schedules/recover_from_backup` | Restore `schedules.json` from its newest backup after it failed to load. `200` with `{"status": "ok"}`, otherwise `409` with a `status` such as `no_backup`. |
 

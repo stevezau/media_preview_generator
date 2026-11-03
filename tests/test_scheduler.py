@@ -1969,6 +1969,34 @@ class TestDailyCheckServers:
         trigger = str(scheduler_manager.scheduler.get_job("__markers_check_servers_daily").trigger)
         assert "hour='5'" in trigger and "minute='10'" in trigger
 
+    def test_switched_off_it_is_not_registered(self, scheduler_manager, monkeypatch):
+        from media_preview_generator.web import builtin_jobs
+
+        monkeypatch.setattr(
+            "media_preview_generator.web.scheduler.load_builtin_jobs",
+            lambda: builtin_jobs.read_builtin_jobs({"check_servers": {"enabled": False}}),
+        )
+
+        scheduler_manager.apply_builtin_jobs()
+
+        assert scheduler_manager.scheduler.get_job("__markers_check_servers_daily") is None
+        scheduler_manager.apply_builtin_jobs()  # removing an already-missing job is quiet
+
+    def test_a_stale_run_does_nothing_when_switched_off(self, monkeypatch):
+        from media_preview_generator.web import builtin_jobs
+        from media_preview_generator.web.scheduler import run_markers_check_servers_daily
+
+        run = MagicMock()
+        monkeypatch.setattr(reconcile, "run_markers_reconcile", run)
+        monkeypatch.setattr(
+            "media_preview_generator.web.scheduler.load_builtin_jobs",
+            lambda: builtin_jobs.read_builtin_jobs({"check_servers": {"enabled": False}}),
+        )
+
+        run_markers_check_servers_daily()
+
+        run.assert_not_called()
+
     def test_it_queues_check_servers(self, monkeypatch):
         from media_preview_generator.web.scheduler import run_markers_check_servers_daily
 
