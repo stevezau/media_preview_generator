@@ -40,6 +40,7 @@ from .node_members import (
     NodeMemberHardware,
     checked_ready_since_drop,
 )
+from .routing import GPU
 from .worker_naming import friendly_device_label
 
 # Map thread_id -> job_id. Each job's log handler filters on its own id, so concurrent jobs
@@ -49,6 +50,7 @@ _job_thread_ids_lock = threading.Lock()
 # Loguru ``extra`` key: a record bound with it stays out of a job's own log (the app log still has it) — a traceback,
 # say, that belongs in the log file but would bury the job's Logs panel. Honoured by both kinds' job logs.
 JOB_LOG_SKIP = "job_log_skip"
+_GPU_CAPABILITIES = frozenset({GPU})
 
 
 def register_job_thread(job_id: str = "") -> None:
@@ -268,6 +270,9 @@ class Worker:
         self.gpus_refused: dict[str, str] = {}
         self.gpu_error: CodecNotSupportedError | None = None
         self.other_gpu_runs: Callable[[Collection[str]], bool] | None = None
+        # Why a routing rule sent the current file to this worker (``jobs.routing``), for its card's "Needs a GPU"
+        # pill. Empty when no rule matched. Set per task by the dispatcher.
+        self.routing_reason = ""
         # When the last task's thread was seen finished (time.monotonic()); 0: never.
         self.task_ended_at = 0.0
 
@@ -395,6 +400,11 @@ class Worker:
             return None
         return Placement(self.node_id, self.node_name)
 
+    @property
+    def capabilities(self) -> frozenset[str]:
+        """What this worker offers files' routing labels (``jobs.routing``): ``"gpu"`` on a GPU worker."""
+        return _GPU_CAPABILITIES if self.worker_type == "GPU" else frozenset()
+
     def is_available(self) -> bool:
         """Check if this worker is available for a new task."""
         return not self.is_busy and not self._pending_removal
@@ -456,6 +466,7 @@ class Worker:
         gpus_refused: dict[str, str] | None = None,
         gpu_error: CodecNotSupportedError | None = None,
         other_gpu_runs: Callable[[Collection[str]], bool] | None = None,
+        routing_reason: str = "",
     ) -> None:
         """Assign a :class:`ProcessableItem` to this worker.
 
@@ -489,6 +500,8 @@ class Worker:
             other_gpu_runs: Whether a worker on a GPU outside the given
                 ``group_resource`` set runs this file's kind; None never hands
                 the file to another GPU.
+            routing_reason: Why a routing rule sent this file to a worker
+                like this one (``jobs.routing``), or "".
         """
         # Pre-claimed workers (is_busy=True but no current_task yet) are
         # acceptable — _find_available_worker(claim=True) atomically reserves
@@ -512,6 +525,7 @@ class Worker:
         self.gpus_refused = dict(gpus_refused or {})
         self.gpu_error = gpu_error
         self.other_gpu_runs = other_gpu_runs
+        self.routing_reason = routing_reason
 
         self.is_busy = True
         self.current_task = item.canonical_path
@@ -2158,6 +2172,7 @@ class WorkerPool:
         kind: str = "previews",
         exclude_nodes: Collection[str] = (),
         exclude_gpus: Collection[str] = (),
+        requires: Collection[str] = (),
     ) -> Optional["Worker"]:
         """Find an available worker.
 
@@ -2175,6 +2190,7 @@ class WorkerPool:
                 (:meth:`mark_node_suspect`) are skipped too.
             exclude_gpus: GPUs (``group_resource``) that couldn't run the item. When given, only a worker on another
                 GPU is found: the CPU waits until no other GPU runs the kind (:meth:`runs_kind_on_other_gpu`).
+            requires: Capabilities the worker must offer (:attr:`Worker.capabilities`), for a file that needs them.
 
         Returns:
             An available worker matching criteria, GPU workers before CPU workers, or None
@@ -2189,6 +2205,8 @@ class WorkerPool:
                 if node_id is not None and (node_id in exclude_nodes or self._is_suspect(node_id, now)):
                     continue
                 if exclude_gpus and (worker.worker_type != "GPU" or worker.group_resource in exclude_gpus):
+                    continue
+                if requires and not worker.capabilities.issuperset(requires):
                     continue
                 if worker.is_available() and self._worker_supports_kind(worker, kind):
                     if claim:

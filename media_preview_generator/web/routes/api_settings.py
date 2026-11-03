@@ -10,6 +10,7 @@ from flask import jsonify, request
 from loguru import logger
 
 from ...config import MAX_CPU_THREADS, VALID_TONEMAP_ALGORITHMS, validate_processing_thread_totals
+from ...jobs import routing
 from ...markers.settings import mask_global
 from ...processing.retry_queue import DEFAULT_RETRY_COUNT
 from ...utils import is_docker_environment
@@ -396,6 +397,8 @@ def get_settings():
             # without the user having to demote the scan by hand.
             "incoming_job_priority": parse_priority(settings.get("incoming_job_priority", PRIORITY_HIGH)),
             "loudness_nice_level": settings.get("loudness_nice_level", 10),
+            # Every routing rule's switch (jobs.routing): off unless saved as true.
+            "routing_rules": routing.rule_states(settings.get("routing_rules")),
             # backup retention (count + max-age days). 0 max_age_days
             # disables age-based pruning so existing installs keep behaving
             # exactly as before until the user opts in.
@@ -447,6 +450,7 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "requeue_max_age_minutes",
     "incoming_job_priority",
     "loudness_nice_level",
+    "routing_rules",
     "frame_reuse",
     "config_backup_keep",
     "config_backup_max_age_days",
@@ -534,7 +538,7 @@ def _merge_global_markers_update(stored: object, posted: object) -> object:
 
 
 def _validate_and_coerce_settings_updates(
-    data: dict, existing_markers: object = None
+    data: dict, existing_markers: object = None, existing_routing_rules: object = None
 ) -> tuple[dict | None, tuple | None]:
     """Filter, validate, and coerce an incoming settings POST payload.
 
@@ -543,6 +547,8 @@ def _validate_and_coerce_settings_updates(
         existing_markers: The currently-stored ``markers`` block, needed to resolve a masked
             TheIntroDB ``api_key`` (``****``) back to the real key. Passed in by the caller
             rather than read here so this function stays pure (no settings.json access).
+        existing_routing_rules: The stored ``routing_rules``, which a post naming only some rules is
+            merged over.
 
     Returns:
         ``(updates, error_response)``. Exactly one is non-None:
@@ -554,7 +560,7 @@ def _validate_and_coerce_settings_updates(
 
     Validation covers: allow-listing, frame_reuse shape, typed-int coercion,
     typed-bool rejection, masked-secret sentinel handling, gpu_config
-    sanitisation, and the Intro & Credits ``markers`` block.
+    sanitisation, the Intro & Credits ``markers`` block, and the ``routing_rules`` switches.
     """
     updates = {k: v for k, v in data.items() if k in _SAVE_SETTINGS_ALLOWED_FIELDS}
 
@@ -658,6 +664,22 @@ def _validate_and_coerce_settings_updates(
     for field in _SAVE_SETTINGS_BOOL_FIELDS:
         if field in updates and not isinstance(updates[field], bool):
             return None, (jsonify({"error": f"{field} must be a boolean"}), 400)
+
+    # Routing rules (jobs.routing): rule id -> true/false, for the rules the app has. Stored for every rule, so the
+    # file says what each switch is; a rule added later is off until switched on.
+    if "routing_rules" in updates:
+        posted = updates["routing_rules"]
+        if not isinstance(posted, dict):
+            return None, (jsonify({"error": "routing_rules must be an object of rule id -> true or false"}), 400)
+        stored = routing.rule_states(existing_routing_rules)
+        unknown = sorted(str(rule) for rule in posted if rule not in stored)
+        if unknown:
+            known = ", ".join(stored) or "none"
+            return None, (jsonify({"error": f"routing_rules has no rule {unknown[0]!r} (rules: {known})"}), 400)
+        not_bool = sorted(rule for rule, enabled in posted.items() if not isinstance(enabled, bool))
+        if not_bool:
+            return None, (jsonify({"error": f"routing_rules {not_bool[0]!r} must be true or false"}), 400)
+        updates["routing_rules"] = {**stored, **posted}
 
     # GET masks ``webhook_secret`` to "****". If a UI/script reads the
     # current settings and POSTs them back wholesale (a common pattern
@@ -980,7 +1002,9 @@ def save_settings():
     settings = get_settings_manager()
     data = _json_object()
 
-    updates, error_response = _validate_and_coerce_settings_updates(data, settings.get("markers"))
+    updates, error_response = _validate_and_coerce_settings_updates(
+        data, settings.get("markers"), settings.get("routing_rules")
+    )
     if error_response is not None:
         body, status = error_response
         return body, status

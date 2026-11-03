@@ -1077,6 +1077,7 @@ def worker_cards(jm) -> Callable[[list], None]:
                     node=w.get("node"),
                     node_state=w.get("node_state"),
                     fallback_until=w.get("fallback_until"),
+                    routing_reason=w.get("routing_reason", "") or "",
                 ),
             )
         jm.prune_worker_statuses(keys)

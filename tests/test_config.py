@@ -1269,6 +1269,54 @@ class TestLoadConfig:
     @patch("subprocess.run")
     @patch("os.path.exists")
     @patch("os.path.isdir")
+    @patch("os.listdir")
+    @patch("os.access")
+    @patch("os.statvfs", create=True)
+    @patch("media_preview_generator.logging_config.setup_logging")
+    def test_load_config_routing_rules_switch_a_rule_on_only_when_saved_true(
+        self,
+        mock_logging,
+        mock_statvfs,
+        mock_access,
+        mock_listdir,
+        mock_isdir,
+        mock_exists,
+        mock_run,
+        mock_which,
+    ):
+        """Each saved rule id maps to on only when saved as true; a missing or malformed setting switches none on."""
+        from media_preview_generator.config import clear_config_cache
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        mock_which.return_value = "/usr/bin/ffmpeg"
+        mock_run.return_value = MagicMock(returncode=0, stdout="ffmpeg version 7.0.0")
+        mock_exists.side_effect = lambda path: True
+        mock_isdir.return_value = True
+        mock_listdir.side_effect = lambda path: [] if "tmp" in path else ["Cache", "Media", "Metadata"]
+        mock_access.return_value = True
+        mock_statvfs.return_value = MagicMock(f_frsize=4096, f_bavail=1024 * 1024 * 250)
+        base = {
+            "plex_url": "http://localhost:32400",
+            "plex_token": "test_token",
+            "plex_config_folder": "/config/plex/Library/Application Support/Plex Media Server",
+            "cpu_threads": 1,
+        }
+        sm = get_settings_manager()
+
+        for saved, expected in (
+            (None, {}),
+            ("av1", {}),
+            ({"av1": True, "vc1": False}, {"av1": True, "vc1": False}),
+            ({"av1": "true", "vc1": 1}, {"av1": False, "vc1": False}),
+        ):
+            sm.apply_changes(dict(base) if saved is None else {**base, "routing_rules": saved})
+            clear_config_cache()
+            assert load_config().routing_rules == expected, saved
+
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    @patch("os.path.exists")
+    @patch("os.path.isdir")
     @patch("os.access")
     @patch("os.statvfs", create=True)
     @patch("media_preview_generator.logging_config.setup_logging")

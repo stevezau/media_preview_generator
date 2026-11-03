@@ -193,6 +193,20 @@ class TestPageRoutes:
         assert snapshot.status_code == 200
         assert snapshot.get_json()["limits"]["cpu"] == 7
 
+    def test_settings_lists_each_routing_rule_with_its_own_switch(self, authed_client, monkeypatch):
+        """A rule added to the registry shows on the page with no edit to the template."""
+        from media_preview_generator.jobs import routing
+
+        extra = routing.Rule("av1", "AV1 files on GPUs", "Labels AV1 files as needing a GPU.", routing.GPU, None)
+        monkeypatch.setattr(routing, "RULES", (*routing.RULES, extra))
+
+        body = authed_client.get("/settings").data.decode()
+
+        assert 'id="routing-rules"' in body
+        for rule in routing.RULES:
+            assert f'data-routing-rule="{rule.id}"' in body
+            assert rule.title in body and rule.description in body
+
     def test_settings_accessible_when_authenticated(self, authed_client):
         resp = authed_client.get("/settings")
         assert resp.status_code == 200
@@ -2394,6 +2408,67 @@ class TestSettingsAPI:
         assert resp.status_code == 400, resp.get_json()
         assert "loudness_nice_level" in resp.get_json()["error"]
         assert client.get("/api/settings", headers=_api_headers()).get_json()["loudness_nice_level"] == 10
+
+    @staticmethod
+    def _two_routing_rules(monkeypatch) -> None:
+        from media_preview_generator.jobs import routing
+
+        def never(path, media_info):
+            return None
+
+        monkeypatch.setattr(
+            routing,
+            "RULES",
+            (
+                routing.Rule("av1", "AV1 files on GPUs", "Labels AV1 files as needing a GPU.", routing.GPU, never),
+                routing.Rule("vc1", "VC-1 files on GPUs", "Labels VC-1 files as needing a GPU.", routing.GPU, never),
+            ),
+        )
+
+    def test_every_routing_rule_starts_off(self, client):
+        from media_preview_generator.jobs import routing
+
+        resp = client.get("/api/settings", headers=_api_headers())
+
+        assert resp.get_json()["routing_rules"] == {rule.id: False for rule in routing.RULES}
+
+    def test_save_routing_rules_round_trips_and_a_partial_post_keeps_the_other_rules(self, client, monkeypatch):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        self._two_routing_rules(monkeypatch)
+        for posted, expected in (
+            ({"av1": True}, {"av1": True, "vc1": False}),
+            ({"vc1": True}, {"av1": True, "vc1": True}),
+            ({"av1": False}, {"av1": False, "vc1": True}),
+        ):
+            resp = client.post("/api/settings", headers=_api_headers(), json={"routing_rules": posted})
+            assert resp.status_code == 200, resp.get_json()
+            assert get_settings_manager().get("routing_rules") == expected
+            assert client.get("/api/settings", headers=_api_headers()).get_json()["routing_rules"] == expected
+
+    @pytest.mark.parametrize("bad", [{"nope": True}, {"av1": "true"}, {"av1": 1}, {"av1": None}, "av1", ["av1"]])
+    def test_save_routing_rules_rejects_unknown_rules_and_anything_but_booleans(self, client, monkeypatch, bad):
+        self._two_routing_rules(monkeypatch)
+
+        resp = client.post("/api/settings", headers=_api_headers(), json={"routing_rules": bad})
+
+        assert resp.status_code == 400, resp.get_json()
+        assert "routing_rules" in resp.get_json()["error"]
+        assert client.get("/api/settings", headers=_api_headers()).get_json()["routing_rules"] == {
+            "av1": False,
+            "vc1": False,
+        }
+
+    def test_a_hand_edited_non_boolean_or_a_rule_since_removed_reads_as_off(self, client, monkeypatch):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        self._two_routing_rules(monkeypatch)
+        get_settings_manager().set("routing_rules", {"av1": "true", "gone": True})
+
+        assert client.get("/api/settings", headers=_api_headers()).get_json()["routing_rules"] == {
+            "av1": False,
+            "vc1": False,
+        }
 
     @pytest.mark.parametrize("bad", [0, 4, -1, "urgent", "", None, True, 1.5])
     def test_save_incoming_priority_rejects_unknown_values(self, client, bad):

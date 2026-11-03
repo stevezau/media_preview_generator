@@ -99,6 +99,22 @@ class TestInfoIconRule:
         expect(authed_page.locator("#globalInfoTitle")).to_have_text("Loudness analysis nice level")
         expect(authed_page.locator("#globalInfoBody")).to_contain_text("about 10%")
 
+    def test_the_routing_rules_icon_explains_the_gpu_wait_and_the_fallback(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _open(authed_page, app_url, "/settings")
+        icon = authed_page.locator("#routing-rules .info-icon")
+        expect(icon).to_have_attribute(
+            "data-bs-original-title",
+            "Send files that are much faster on a GPU to a GPU worker. Click for more.",
+        )
+        icon.click()
+        expect(authed_page.locator("#globalInfoModal")).to_be_visible(timeout=5000)
+        expect(authed_page.locator("#globalInfoTitle")).to_have_text("Routing rules")
+        body = authed_page.locator("#globalInfoBody")
+        expect(body).to_contain_text("the file waits for a GPU worker, even a busy one")
+        expect(body).to_contain_text("Nothing gets stuck.")
+
     def test_a_hover_only_icon_opens_nothing(self, authed_page: Page, app_url: str) -> None:
         _open(authed_page, app_url, "/settings")
         icon = authed_page.locator('label[for="logLevel"] .info-icon')

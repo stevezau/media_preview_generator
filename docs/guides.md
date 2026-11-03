@@ -231,7 +231,7 @@ Open **Settings** (`/settings`). On a wide screen a side menu groups the section
 - **Workers:** named groups, job permissions, counts and availability.
 - **Nodes:** other machines that lend a GPU or CPU, or open Plex's database (see [Remote nodes](#remote-nodes)).
 - **Global pause schedule:** weekly windows when all processing pauses.
-- **Processing options:** incoming job priority, retry policy, restart recovery, GPU device tuning, library scanning, thumbnails and HDR tone mapping, smart caching across servers.
+- **Processing options:** incoming job priority, routing rules, retry policy, restart recovery, GPU device tuning, library scanning, thumbnails and HDR tone mapping, smart caching across servers.
 - **Intro & Credits:** detection settings shared by every server.
 - **Logging:** log level, log file rotation, job history.
 - **Authentication**, **Backups** and **About**.
@@ -284,6 +284,44 @@ There are three separate timing controls:
 
 A waiting job's queue row says why: no compatible workers, workers outside their hours, busy workers, or a full job
 limit. It keeps its ID and unfinished files and continues when capacity returns.
+
+### Routing rules
+
+Some files are much faster on a GPU. Routing rules spot those files and send them to a GPU worker. Your CPU workers
+stay free for everything else. This helps most when a fast GPU shares the work with slow CPUs, such as a NAS lending
+its CPU as a [node](#remote-nodes).
+
+Under the hood, a rule gives a matched file a label: what it needs from its worker. Workers offer capabilities. Today
+there is one capability, **GPU**. GPU workers have it and CPU workers don't.
+
+**How it works**
+
+- Each rule checks a preview file before it's queued. It takes a quick look at the file's headers.
+- If a rule matches, the file waits for a GPU worker, even a busy one. Your other workers take the job's other files
+  meanwhile.
+- If no GPU worker is available, the file goes to any worker as usual. Nothing gets stuck. This happens when no GPU
+  worker is set up, its group is switched off or outside its hours, or no GPU worker is on a node that can see the file.
+- If a GPU can't decode the file, it goes to your other GPUs and then to a CPU, as before.
+
+**Where to see it**
+
+- The job card shows how many files are waiting for a GPU and why:
+  `3 files waiting for a GPU (Dolby Vision, HDR) · 10/40 completed`.
+- A worker running a matched file shows **Needs a GPU** and the reason.
+- The job log names each file a rule matched. It also says when a matched file went to another worker because no GPU
+  worker was available.
+- At the DEBUG log level, the log also says which worker took each matched file, and when files start waiting.
+
+**Settings**
+
+- **Settings → Processing options → Routing rules** lists every rule with its own switch.
+- All rules start off. A rule added in a later version starts off too.
+- Changes apply to preview jobs started afterwards.
+- Only preview jobs use routing rules. Intro & Credits and loudness jobs don't.
+
+**The rules**
+
+- **HDR and Dolby Vision on a GPU:** matches files whose video is HDR10, HDR10+, HLG or Dolby Vision.
 
 ### Global pause schedule
 
@@ -1793,6 +1831,8 @@ HDR thumbnails are **tone-mapped** to SDR (standard dynamic range) automatically
 This is the formula that compresses HDR's brightness range into SDR. The default suits almost everyone. Change it only if your HDR thumbnails look too dark or tinted.
 
 Non-DV HDR content (HDR10, HLG, HDR10+) uses a configurable algorithm, set in **Settings → Processing options → Thumbnails → HDR tone mapping** or via the `TONEMAP_ALGORITHM` env var. Options: `hable` (default), `reinhard`, `mobius`, `clip`, `gamma`, `linear`. If HDR thumbnails look too dark, try `reinhard`.
+
+HDR is slow on a CPU worker, because it decodes and tone-maps every frame in software. To send HDR files to a GPU worker, switch on the HDR [routing rule](#routing-rules).
 
 ### Dolby Vision Profile 5
 

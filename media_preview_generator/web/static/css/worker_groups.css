@@ -195,6 +195,7 @@
 .dashboard-layout #workerGroupLiveRows.wg-dense .wk-top .kind { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
 .dashboard-layout #workerGroupLiveRows.wg-dense [data-status-badge],
 .dashboard-layout #workerGroupLiveRows.wg-dense [data-fallback-badge],
+.dashboard-layout #workerGroupLiveRows.wg-dense [data-routing-badge],
 .dashboard-layout #workerGroupLiveRows.wg-dense [data-fallback-note] { grid-column:2 / -1; grid-row:auto; justify-self:start; }
 .dashboard-layout #workerGroupLiveRows.wg-dense .worker-file { grid-column:2; grid-row:1; min-width:0; }
 .dashboard-layout #workerGroupLiveRows.wg-dense .worker-slot:has([data-library]:empty) .worker-file { grid-row:1 / span 2; }
@@ -242,6 +243,7 @@
  .dashboard-layout #workerGroupLiveRows.wg-dense .workers-panel-card .progress { grid-column:2 / -1; grid-row:4; }
  .dashboard-layout #workerGroupLiveRows.wg-dense [data-status-badge],
  .dashboard-layout #workerGroupLiveRows.wg-dense [data-fallback-badge],
+ .dashboard-layout #workerGroupLiveRows.wg-dense [data-routing-badge],
  .dashboard-layout #workerGroupLiveRows.wg-dense [data-fallback-note] { grid-column:2 / -1; grid-row:auto; }
 }
 @media (max-width: 699.98px) {
@@ -260,6 +262,7 @@
  .dashboard-layout #workerGroupLiveRows.wg-dense .workers-panel-card .progress { order:8; flex:1 1 100%; }
  .dashboard-layout #workerGroupLiveRows.wg-dense [data-status-badge],
  .dashboard-layout #workerGroupLiveRows.wg-dense [data-fallback-badge],
+ .dashboard-layout #workerGroupLiveRows.wg-dense [data-routing-badge],
  .dashboard-layout #workerGroupLiveRows.wg-dense [data-fallback-note] { order:9; }
 }
 @media (pointer: coarse) {

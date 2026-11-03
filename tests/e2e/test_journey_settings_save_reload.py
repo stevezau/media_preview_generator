@@ -282,6 +282,50 @@ class TestSettingsSaveAndReloadPersists:
             expect(backend_real_page.locator("#thumbnailInterval")).to_have_value("5", timeout=5000)
             expect(backend_real_page.locator("#loudnessNiceLevel")).to_have_value(level)
 
+    def test_each_routing_rule_starts_off_and_its_switch_saves_and_reloads(
+        self,
+        backend_real_page: Page,
+        backend_real_app: tuple[str, str],
+    ) -> None:
+        """Every rule the app has is listed off on a fresh install; flipping one auto-saves it under routing_rules,
+        and each state survives a reload."""
+        from media_preview_generator.jobs import routing
+
+        app_url, config_dir = backend_real_app
+        backend_real_page.goto(f"{app_url}/settings")
+        backend_real_page.wait_for_load_state("domcontentloaded")
+        expect(backend_real_page.locator("#thumbnailInterval")).to_have_value("5", timeout=5000)
+        switches = backend_real_page.locator("[data-routing-rule]")
+        expect(switches).to_have_count(len(routing.RULES))
+        for index in range(len(routing.RULES)):
+            expect(switches.nth(index)).not_to_be_checked()
+        rule_id = routing.RULES[0].id
+        switch = backend_real_page.locator(f'[data-routing-rule="{rule_id}"]')
+
+        settings_path = Path(config_dir) / "settings.json"
+        for on in (True, False):
+            switch.set_checked(on)
+            on_disk: dict = {}
+            for _ in range(40):
+                try:
+                    on_disk = json.loads(settings_path.read_text())
+                except (json.JSONDecodeError, OSError):
+                    on_disk = {}
+                if (on_disk.get("routing_rules") or {}).get(rule_id) is on:
+                    break
+                backend_real_page.wait_for_timeout(200)
+            assert (on_disk.get("routing_rules") or {}).get(rule_id) is on, (
+                f"the auto-save never reached {settings_path}"
+            )
+
+            backend_real_page.reload()
+            backend_real_page.wait_for_load_state("domcontentloaded")
+            expect(backend_real_page.locator("#thumbnailInterval")).to_have_value("5", timeout=5000)
+            if on:
+                expect(switch).to_be_checked()
+            else:
+                expect(switch).not_to_be_checked()
+
     def test_the_retry_count_field_shows_each_stored_value_as_it_is(
         self,
         backend_real_page: Page,

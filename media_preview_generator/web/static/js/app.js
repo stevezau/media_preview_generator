@@ -3173,6 +3173,7 @@ function updateWorkerStatuses(workers, options = {}) {
                     <div class="card-body">
                         <div class="worker-card-heading wk-top"><span data-name-wrap class="kind"><span class="node-chip" data-node-chip hidden></span><i class="bi" data-icon aria-hidden="true"></i><strong data-name></strong></span><span class="worker-id wk-n" data-worker-id></span><span class="pill warn" data-status-badge hidden></span></div>
                         <span class="pill warn d-none" data-fallback-badge><i class="bi bi-arrow-down-circle" aria-hidden="true"></i>CPU fallback</span>
+                        <span class="pill run d-none" data-routing-badge><i class="bi bi-gpu-card" aria-hidden="true"></i><span data-routing-text></span></span>
                         <div class="small text-warning d-none" data-fallback-note><i class="bi bi-exclamation-triangle me-1"></i><span data-fallback-reason></span></div>
                         <div class="wk-idle-note" data-idle-note>Waiting for work</div>
                         <div class="worker-current-job" data-current-job>
@@ -3325,6 +3326,12 @@ function _patchWorkerCard(col, worker, anyOnNode = false) {
 
     // Fallback badge + note
     fallbackBadge.classList.toggle('d-none', !fallbackActive);
+    // A routing rule sent this file to a GPU worker (jobs.routing): say so, and why.
+    const routingBadge = col.querySelector('[data-routing-badge]');
+    const routingReason = isProcessing ? worker.routing_reason || '' : '';
+    routingBadge.classList.toggle('d-none', !routingReason);
+    routingBadge.querySelector('[data-routing-text]').textContent = routingReason ? `Needs a GPU · ${routingReason}` : '';
+    routingBadge.title = routingReason ? `A routing rule sent this file to a GPU: ${routingReason}` : '';
     if (fallbackActive) {
         fallbackBadge.title = worker.fallback_reason || 'CPU fallback';
     }

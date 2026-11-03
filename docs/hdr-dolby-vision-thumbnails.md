@@ -92,6 +92,8 @@ Intel and AMD need no extra step beyond passing `/dev/dri`, which also brings th
 
 Dolby Vision Profile 5 is the slowest format to process. How long it takes depends on the GPU, the codec and your storage, and each GPU vendor needs something different ([FAQ](faq.md#why-is-cpu-usage-high-when-i-have-a-gpu-configured)).
 
+HDR is slow on a CPU worker, because it tone-maps every frame in software. A CPU-only node also has no hardware Vulkan, so its Dolby Vision Profile 5 thumbnails come out tinted. To send these files to a GPU worker, switch on the HDR [routing rule](guides.md#routing-rules).
+
 ## Limits
 
 - Dolby Vision Profile 5 on NVIDIA needs the `graphics` capability, as above.
