@@ -323,7 +323,8 @@ Plex's chapter timings.
 4. Run your usual **Previews** job. Existing schedules and webhooks include chapters while the toggle is on;
    there is no separate chapter schedule. Extraction runs on the CPU within the existing worker and thread limits.
    A normal run keeps current scrubber previews and fills missing or stale
-   chapter images. **Regenerate** rebuilds the enabled outputs.
+   chapter images. A title whose chapters all have images Plex made itself is left as it is.
+   **Regenerate** rebuilds the enabled outputs, including those.
 
 Worker cards show the chapter count and percentage as images are checked or attempted, followed by
 **Registering with Plex**. The percentage measures image work; **Ready** confirms registration succeeded.

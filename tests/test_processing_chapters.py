@@ -138,6 +138,60 @@ def test_registered_fresh_images_need_no_work_but_cleared_refs_do(plan, config, 
     register.assert_called_once()
 
 
+def _with_thumbs(plan, *thumbs):
+    plan.target = replace(
+        plan.target, chapters=tuple(replace(c, thumb_url=t) for c, t in zip(plan.target.chapters, thumbs, strict=True))
+    )
+
+
+PLEX_THUMB = "media://8/abc.bundle/Contents/Chapters/chapter{}.jpg"
+
+
+def test_chapter_images_plex_made_need_no_work_and_are_kept(plan, config, extraction):
+    """Library Health counts Plex's own chapter images as done; a Previews job must agree (#436)."""
+    run, register = extraction
+    _with_thumbs(plan, PLEX_THUMB.format(1), PLEX_THUMB.format(2))
+
+    assert chapters.chapter_work_needed(plan) is False
+    outcome = chapters.publish_chapters(plan, config)
+
+    assert (outcome.status, outcome.completed, outcome.total) == ("ready", 2, 2)
+    assert outcome.message == "Plex's own chapter thumbnails kept"
+    run.assert_not_called()
+    register.assert_not_called()
+    assert not plan.folder.exists()
+
+
+def test_regenerate_replaces_plex_made_chapter_images(plan, config, extraction):
+    run, register = extraction
+    _with_thumbs(plan, PLEX_THUMB.format(1), PLEX_THUMB.format(2))
+
+    assert chapters.chapter_work_needed(plan, regenerate=True) is True
+    assert chapters.publish_chapters(plan, config, regenerate=True).status == "ready"
+
+    assert run.call_count == 2
+    assert set(register.call_args.args[2]) == {1, 2}
+
+
+@pytest.mark.parametrize(
+    "thumbs",
+    [
+        pytest.param(("PLEX1", ""), id="plex-image-missing-on-one-chapter"),
+        pytest.param(("PLEX1", "/library/media/2/chapterImages/2?mpgChapter=stale"), id="mixed-with-an-app-image"),
+    ],
+)
+def test_chapter_images_plex_made_only_in_part_are_still_filled(plan, config, extraction, thumbs):
+    """Only a full Plex-made set is left alone: Library Health counts a chapter without an image as to-do too."""
+    run, register = extraction
+    _with_thumbs(plan, *(PLEX_THUMB.format(1) if t == "PLEX1" else t for t in thumbs))
+
+    assert chapters.chapter_work_needed(plan) is True
+    assert chapters.publish_chapters(plan, config).status == "ready"
+
+    assert run.call_count == 2
+    register.assert_called_once()
+
+
 def test_committed_refs_without_api_visibility_fail_verification_and_can_retry(plan, config, extraction):
     run, register = extraction
 
@@ -513,8 +567,34 @@ def test_existing_bif_chapter_backfill_does_not_extract_or_pack_bif(
         assert extraction[0].call_count == 2
         assert result.publishers[0].artifacts["chapters"]["status"] == "ready"
         assert result.publishers[0].artifacts["chapters"]["updated"] is True
+        assert result.publishers[0].artifacts["bif"]["status"] == "skipped_output_exists"
+        # Counted as generated, so the file's reason says the scrubber was reused (#436).
+        assert result.message == "Chapter thumbnails updated; scrubber previews already existed"
         assert progress[-1] == {"stage": "complete", "processed": 2, "total": 2, "ready": 2, "failed": 0}
     assert progress[0]["stage"] == "preparing"
+
+
+def test_plex_made_chapter_images_beside_an_existing_bif_leave_the_file_untouched(
+    plan, mock_config, extraction, monkeypatch
+):
+    """The #436 report: a full-library job sent these to a worker and counted them as generated."""
+    _with_thumbs(plan, PLEX_THUMB.format(1), PLEX_THUMB.format(2))
+    registry = _registry(plan)
+    bif = PlexBundleAdapter.bundle_bif_path(
+        registry.get_config("plex").output["plex_config_folder"], plan.target.bundle_hash
+    )
+    bif.parent.mkdir(parents=True)
+    bif.write_bytes(b"existing BIF")
+    monkeypatch.setattr(chapters, "prepare_chapters", lambda *_a, **_kw: plan)
+
+    checked = process_canonical_path(plan.canonical_path, registry, mock_config, check_only=True)
+    assert checked.status is MultiServerStatus.SKIPPED
+
+    result = process_canonical_path(plan.canonical_path, registry, mock_config)
+    assert result.status is MultiServerStatus.SKIPPED
+    assert result.publishers[0].artifacts["chapters"]["updated"] is False
+    extraction[0].assert_not_called()
+    extraction[1].assert_not_called()
 
 
 def test_disabled_chapters_never_resolve_metadata(plan, mock_config, monkeypatch):

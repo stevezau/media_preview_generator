@@ -1667,6 +1667,17 @@ var _fileSearchDebounce = null;
 // app.js so per-row file-outcome badges, per-server pills, and aggregate
 // badges all render the same label + color for the same status. Update
 // STATUS_META, not this shim.
+// A file whose scrubber previews already existed counts as generated when only its chapter thumbnails changed;
+// the badge says what actually changed so it doesn't read as a preview regeneration (#436).
+function _onlyChaptersUpdated(file) {
+    var servers = file.servers || [];
+    // A Plex server keeps its scrubber result in artifacts.bif (its status turns "published"); others report it directly.
+    return file.outcome === 'generated' && servers.length > 0 && servers.every(function (s) {
+        var bif = ((s && s.artifacts) || {}).bif;
+        return (bif ? bif.status : (s || {}).status) === 'skipped_output_exists';
+    }) && servers.some(function (s) { return ((s.artifacts || {}).chapters || {}).updated === true; });
+}
+
 function _fileOutcomeMeta(key) {
     var m = (typeof window !== 'undefined' && window._statusMeta)
         ? window._statusMeta(key)
@@ -1897,6 +1908,7 @@ function renderFileResultsTable(files) {
     for (var i = 0; i < files.length; i++) {
         var f = files[i];
         var meta = _fileOutcomeMeta(f.outcome);
+        if (_onlyChaptersUpdated(f)) meta = { label: 'Chapters updated', badge: meta.badge };
         var fileName = f.file || '';
         var shortName = fileName.split('/').pop() || fileName;
         var reason = escapeHtml(f.reason || '');

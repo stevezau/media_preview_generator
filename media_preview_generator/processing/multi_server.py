@@ -2829,6 +2829,7 @@ def process_canonical_path(
 
     changed = False
     incomplete = False
+    scrubbers_existed = result.status is MultiServerStatus.SKIPPED
     for publisher in result.publishers:
         publisher_changed = False
         item_plans = plans.get(publisher.server_id)
@@ -2885,8 +2886,11 @@ def process_canonical_path(
             publisher.message = "Scrubber ready; chapter thumbnails ready"
     if changed:
         result.status = MultiServerStatus.PUBLISHED
-    if incomplete or changed:
-        result.message = (
-            "Scrubber previews ready; chapter work incomplete" if incomplete else "Enabled preview outputs ready"
-        )
+    if incomplete:
+        result.message = "Scrubber previews ready; chapter work incomplete"
+    elif changed and scrubbers_existed:
+        # Counted as generated, so say the scrubber previews were reused rather than regenerated (#436).
+        result.message = "Chapter thumbnails updated; scrubber previews already existed"
+    elif changed:
+        result.message = "Enabled preview outputs ready"
     return result

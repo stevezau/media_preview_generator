@@ -468,9 +468,23 @@ def _other_items_verified(plan: ChapterPlan, key: dict) -> list[dict]:
     return list(others.values())
 
 
+def _shows_plex_images(plan: ChapterPlan) -> bool:
+    """Plex made this item's chapter thumbnails itself: every chapter has one, and none is this app's.
+
+    Library Health counts these as done, and they need no work: replacing them would re-extract every chapter on the
+    CPU for nothing (#436). A Regenerate still replaces them.
+    """
+    chapters = cast("ChapterTarget", plan.target).chapters
+    return all(chapter.thumb_url for chapter in chapters) and not any(
+        "?mpgChapter=" in chapter.thumb_url for chapter in chapters
+    )
+
+
 def chapter_work_needed(plan: ChapterPlan, *, regenerate: bool = False) -> bool:
     """Check images and refs without starting FFmpeg or modifying Plex."""
     if plan.target is None or not plan.target.chapters:
+        return False
+    if not regenerate and _shows_plex_images(plan):
         return False
     images = _fresh_images(plan)
     return (
@@ -722,8 +736,10 @@ def publish_chapters(
 
     if plan.target is None or not plan.target.chapters:
         return plan.outcome
-    images: dict[str, dict[str, Any]] = {}
     total = len(plan.target.chapters)
+    if not regenerate and _shows_plex_images(plan):
+        return ChapterOutcome("ready", total, total, "Plex's own chapter thumbnails kept")
+    images: dict[str, dict[str, Any]] = {}
     processed = failed = 0
 
     def report(stage: str) -> None:

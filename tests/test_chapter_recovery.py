@@ -273,7 +273,9 @@ def test_one_failed_seek_switches_remaining_chapters_to_safe_recovery(bound_bif,
 
 def test_known_bad_index_without_a_bif_matching_the_content_hash_stops_without_automatic_retry(bound_bif, monkeypatch):
     plan, _bif, _output = bound_bif
-    plan.target = SimpleNamespace(chapters=[SimpleNamespace(index=1, start_ms=1000, end_ms=3000)], bundle_hash="0" * 40)
+    plan.target = SimpleNamespace(
+        chapters=[SimpleNamespace(index=1, start_ms=1000, end_ms=3000, thumb_url="")], bundle_hash="0" * 40
+    )
     plan.profile = {}
     plan.manifest_path = plan.folder / "chapter-thumbnails.mpg.json"
     monkeypatch.setattr(

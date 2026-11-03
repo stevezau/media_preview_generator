@@ -497,6 +497,54 @@ class TestJobModalFilesTabStickiness:
         page.evaluate("() => hideModalSafely(document.getElementById('logsModal'))")
         expect(page.locator("#logsModal")).to_be_hidden(timeout=2000)
 
+    def test_file_with_only_chapter_images_updated_says_chapters_updated(self, dashboard_page: Page) -> None:
+        """A reused scrubber plus new chapter images counts as generated; the badge says what changed (#436)."""
+        page = dashboard_page
+        self._stub_modal_endpoints(page)
+
+        def server(bif_status: str, updated: bool) -> dict:
+            return {
+                "name": "Plex",
+                "status": "published",
+                "artifacts": {"bif": {"status": bif_status}, "chapters": {"status": "ready", "updated": updated}},
+            }
+
+        files = [
+            {
+                "file": "/data/Movies/Chapters.mkv",
+                "outcome": "generated",
+                "servers": [server("skipped_output_exists", True)],
+            },
+            {
+                "file": "/data/Movies/WithEmby.mkv",
+                "outcome": "generated",
+                "servers": [server("skipped_output_exists", True), {"name": "Emby", "status": "skipped_output_exists"}],
+            },
+            {"file": "/data/Movies/Both.mkv", "outcome": "generated", "servers": [server("published", True)]},
+        ]
+        page.route(
+            "**/api/jobs/*/files**",
+            lambda r: _fulfill_json(
+                r,
+                {
+                    "files": files,
+                    "page": 1,
+                    "total_pages": 1,
+                    "filtered_count": 3,
+                    "total": 3,
+                    "processed_total": 3,
+                    "list_truncated": False,
+                },
+            ),
+        )
+        self._open_modal(page, "job-A")
+        page.locator("#filesTab").click()
+
+        rows = page.locator("#fileResultsBody tr")
+        expect(rows.nth(0).locator("td[data-label=Outcome]")).to_have_text("Chapters updated", timeout=2000)
+        expect(rows.nth(1).locator("td[data-label=Outcome]")).to_have_text("Chapters updated")
+        expect(rows.nth(2).locator("td[data-label=Outcome]")).not_to_have_text("Chapters updated")
+
     def test_reopening_on_files_tab_auto_loads_results(self, dashboard_page: Page) -> None:
         page = dashboard_page
         self._stub_modal_endpoints(page)
