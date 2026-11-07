@@ -1310,12 +1310,14 @@ class TestCrossServerBifReuse:
         header_interval_ms: int | None = None,
         timestamp_step: int = 1,
         slot_leftovers: int = 0,
+        stale_emby_sidecar: bool = False,
     ):
         """Plex already has an ``index-sd.bif`` made at ``plex_bif_interval_ms``; Emby at 5 s has no output yet.
 
         Plex's bundle path doesn't encode the interval, so the BIF still looks fresh after an interval change.
         ``truncate_plex_bif_to`` cuts the Plex BIF to that many bytes, as a partial write would.
         ``slot_leftovers`` frames sit in the file's frame-cache slot with no cache entry, named as FFmpeg writes them.
+        ``stale_emby_sidecar`` puts an Emby preview beside the video, noted for the file before its modified time moved.
 
         Returns:
             ``(result, emby_bif_path, generate_images_calls)``.
@@ -1367,6 +1369,15 @@ class TestCrossServerBifReuse:
                 ),
             ],
         )
+
+        if stale_emby_sidecar:
+            from media_preview_generator.output.journal import write_meta
+
+            sidecar = media_file.parent / "Test (2024)-320-5.bif"
+            sidecar.write_bytes(b"old preview")
+            write_meta([sidecar], str(media_file), publisher="emby_sidecar")
+            st = media_file.stat()
+            os.utime(media_file, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
 
         calls: list[dict] = []
 
@@ -1469,6 +1480,61 @@ class TestCrossServerBifReuse:
         assert (meta.frame_count, meta.frame_interval_ms) == (20, 5000)
         plex_bif = str(tmp_path / "plexcfg" / "index-sd.bif")
         assert any(f"could not read the header of {plex_bif}" in w for w in warnings), warnings
+
+    def test_skip_line_names_the_frame_spacing_when_another_program_made_the_bif(
+        self, mock_config_for_processing, tmp_path
+    ):
+        """Issue #444: a Plex-made BIF (0 in its header) was logged as "a frame every 0 ms"."""
+        lines: list[str] = []
+        handler_id = logger.add(lines.append, level="INFO", format="{message}")
+        try:
+            self._dispatch_plex_bif_to_emby_at_5s(
+                mock_config_for_processing, tmp_path, plex_bif_interval_ms=2000, header_interval_ms=0, timestamp_step=2
+            )
+        finally:
+            logger.remove(handler_id)
+
+        skip = [line for line in lines if line.startswith("BIF reuse: skipping")]
+        assert len(skip) == 1, lines
+        assert "another program made it" in skip[0] and "a frame every 2000 ms" in skip[0], skip
+        assert "every 0 ms" not in skip[0]
+
+    def test_skip_line_names_both_intervals_when_this_app_made_the_bif(self, mock_config_for_processing, tmp_path):
+        lines: list[str] = []
+        handler_id = logger.add(lines.append, level="INFO", format="{message}")
+        try:
+            self._dispatch_plex_bif_to_emby_at_5s(mock_config_for_processing, tmp_path, plex_bif_interval_ms=10000)
+        finally:
+            logger.remove(handler_id)
+
+        skip = [line for line in lines if line.startswith("BIF reuse: skipping")]
+        assert len(skip) == 1, lines
+        assert "it has a frame every 10000 ms, but the current setting is every 5000 ms" in skip[0], skip
+
+    @pytest.mark.parametrize(
+        ("stale_emby_sidecar", "reason"),
+        [
+            (False, "emby-1 has no preview for this file yet"),
+            (True, "emby-1 has a preview from before this file changed (its size or modified time differs)"),
+        ],
+    )
+    def test_log_says_why_a_server_needs_a_new_preview(
+        self, mock_config_for_processing, tmp_path, stale_emby_sidecar, reason
+    ):
+        """Issue #444: a whole-library job re-made Emby previews and the log never said whether they were missing or
+        out of date. Plex's preview is current in both cases, so only Emby is named."""
+        lines: list[str] = []
+        handler_id = logger.add(lines.append, level="INFO", format="{message}")
+        try:
+            self._dispatch_plex_bif_to_emby_at_5s(
+                mock_config_for_processing, tmp_path, plex_bif_interval_ms=5000, stale_emby_sidecar=stale_emby_sidecar
+            )
+        finally:
+            logger.remove(handler_id)
+
+        canonical_path = str(tmp_path / "data" / "movies" / "Test (2024)" / "Test (2024).mkv")
+        why = [line.rstrip("\n") for line in lines if line.startswith("Needs a new preview:")]
+        assert why == [f"Needs a new preview: {canonical_path} — {reason}"], lines
 
 
 class TestPartialFailureIsolation:

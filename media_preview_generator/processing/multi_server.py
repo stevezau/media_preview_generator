@@ -918,8 +918,7 @@ def _try_reuse_existing_bif(
                 # previews from the *previous* version of the file. Pass.
                 continue
             try:
-                # The header's own field, as this app writes it: a BIF another writer left at 0 there never matches.
-                bif_interval_ms = read_bif_metadata(candidate_str).header_interval_ms
+                bif_metadata = read_bif_metadata(candidate_str)
             except Exception as exc:
                 logger.warning(
                     "BIF reuse: could not read the header of {} ({}: {}); falling back to FFmpeg.",
@@ -928,15 +927,19 @@ def _try_reuse_existing_bif(
                     exc,
                 )
                 continue
-            if bif_interval_ms != frame_interval_ms:
-                logger.info(
-                    "BIF reuse: skipping {} (server={}) — it has a frame every {} ms, but the current "
-                    "setting is every {} ms.",
-                    candidate_str,
-                    server.name,
-                    bif_interval_ms,
-                    frame_interval_ms,
-                )
+            # The header's own field, as this app writes it: a BIF another writer left at 0 there never matches.
+            if bif_metadata.header_interval_ms != frame_interval_ms:
+                if bif_metadata.header_interval_ms == 0:
+                    why = (
+                        f"another program made it (a frame every {bif_metadata.frame_interval_ms} ms, such as Plex's "
+                        "own previews), so its picture size and quality are unknown"
+                    )
+                else:
+                    why = (
+                        f"it has a frame every {bif_metadata.header_interval_ms} ms, but the current setting is "
+                        f"every {frame_interval_ms} ms"
+                    )
+                logger.info("BIF reuse: skipping {} (server={}) — {}.", candidate_str, server.name, why)
                 continue
             try:
                 os.makedirs(out_dir, exist_ok=True)
@@ -1983,6 +1986,17 @@ def _process_canonical_path_previews(
                 all_fresh = False
                 break
             if not paths or not _outputs_fresh(adapter, paths, canonical_path):
+                # Says which server is behind and why, so a job re-making many previews can be explained (#444).
+                logger.log(
+                    breadcrumb_level,
+                    "Needs a new preview: {} — {}",
+                    canonical_path,
+                    (
+                        f"{server.name} has a preview from before this file changed (its size or modified time differs)"
+                        if outputs_have_content(paths)
+                        else f"{server.name} has no preview for this file yet"
+                    ),
+                )
                 all_fresh = False
                 break
             fresh_checks.append((server, adapter, item_id, paths))

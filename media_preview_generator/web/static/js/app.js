@@ -1811,7 +1811,10 @@ function _queueMetadataHtml(job, title) {
     if (associated.length === 1) owners = `<span class="queue-additional-owner" title="Associated library server">${primary ? '+ ' : ''}${ownerBadge(associated[0])}</span>`;
     else if (associated.length > 1) owners = `<details class="queue-owner-details"><summary aria-label="Show associated library servers">${primary ? '+' : ''}${associated.length} servers</summary><div class="queue-owner-list">${associated.map(pair => `<div>${ownerBadge(pair)}</div>`).join('')}</div></details>`;
     const servers = primary || owners ? `<span class="queue-server-group">${primary}${owners}</span>` : '';
-    const source = job.config?.source ? `<span class="queue-trigger-context">${_serverBadge({config: job.config})}</span>` : '';
+    // A schedule's Previews job carries no config.source (the scheduler reads one as "not a whole-library scan"), only
+    // its schedule id; without this it showed no "Scheduled" tag beside its Intro & Credits job (#444).
+    const trigger = job.config?.source || (job.parent_schedule_id ? 'schedule' : '');
+    const source = trigger ? `<span class="queue-trigger-context">${_serverBadge({config: {source: trigger}})}</span>` : '';
     const failedFiles = job.status === 'failed' ? Number(job.progress?.outcome?.failed) || 0 : 0;
     const failure = failedFiles > 0
         ? `<span class="queue-fail-note">${failedFiles.toLocaleString()} ${failedFiles === 1 ? 'file' : 'files'} failed</span>` : '';

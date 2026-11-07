@@ -617,6 +617,33 @@ class TestQueueRows:
         tooltip = badge.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == error
 
+    def test_a_schedules_previews_job_is_tagged_scheduled_like_its_intro_job(self, dashboard) -> None:
+        """Issue #444: one schedule ticking Previews and Intro & Credits made two jobs, and only the Intro job said
+        "Scheduled" — a schedule's Previews job carries its schedule id, not a source. A job started by hand has
+        neither and stays untagged."""
+        schedule = "sched-0000-4000-8000-000000000444"
+        previews = _job(
+            "cccccccc-0000-4000-8000-000000000444",
+            status="running",
+            library_name="All Libraries",
+            parent_schedule_id=schedule,
+            config={"selected_libraries": []},
+        )
+        intro = _markers_job(
+            "dddddddd-0000-4000-8000-000000000444",
+            status="running",
+            library_name="All Libraries",
+            parent_schedule_id=schedule,
+            config={"kind": "intro_credits", "source": "schedule", "libraries": []},
+        )
+        manual = _job("eeeeeeee-0000-4000-8000-000000000444", status="running", library_name="Movies")
+        page = dashboard([previews, intro, manual])
+
+        for job in (previews, intro):
+            tag = page.locator(f"#job-row-{job['id']} .queue-trigger-context")
+            expect(tag).to_have_text("Scheduled", timeout=5000)
+        expect(page.locator(f"#job-row-{manual['id']} .queue-trigger-context")).to_have_count(0)
+
     def test_preview_job_breakdown_is_unchanged(self, dashboard) -> None:
         preview = _preview_job()
         page = dashboard([preview])
