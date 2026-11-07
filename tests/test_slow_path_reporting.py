@@ -29,7 +29,15 @@ from tests.test_processing_multi_server import _populate_frames, _seed_canonical
 GENERATOR = "media_preview_generator.processing.generator"
 
 
-def _generate(tmp_path, *, probe_stdout: str, interval: int, has_duplicates: bool = False) -> list[int]:
+def _generate(
+    tmp_path,
+    *,
+    probe_stdout: str,
+    interval: int,
+    has_duplicates: bool = False,
+    duration_ms: int | None = None,
+    image_count: int | None = None,
+) -> list[int]:
     """Run ``generate_images`` against the boundary mocks; returns one entry per slow-path report."""
     reports: list[int] = []
     mocks: dict[str, MagicMock] = {}
@@ -61,6 +69,8 @@ def _generate(tmp_path, *, probe_stdout: str, interval: int, has_duplicates: boo
             mock_glob=mocks["glob"],
             probe_stdout=probe_stdout,
             temp_dir=str(tmp_path),
+            duration_ms=duration_ms,
+            image_count=image_count,
         )
         generate_images(
             "/test/film.mkv", str(tmp_path), None, None, config, slow_path_callback=lambda: reports.append(interval)
@@ -81,6 +91,20 @@ class TestGeneratorReportsTheSlowPath:
             tmp_path, probe_stdout="0.000000,K_\n1.000000,K_\n2.000000,K_\n", interval=2, has_duplicates=True
         )
         assert reports == [2]
+
+    @pytest.mark.parametrize("has_duplicates", [False, True])
+    def test_is_silent_when_the_fast_pass_came_up_short(self, tmp_path, has_duplicates):
+        """Issue #445: one thumbnail for a 10-min film. It is fully decoded, but its snapshot frames can't be decoded
+        alone, so a longer interval wouldn't help it and the note mustn't count it, duplicates or not."""
+        reports = _generate(
+            tmp_path,
+            probe_stdout="0.000000,K_\n1.000000,K_\n2.000000,K_\n",
+            interval=2,
+            has_duplicates=has_duplicates,
+            duration_ms=600_000,
+            image_count=1,
+        )
+        assert reports == []
 
     def test_is_silent_when_the_fast_path_holds(self, tmp_path):
         assert _generate(tmp_path, probe_stdout="0.000000,K_\n1.000000,K_\n2.000000,K_\n", interval=2) == []

@@ -38,6 +38,7 @@ from media_preview_generator.processing.generator import (
     KEYFRAME_DUPLICATE_TOLERANCE,
     KEYFRAME_PROBE_MIN_SPACING_FACTOR,
     KEYFRAME_PROBE_WINDOWS,
+    _fast_pass_came_up_short,
     _has_duplicate_thumbnails,
     _keyframe_probe_window_length,
     _max_gap_within_windows,
@@ -794,6 +795,7 @@ def _wire_integration_mocks(
     probe_stdout,
     temp_dir,
     duration_ms=None,
+    image_count=None,
 ):
     """Set up the boundary mocks so generate_images runs end-to-end.
 
@@ -823,14 +825,17 @@ def _wire_integration_mocks(
     mock_file.return_value.readlines.return_value = []
     mock_detect.return_value = False
 
-    img1 = f"{temp_dir}/img-000001.jpg"
-    ts1 = f"{temp_dir}/0000000000.jpg"
+    # By default a complete run's worth of thumbnails, so the #445 short-pass check sees a full fast pass: the runtime
+    # over the integration config's 2 s interval, or two when the runtime is unknown.
+    count = image_count if image_count is not None else (max(2, round(duration_ms / 1000 / 2)) if duration_ms else 2)
+    images = [f"{temp_dir}/img-{i:06d}.jpg" for i in range(1, count + 1)]
+    renamed = [f"{temp_dir}/{i * 2:010d}.jpg" for i in range(count)]
 
     def glob_side_effect(pattern):
         if "img*.jpg" in pattern or "img-*.jpg" in pattern:
-            return [img1]
+            return images
         if pattern.endswith("*.jpg"):
-            return [ts1]
+            return renamed
         return []
 
     mock_glob.side_effect = glob_side_effect
@@ -1207,8 +1212,7 @@ def test_integration_known_duration_samples_instead_of_scanning(
     with loguru_caplog.at_level("INFO"):
         generate_images("/test/long_movie.mkv", str(tmp_path), None, None, cfg)
 
-    # The one-frame run below is short of the runtime, so the drift warning's
-    # end-of-file probe runs ffprobe too; pick the keyframe probe out by its entries.
+    # Pick the keyframe probe out of the ffprobe calls by its entries.
     probe_argv = next(c.args[0] for c in mock_run.call_args_list if "packet=pts_time,flags" in c.args[0])
     assert "-read_intervals" in probe_argv, "known duration must produce a sampled probe, not a full scan"
     intervals = probe_argv[probe_argv.index("-read_intervals") + 1].split(",")
@@ -1225,3 +1229,114 @@ def test_integration_known_duration_samples_instead_of_scanning(
     slow_path_lines = [r for r in loguru_caplog.records if "Slow path" in r.message]
     assert slow_path_lines == []
     mock_has_dupes.assert_called_once()
+
+
+# Issue #445 — an H.264 encode with intra refresh has no keyframes after the first: it marks ordinary P-frames as
+# recovery points, which ffprobe flags as keyframes (so the keyframe probe clears the fast path) but a keyframe-only
+# decode can't rebuild on their own. The fast pass then writes one thumbnail (or none) for the whole film and exits 0.
+def _make_moving_video(path: Path, duration_s: int, x264_params: str) -> str:
+    """Render a clip whose every thumbnail differs (``testsrc2`` moves), with the given x264 keyframe layout."""
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", f"testsrc2=size=64x48:rate=24:duration={duration_s}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-x264-params", x264_params, str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+    return str(path)
+
+
+def _real_generate_config(tmp_path: Path, interval: int) -> MagicMock:
+    cfg = _make_integration_config(tmp_path)
+    cfg.plex_bif_frame_interval = interval
+    cfg.ffmpeg_path = shutil.which("ffmpeg")
+    return cfg
+
+
+@needs_ffmpeg
+def test_fast_pass_that_comes_up_short_is_redone_with_full_decode(tmp_path, loguru_caplog):
+    """The fast pass writes far fewer thumbnails than the runtime asks for → the file is decoded in full, and the
+    preview spans the whole video instead of publishing a one-frame BIF over a good one."""
+    duration_s, interval = 120, 5
+    try:
+        # One IDR frame, then recovery-point P-frames every 2 s.
+        video = _make_moving_video(tmp_path / "intra_refresh.mkv", duration_s, "intra-refresh=1:keyint=48")
+    except subprocess.CalledProcessError:
+        pytest.skip("needs ffmpeg with libx264")
+    out = tmp_path / "frames"
+    slow_path_callback = MagicMock()
+
+    with loguru_caplog.at_level("INFO"):
+        success, image_count, *_ = generate_images(
+            video,
+            str(out),
+            None,
+            None,
+            _real_generate_config(tmp_path, interval),
+            slow_path_callback=slow_path_callback,
+        )
+
+    assert success
+    assert abs(image_count - duration_s / interval) <= 2, f"preview must span the video, got {image_count} thumbnails"
+    assert any("full decode" in r.message for r in loguru_caplog.records if r.levelname == "WARNING")
+    # The job's slow-path note blames the thumbnail interval; no interval helps this file, so it isn't counted there.
+    slow_path_callback.assert_not_called()
+
+
+@needs_ffmpeg
+def test_fast_pass_that_comes_up_short_is_redone_when_the_runtime_is_unknown(tmp_path, loguru_caplog):
+    """MediaInfo gives no runtime → nothing to compare against, but one thumbnail is still the #445 shape: decoded in
+    full, the preview spans the video."""
+    duration_s, interval = 120, 5
+    try:
+        video = _make_moving_video(tmp_path / "intra_refresh.mkv", duration_s, "intra-refresh=1:keyint=48")
+    except subprocess.CalledProcessError:
+        pytest.skip("needs ffmpeg with libx264")
+
+    with patch("media_preview_generator.processing.generator._video_duration_seconds", return_value=None):
+        success, image_count, *_ = generate_images(
+            video, str(tmp_path / "frames"), None, None, _real_generate_config(tmp_path, interval)
+        )
+
+    assert success
+    assert abs(image_count - duration_s / interval) <= 2, f"preview must span the video, got {image_count} thumbnails"
+
+
+@needs_ffmpeg
+def test_fast_pass_with_every_thumbnail_runs_once(tmp_path, loguru_caplog):
+    """A normal file's fast pass already writes every thumbnail, so it isn't decoded a second time."""
+    duration_s, interval = 120, 5
+    try:
+        video = _make_moving_video(tmp_path / "closed_gop.mkv", duration_s, "keyint=48")
+    except subprocess.CalledProcessError:
+        pytest.skip("needs ffmpeg with libx264")
+
+    with loguru_caplog.at_level("INFO"):
+        success, image_count, *_ = generate_images(
+            video, str(tmp_path / "frames"), None, None, _real_generate_config(tmp_path, interval)
+        )
+
+    assert success
+    assert abs(image_count - duration_s / interval) <= 2
+    assert not [r for r in loguru_caplog.records if "full decode" in r.message or "Re-running" in r.message]
+
+
+@pytest.mark.parametrize(
+    ("written", "expected", "short"),
+    [
+        (1, 640.0, True),  # the issue: one thumbnail for a 107-min film
+        (0, 640.0, True),  # nothing at all, exit 0
+        (600, 640.0, True),  # under 95%
+        (620, 640.0, False),  # at 96.9%: a complete pass a few short of a rounded-up runtime
+        (2, 4.0, False),  # a short clip two thumbnails short: a big share, but not worth a second decode
+        (1, 4.0, True),  # three short of four
+        (1, None, True),  # runtime unknown: one thumbnail is the #445 shape, worth a cheap full decode
+        (0, None, True),
+        (2, None, False),  # runtime unknown, more than one: nothing to compare against
+    ],
+)
+def test_fast_pass_came_up_short(written, expected, short):
+    assert _fast_pass_came_up_short(written, expected) is short

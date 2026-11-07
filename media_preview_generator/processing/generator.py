@@ -1504,6 +1504,26 @@ def _expected_frame_count(media_info, interval: float) -> float | None:
     return duration_s / interval
 
 
+def _fast_pass_came_up_short(written: int, expected_frames: float | None) -> bool:
+    """Whether a keyframe-only pass that exited 0 wrote too few thumbnails to publish (issue #445).
+
+    Short means under ``PUBLISH_MIN_FRAME_RATIO`` of the expected count *and* more than two thumbnails missing: a
+    complete fast pass can end a thumbnail or two early (its last keyframe sits before the end), which on a short clip
+    is a large share but no reason to decode it again. With no known runtime only one thumbnail or none counts as
+    short: a clip that really is shorter than the interval then costs one cheap full decode.
+
+    Args:
+        written: Thumbnails the pass wrote.
+        expected_frames: Thumbnails the runtime asks for, or ``None`` when the runtime is unknown.
+
+    Returns:
+        True when the file should be decoded again in full.
+    """
+    if not expected_frames:
+        return written <= 1
+    return written < expected_frames * PUBLISH_MIN_FRAME_RATIO and expected_frames - written > 2
+
+
 #: The end-of-file probe only picks which warning to log, so it gets far less
 #: time than the keyframe probe: a stalled read falls back to the generic
 #: warning instead of holding a worker. Measured cost is 0.3-5 s.
@@ -2547,19 +2567,36 @@ def generate_images(
     # without ``-skip_frame nokey``.  The check itself is cheap
     # (~150 ms hashing 7K JPGs on warm cache) so it runs unconditionally
     # whenever we just took the fast path.
+    #
+    # Issue #445 — and when it wrote far fewer thumbnails than the runtime asks for. An H.264 encode with intra refresh
+    # (or any stream whose flagged keyframes are P-frames carrying a recovery point) passes the probe, yet a
+    # keyframe-only decode can't rebuild those frames, so the fast pass exits 0 with one thumbnail for a whole film.
     if rc == 0 and use_skip_initial and not did_retry:
-        if _has_duplicate_thumbnails(output_folder):
+        written = len(glob.glob(os.path.join(glob.escape(output_folder), "img*.jpg")))
+        came_up_short = _fast_pass_came_up_short(written, expected_frames)
+        if came_up_short or _has_duplicate_thumbnails(output_folder):
             if cancel_check and cancel_check():
                 raise CancellationError(f"Processing cancelled for {video_file}")
             did_retry = True
-            logger.warning(
-                "Re-running '{}' without snapshot reuse: the first pass produced duplicate "
-                "thumbnails even though the upfront check looked safe. This file has unusual "
-                "snapshot spacing — taking the slow path now.",
-                os.path.basename(video_file),
-            )
+            if came_up_short:
+                logger.warning(
+                    "Re-running '{}' with a full decode: the quick pass made only {} thumbnail(s){}. Taking the slow "
+                    "path now.",
+                    os.path.basename(video_file),
+                    written,
+                    f" of the ~{expected_frames:.0f} this video needs" if expected_frames else "",
+                )
+            else:
+                logger.warning(
+                    "Re-running '{}' without snapshot reuse: the first pass produced duplicate "
+                    "thumbnails even though the upfront check looked safe. This file has unusual "
+                    "snapshot spacing — taking the slow path now.",
+                    os.path.basename(video_file),
+                )
+                # Only here: the job's slow-path note says a longer interval helps, which no interval does for a
+                # file whose snapshot frames can't be decoded alone.
+                _report_slow_path()
             _clean_output_images(output_folder)
-            _report_slow_path()
             retry_rc, seconds, speed, retry_stderr_lines = _run_ffmpeg(use_skip=False, init_vulkan=use_libplacebo)
             rc = retry_rc
             stderr_lines = retry_stderr_lines
