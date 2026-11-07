@@ -78,6 +78,26 @@
                     </div>
                 </div>
 
+                <!-- Routing rules: one row per rule in jobs.routing.RULES, so a new rule shows here with no edit to this page. -->
+                <h3 class="settings-subheading" id="routing-rules"><i class="bi bi-signpost-split" aria-hidden="true"></i>Routing rules
+                    <button type="button" class="info-icon ms-1" tabindex="0"
+                            data-bs-toggle="tooltip" data-bs-placement="top"
+                            title="Send files that are much faster on a GPU to a GPU worker." data-explain-title="Routing rules" data-explain-template="infoRoutingRulesTpl"><i class="bi bi-info-circle"></i></button>
+                </h3>
+                {% for rule in routing_rules %}
+                <div class="setting-row">
+                    <div class="sr-label">
+                        <label for="routingRule-{{ rule.id }}" class="sr-title">{{ rule.title }}</label>
+                        <div class="sr-hint">{{ rule.description }}</div>
+                    </div>
+                    <div class="sr-control">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch" id="routingRule-{{ rule.id }}" data-routing-rule="{{ rule.id }}">
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+
                 <h3 class="settings-subheading"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>Retry policy
                     <button type="button" class="info-icon ms-1" tabindex="0"
                             data-bs-toggle="tooltip" data-bs-placement="top"
@@ -994,6 +1014,22 @@
     <p>It only matters when the CPU is fully busy. On an idle CPU, loudness runs at full speed at any level. It doesn't change how many loudness jobs run at once (that's your worker groups) or how fast files are read from disk.</p>
     <p>Applies to remote worker nodes too, from the next file analysed.</p>
 </template>
+<template id="infoRoutingRulesTpl">
+    <p>Some files are much faster on a GPU. Routing rules spot those files and send them to a GPU worker, leaving your CPU workers free for everything else.</p>
+    <p><strong>How it works</strong></p>
+    <ul>
+        <li>Each rule checks a file before it's queued (a quick look at its headers).</li>
+        <li>If the rule matches, the file waits for a GPU worker, even a busy one.</li>
+        <li>If you have no GPU worker available (none set up, switched off, or outside its hours), the file goes to any worker as usual. Nothing gets stuck.</li>
+    </ul>
+    <p><strong>Where to see it</strong></p>
+    <ul>
+        <li>The job card shows how many files are waiting for a GPU and why.</li>
+        <li>A worker running a matched file shows why it needs a GPU.</li>
+        <li>The job log names each file a rule matched.</li>
+    </ul>
+    <p>All rules start off. Changes apply to preview jobs started afterwards.</p>
+</template>
 <template id="infoRetryPolicyTpl">
     <p>Global retry defaults for every job — webhook, scheduled, manual, recently-added.</p>
     <p>A file that can't be found on the media server (still indexing, transient API error) is retried this many times with this delay before being marked failed.</p>
@@ -1217,6 +1253,10 @@ async function loadSettings() {
         // 0 is a real level (no nice): only a missing or unreadable one falls back to the default.
         const niceLevel = parseInt(settings.loudness_nice_level, 10);
         document.getElementById('loudnessNiceLevel').value = Number.isNaN(niceLevel) ? 10 : Math.min(19, Math.max(0, niceLevel));
+        const routingRules = settings.routing_rules || {};
+        document.querySelectorAll('[data-routing-rule]').forEach((input) => {
+            input.checked = routingRules[input.dataset.routingRule] === true;
+        });
 
         // 0 is a real setting (retries off): only a missing or unreadable count falls back to the default.
         const retryCount = parseInt(settings.webhook_retry_count, 10);
@@ -1582,6 +1622,9 @@ async function saveAllSettings() {
             const level = parseInt(document.getElementById('loudnessNiceLevel').value, 10);
             return Number.isNaN(level) ? 10 : Math.min(19, Math.max(0, level));
         })(),
+        routing_rules: Object.fromEntries(
+            Array.from(document.querySelectorAll('[data-routing-rule]'), (input) => [input.dataset.routingRule, input.checked]),
+        ),
         webhook_retry_count: Math.min(
             10,
             Math.max(0, parseInt(document.getElementById('webhookRetryCount').value, 10) || 0),

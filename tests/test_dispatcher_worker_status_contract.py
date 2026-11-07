@@ -87,6 +87,7 @@ class TestBuildWorkerStatusesContract:
                 "fallback_reason",
                 "fallback_title",
                 "fallback_until",
+                "routing_reason",
                 "ffmpeg_started",
                 "current_phase",
                 "chapter_progress",
@@ -362,9 +363,11 @@ class TestMemberIdOnStatusRows:
         rows = _status_rows(pool)
         jm = MagicMock()
 
+        rows[0]["routing_reason"] = "AV1"
         worker_cards(jm)(rows)
 
         sent = {call.args[0]: call.args[1] for call in jm.update_worker_status.call_args_list}
+        assert sorted(s.routing_reason for s in sent.values()) == sorted(r["routing_reason"] for r in rows)
         assert len(sent) == len(rows)
         assert sorted((s.group_id, s.member_id) for s in sent.values()) == sorted(
             (r["group_id"], r["member_id"]) for r in rows
@@ -394,6 +397,7 @@ class TestMemberIdOnStatusRows:
         with jobs_mod._job_lock:
             jobs_mod._job_manager = None
         rows = _status_rows(_two_member_pool())
+        rows[0]["routing_reason"] = "AV1"  # the file a routing rule sent to it
         seen: list = []
         done = threading.Event()
 
@@ -425,3 +429,4 @@ class TestMemberIdOnStatusRows:
 
         assert sorted((s.group_id, s.member_id) for s in seen) == sorted((r["group_id"], r["member_id"]) for r in rows)
         assert {s.member_id for s in seen} == {"g1", "c1"}
+        assert sorted(s.routing_reason for s in seen) == sorted(r["routing_reason"] for r in rows)
