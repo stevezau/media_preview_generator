@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 # Reading on before the tail step by step while the run still starts too close to the first row read is not a version:
 # no answer that was found moves. A "nothing found" stored before it is asked again once instead, and only where a
 # step after the first can be read (:func:`credits_text_due`).
-CREDITS_TEXT_VERSION = 9
+CREDITS_TEXT_VERSION = 10
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
 # (300 s) gives 300,000 plus the version, so a chosen window's version never equals Automatic's, and another window's
@@ -168,6 +168,7 @@ def find_credits(
     ffmpeg_threads: int | None = None,
     read_text: Callable[[np.ndarray], list[list[str]]] | None = None,
     progress_callback: WorkerProgress | None = None,
+    online_hint_s: float | None = None,
 ) -> CreditsTextResult:
     """Decode the tail, find the roll, refine its start and, when a scene follows it, its end.
 
@@ -281,6 +282,47 @@ def find_credits(
     read = functools.partial(_read_credits, path, duration_ms=duration_ms, tail_start=tail_start, decode=decode,
                              thinning=thinning, earliest_start_s=earliest_start_s, show=show)  # fmt: skip
     found = _the_roll(path, read)
+    # [mpg-targeted-credit-text-v1]
+    # A crowd marker is a search hint only. It never decides/publishes a marker.
+    # The native decoder, detection pool, rule J, refinement and prose guard are reused.
+    if found.start_s is None and is_episode and online_hint_s is not None:
+        duration_s = duration_ms / 1000.0
+        hint_s = float(online_hint_s)
+        if 0.0 < hint_s < duration_s:
+            search_start_s = max(0.0, hint_s - 10.0)
+            # Rule J requires >=30s of previous story, separate from the allowed
+            # -10s marker-start window. Five seconds extra handles sample alignment.
+            context_start_s = max(0.0, search_start_s - 35.0)
+            scan_end_s = min(duration_s, hint_s + 80.0)
+            if scan_end_s > context_start_s + 30.0:
+                show("Checking online credits against the video (2 fps)…")
+                logger.info("Targeted 2-fps credits retry for {} around {:.1f}s (scan {:.1f}-{:.1f}s)",
+                            os.path.basename(path), hint_s, context_start_s, scan_end_s)
+                targeted_read = functools.partial(
+                    _read_credits, path, duration_ms=duration_ms,
+                    tail_start=context_start_s, decode=decode, thinning=thinning,
+                    earliest_start_s=search_start_s, show=show,
+                    sample_fps=2, window_end_s=scan_end_s,
+                )
+                try:
+                    targeted = _the_roll(path, targeted_read)
+                except (frames.GpuDecodeError, frames.DecodeTimeoutError, TextDetShuttingDownError):
+                    # Keep normal GPU fallback and timeout retry semantics.
+                    raise
+                except (frames.FrameDecodeError, TextDetUnavailableError) as exc:
+                    logger.warning("Targeted credits check failed for {}: {}", os.path.basename(path), exc)
+                else:
+                    # Analysis spans +80s for enough credit-roll evidence. A marker
+                    # must still begin near the provider hint; random later captions
+                    # are not evidence of the provider's credits timestamp.
+                    if (targeted.start_s is not None
+                            and search_start_s - 1.0 <= targeted.start_s <= hint_s + 20.0):
+                        found = targeted
+                        logger.info("Targeted credits accepted for {} at {:.1f}s (online hint {:.1f}s)",
+                                    os.path.basename(path), found.start_s, hint_s)
+                    else:
+                        logger.info("Targeted credits retry found no matching roll for {} around {:.1f}s",
+                                    os.path.basename(path), hint_s)
     if read_text is None or found.start_s is None:
         return found
     try:
@@ -350,6 +392,8 @@ def _read_credits(
     scale: int,
     seen: Sequence[rule_j.Row],
     decoded: list[rule_j.Row] | None,
+    sample_fps: int | None = None,
+    window_end_s: float | None = None,
     from_s: float | None = None,
     rows_before: Sequence[rule_j.Row] = (),
 ) -> CreditsTextResult:
@@ -389,10 +433,23 @@ def _read_credits(
 
     def keyframes(start_s: float, length_s: float | None, timeout_s: float | None = None) -> list[rule_j.Row]:
         limit = {} if timeout_s is None else {"timeout_s": timeout_s}
-        rows = decode_rows(
-            start_s=start_s, length_s=length_s, keyframes_only=True, fps=None, keep_every=thinning.keep_every,
-            drop_non_key=thinning.drop_non_key, **limit,
-        )  # fmt: skip
+        if sample_fps is None:
+            rows = decode_rows(
+                start_s=start_s, length_s=length_s, keyframes_only=True, fps=None,
+                keep_every=thinning.keep_every, drop_non_key=thinning.drop_non_key, **limit,
+            )  # fmt: skip
+        else:
+            # Only the targeted retry uses FPS-based sampling. Its decoded interval
+            # ends at the hint +80s, not at the end of the full video.
+            if window_end_s is not None:
+                bounded = max(0.0, window_end_s - start_s)
+                length_s = bounded if length_s is None else min(length_s, bounded)
+            if length_s is not None and length_s <= 0.0:
+                return []
+            rows = decode_rows(
+                start_s=start_s, length_s=length_s, keyframes_only=False,
+                fps=sample_fps, keep_every=None, drop_non_key=False, **limit,
+            )  # fmt: skip
         if decoded is not None:
             decoded.extend(rows)
         return rows
@@ -919,6 +976,9 @@ def detect_credits_text(
             "ffmpeg_threads": threads,
             "progress_callback": progress_callback,
         }
+        online_hint_s = _online_credits_hint(rec, ctx)
+        if online_hint_s is not None:
+            common["online_hint_s"] = online_hint_s
         text_worker = gpu_worker or gpu is not None
         if current_placement() is not None:
             # A remote worker reads on its node, with the node's own text detection; its CPU notes come back here.
@@ -1053,6 +1113,27 @@ def credits_chapter_hint_ms(rec: FileRecord, ctx: PipelineContext) -> int | None
         credits_window_ms=window_ms,
         movie_credits_max_from_end_ms=movie_cap_ms,
     )
+
+
+def _online_credits_hint(rec: FileRecord, ctx: PipelineContext) -> float | None:
+    """Consistent online credits timestamps from the existing evidence store.
+
+    Only TV; only enabled IntroDB/TheIntroDB/SkipDB. Divergent online timestamps
+    give no hint and cannot generate a targeted check or a marker by themselves.
+    """
+    if rec.season_key is None or not rec.duration_ms:
+        return None
+    provider_sources = frozenset((Source.INTRODB, Source.THEINTRODB, Source.SKIPDB))
+    times = sorted(
+        c.start_ms for c in ctx.store.get_evidence(rec.id)
+        if c.type is MarkerType.CREDITS
+        and c.source in provider_sources
+        and ctx.settings.source_enabled(c.source.value)
+        and 0 < c.start_ms < rec.duration_ms
+    )
+    if not times or times[-1] - times[0] > 10_000:
+        return None
+    return times[len(times) // 2] / 1000.0
 
 
 def _tail_s(rec: FileRecord, ctx: PipelineContext) -> float:
