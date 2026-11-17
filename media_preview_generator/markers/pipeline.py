@@ -40,7 +40,7 @@ from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import SeasonReadAhead, frame_rate_of, season_audio_spec, season_intro_chapter_limit
 from .carry_over import ReadNow, carry_over, is_carried_over, previous_decisions
 from .credits.detector import CPU_RECHECK_PHASE, CUT_SHORT, credits_text_spec
-from .credits.frames import gpu_failure_lines
+from .credits.frames import gpu_failure_lines, tail_length_s
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     APP_PUBLISH_WHEN,
@@ -1256,10 +1256,16 @@ def _decide(
 
     # The window of the file's kind, chosen the way the detector chooses it (an episode has a season key); the credit
     # text detector bounds its reads with the same two numbers (``credits.detector._earliest_start_s``).
+    is_episode = rec.season_key is not None
     credits_window_ms, movie_cap_ms = credits_limits_ms(
-        is_episode=rec.season_key is not None,
+        is_episode=is_episode,
         tv_window_s=ctx.settings.credits_tv_s,
         movie_window_s=ctx.settings.credits_movie_s,
+    )
+    # Only episodes can use the scan window as an exception, and only when
+    # credit text independently corroborates an online start (decide.py).
+    credits_scan_window_ms = (
+        int(tail_length_s(is_episode=True, tv_s=ctx.settings.credits_tv_s) * 1000) if is_episode else 0
     )
 
     def decide_from(sources: tuple[str, ...]) -> dict[MarkerType, TypeDecision]:
@@ -1274,6 +1280,7 @@ def _decide(
             movie_credits_max_from_end_ms=movie_cap_ms,
             credits_window_ms=credits_window_ms,
             frame_rate=frame_rate,
+            credits_scan_window_ms=credits_scan_window_ms,
         )
         return decide([c for c in evidence if c.source.value in enabled], dctx, locked)
 

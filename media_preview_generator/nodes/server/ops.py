@@ -395,6 +395,7 @@ def credits_find(ctx: TaskContext, node_path: str, params: dict) -> dict:
                 cancel_check=ctx.cancel_check,
                 phase=reporter.phase,
                 earliest_start_s=_optional_float(params, "earliest_start_s"),
+                online_hint_s=_optional_float(params, "online_hint_s"),
                 pause_check=ctx.pause_check,
                 ffmpeg_threads=None if threads is None else int(threads),
                 progress_callback=reporter.worker_progress if params.get("progress") else None,
