@@ -24,7 +24,7 @@ from .speed import online_time_scale
 # file's marker only content detectors decided isn't carried to a file they read now and found nothing in, so the
 # version re-run lists the files holding a carried marker too.
 DECIDE_RULES = "decide_rules"
-DECIDE_RULES_VERSION = 3
+DECIDE_RULES_VERSION = 4
 # A decided type whose published marker today's rules would leave without one keeps it, until new or changed evidence
 # contradicts it (``keep_published``); the reason starts with this.
 KEPT_BEFORE_RULE_CHANGE = "kept: published before a rule change"
