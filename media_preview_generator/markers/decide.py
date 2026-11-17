@@ -204,6 +204,9 @@ class DecisionContext:
     movie_credits_max_from_end_ms: int = MOVIE_CREDITS_MAX_FROM_END_MS
     credits_window_ms: int = 0
     frame_rate: float | None = None
+    # Episode credits-text tail actually searched (0 when no episode scan is known).
+    # Only an independently corroborated OCR answer may use it beyond the usual 25% limit.
+    credits_scan_window_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -1265,6 +1268,29 @@ def _without_another_releases_intro(sane: list[Candidate], ctx: DecisionContext)
     return [c for c in sane if not on_another_clock(c)]
 
 
+def _confirmed_early_credits_ids(of_type: list[Candidate], ctx: DecisionContext) -> set[int]:
+    """Early credits independently verified by local OCR and an online provider.
+
+    Do not relax the normal last-quarter placement rule for chapters, online
+    timestamps alone, or unrelated text runs. Both candidates must pass every
+    normal sanity check when *only* the placement window is widened to the
+    actual episode scan window; their starts must agree within 10 seconds.
+    """
+    if ctx.credits_scan_window_ms <= ctx.credits_window_ms:
+        return set()
+    scan_ctx = replace(ctx, credits_window_ms=ctx.credits_scan_window_ms)
+    in_scan = [c for c in of_type if sanity_problem(c, scan_ctx) is None]
+    local = [c for c in in_scan if c.source is Source.CREDITS_TEXT]
+    online = [c for c in in_scan if c.source in _ONLINE_SOURCES]
+    return {
+        id(candidate)
+        for text in local
+        for hint in online
+        if _agree(text, hint, ctx.duration_ms)
+        for candidate in (text, hint)
+    }
+
+
 def _decide_type(
     mtype: MarkerType, of_type: list[Candidate], sane: list[Candidate], ctx: DecisionContext
 ) -> TypeDecision:
@@ -1504,6 +1530,7 @@ def decide(
     candidates = [c for c in candidates if not c.stale]
     out: dict[MarkerType, TypeDecision] = {}
     on_clock: dict[MarkerType, list[Candidate]] = {}
+    type_contexts: dict[MarkerType, DecisionContext] = {}
     for mtype in MarkerType:
         lock = locked.get(mtype)
         if isinstance(lock, Marker) and lock.type is mtype:
@@ -1512,11 +1539,25 @@ def decide(
             out[mtype] = TypeDecision(mtype, DecisionStatus.DISABLED, None, None, "detection off")
         else:
             of_type = [c for c in candidates if c.type is mtype]
-            on_clock[mtype] = _without_another_releases_intro(_on_file_clock(of_type, ctx), ctx)
-            out[mtype] = _decide_type(mtype, of_type, on_clock[mtype], ctx)
+            type_ctx = ctx
+            if mtype is MarkerType.CREDITS and (confirmed := _confirmed_early_credits_ids(of_type, ctx)):
+                # Only the corroborating OCR/online pair may enter the wider scan window.
+                # Other early evidence (including chapter markers) must still fail sanity.
+                normal_floor = _earliest_placed_ms(ctx.duration_ms, ctx.credits_window_ms)
+                of_type_for_clock = [
+                    c for c in of_type if c.start_ms >= normal_floor or id(c) in confirmed
+                ]
+                type_ctx = replace(ctx, credits_window_ms=ctx.credits_scan_window_ms)
+            else:
+                of_type_for_clock = of_type
+            type_contexts[mtype] = type_ctx
+            on_clock[mtype] = _without_another_releases_intro(
+                _on_file_clock(of_type_for_clock, type_ctx), type_ctx
+            )
+            out[mtype] = _decide_type(mtype, of_type, on_clock[mtype], type_ctx)
 
     _apply_overlap_demotions(out)
     for mtype, decision in out.items():
         if decision.status is DecisionStatus.DECIDED and not _decided_marker(decision).locked:
-            out[mtype] = _shorten_to_server_markers(decision, on_clock[mtype], ctx)
+            out[mtype] = _shorten_to_server_markers(decision, on_clock[mtype], type_contexts[mtype])
     return out
