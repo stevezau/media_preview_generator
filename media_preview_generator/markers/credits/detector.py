@@ -296,13 +296,24 @@ def find_credits(
             scan_end_s = min(duration_s, hint_s + 80.0)
             if scan_end_s > context_start_s + 30.0:
                 show("Checking online credits against the video (2 fps)…")
-                logger.info("Targeted 2-fps credits retry for {} around {:.1f}s (scan {:.1f}-{:.1f}s)",
-                            os.path.basename(path), hint_s, context_start_s, scan_end_s)
+                logger.info(
+                    "Targeted 2-fps credits retry for {} around {:.1f}s (scan {:.1f}-{:.1f}s)",
+                    os.path.basename(path),
+                    hint_s,
+                    context_start_s,
+                    scan_end_s,
+                )
                 targeted_read = functools.partial(
-                    _read_credits, path, duration_ms=duration_ms,
-                    tail_start=context_start_s, decode=decode, thinning=thinning,
-                    earliest_start_s=search_start_s, show=show,
-                    sample_fps=2, window_end_s=scan_end_s,
+                    _read_credits,
+                    path,
+                    duration_ms=duration_ms,
+                    tail_start=context_start_s,
+                    decode=decode,
+                    thinning=thinning,
+                    earliest_start_s=search_start_s,
+                    show=show,
+                    sample_fps=2,
+                    window_end_s=scan_end_s,
                 )
                 try:
                     targeted = _the_roll(path, targeted_read)
@@ -315,14 +326,20 @@ def find_credits(
                     # Analysis spans +80s for enough credit-roll evidence. A marker
                     # must still begin near the provider hint; random later captions
                     # are not evidence of the provider's credits timestamp.
-                    if (targeted.start_s is not None
-                            and search_start_s - 1.0 <= targeted.start_s <= hint_s + 20.0):
+                    if targeted.start_s is not None and search_start_s - 1.0 <= targeted.start_s <= hint_s + 20.0:
                         found = targeted
-                        logger.info("Targeted credits accepted for {} at {:.1f}s (online hint {:.1f}s)",
-                                    os.path.basename(path), found.start_s, hint_s)
+                        logger.info(
+                            "Targeted credits accepted for {} at {:.1f}s (online hint {:.1f}s)",
+                            os.path.basename(path),
+                            found.start_s,
+                            hint_s,
+                        )
                     else:
-                        logger.info("Targeted credits retry found no matching roll for {} around {:.1f}s",
-                                    os.path.basename(path), hint_s)
+                        logger.info(
+                            "Targeted credits retry found no matching roll for {} around {:.1f}s",
+                            os.path.basename(path),
+                            hint_s,
+                        )
     if read_text is None or found.start_s is None:
         return found
     try:
@@ -1125,7 +1142,8 @@ def _online_credits_hint(rec: FileRecord, ctx: PipelineContext) -> float | None:
         return None
     provider_sources = frozenset((Source.INTRODB, Source.THEINTRODB, Source.SKIPDB))
     times = sorted(
-        c.start_ms for c in ctx.store.get_evidence(rec.id)
+        c.start_ms
+        for c in ctx.store.get_evidence(rec.id)
         if c.type is MarkerType.CREDITS
         and c.source in provider_sources
         and ctx.settings.source_enabled(c.source.value)
