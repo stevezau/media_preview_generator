@@ -4,12 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from media_preview_generator.markers.decide import (
-    DecisionContext,
-    DecisionStatus,
-    decide,
-    sanity_problem,
-)
+from media_preview_generator.markers.decide import DecisionContext, DecisionStatus, decide, sanity_problem
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
 
 CREDITS = MarkerType.CREDITS
@@ -140,7 +135,8 @@ def test_unchanged_last_quarter_rule_for_unconfirmed_credits() -> None:
     assert verdict(late).status is DecisionStatus.DECIDED
 
     # A wider scan window affects only independently confirmed early starts.
-    assert verdict(
+    result = verdict(
         candidate(Source.CREDITS_TEXT, TEXT_START_MS, CREDITS_END_MS),
         decision_context=replace(context(), credits_scan_window_ms=600_000),
-    ).status is DecisionStatus.NO_EVIDENCE
+    )
+    assert result.status is DecisionStatus.NO_EVIDENCE
