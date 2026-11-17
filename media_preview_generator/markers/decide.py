@@ -1544,16 +1544,12 @@ def decide(
                 # Only the corroborating OCR/online pair may enter the wider scan window.
                 # Other early evidence (including chapter markers) must still fail sanity.
                 normal_floor = _earliest_placed_ms(ctx.duration_ms, ctx.credits_window_ms)
-                of_type_for_clock = [
-                    c for c in of_type if c.start_ms >= normal_floor or id(c) in confirmed
-                ]
+                of_type_for_clock = [c for c in of_type if c.start_ms >= normal_floor or id(c) in confirmed]
                 type_ctx = replace(ctx, credits_window_ms=ctx.credits_scan_window_ms)
             else:
                 of_type_for_clock = of_type
             type_contexts[mtype] = type_ctx
-            on_clock[mtype] = _without_another_releases_intro(
-                _on_file_clock(of_type_for_clock, type_ctx), type_ctx
-            )
+            on_clock[mtype] = _without_another_releases_intro(_on_file_clock(of_type_for_clock, type_ctx), type_ctx)
             out[mtype] = _decide_type(mtype, of_type, on_clock[mtype], type_ctx)
 
     _apply_overlap_demotions(out)
