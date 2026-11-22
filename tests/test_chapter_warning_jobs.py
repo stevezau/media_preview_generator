@@ -1,5 +1,7 @@
 """Finished chapter warnings remain discoverable beside the unfinished queue."""
 
+from datetime import UTC, datetime
+
 import pytest
 
 from media_preview_generator.web.job_details import job_has_chapter_warning
@@ -172,6 +174,8 @@ def test_dismiss_marks_only_warning_jobs_and_a_later_warning_raises_the_banner(a
 def test_dismissal_is_persisted_to_the_jobs_database(app):
     manager = get_job_manager()
     job = _warning_job(manager, "Persisted")
+    # Recent, or the reloaded manager's 30-day history cleanup deletes the job before the assert reads it.
+    job.completed_at = datetime.now(UTC).isoformat()
     app.test_client().post("/api/jobs/chapter-warnings/dismiss", headers=_HEADERS)
     reloaded = JobManager(config_dir=manager.config_dir)
     assert reloaded.get_job(job.id).config["chapter_warning_dismissed"] == job.completed_at
