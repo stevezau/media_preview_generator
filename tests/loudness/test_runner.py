@@ -176,7 +176,9 @@ def test_loudness_callback_preserves_shared_preview_chapter_progress(run, tmp_pa
             assert preview_row["job_id"] == preview_job.id and preview_row["job_kind"] == "previews"
             assert preview_row["current_file"] == "/media/preview.mkv" and not preview_row["paused"]
             assert audio_row["job_id"] == audio_job.id and audio_row["job_kind"] == "loudness"
-            assert audio_row["current_file"] == "/media/audio.mkv" and audio_row["paused"]
+            # Paused by hand: the job is paused but its running file isn't frozen (#452).
+            assert audio_row["current_file"] == "/media/audio.mkv" and audio_row["job_paused"]
+            assert not audio_row["paused"]
         worker.is_busy = False
         delivered.clear()
         callback(dispatcher._build_worker_statuses())
