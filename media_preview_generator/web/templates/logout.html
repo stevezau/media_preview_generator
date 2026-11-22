@@ -8,7 +8,7 @@
     <div class="card section-card mx-auto" style="max-width: 28rem;" id="logoutConfirm">
         <div class="card-body p-4">
             <h1 class="h5 mb-2"><i class="bi bi-box-arrow-right me-2"></i>Sign out?</h1>
-            {% if auth_external %}
+            {% if signed_in_by_proxy %}
             <p class="text-muted small mb-4">Sign-in is handled by your proxy or VPN: sign out there to leave. This only clears this app's own session.</p>
             {% else %}
             <p class="text-muted small mb-4">You'll need your token to sign in again.</p>

@@ -9,7 +9,6 @@ import base64
 import json
 import os
 import re
-import secrets
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -22,7 +21,7 @@ from flask import Blueprint, g, jsonify, request
 from loguru import logger
 
 from ..processing.retry_queue import retry_policy
-from .auth import api_token_required, validate_token
+from .auth import api_token_required, tokens_match, validate_token
 from .jobs import Job, JobStatus, get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
 
@@ -150,13 +149,6 @@ def _save_history_to_disk() -> None:
         logger.debug("Failed to persist webhook history: {}", exc)
 
 
-def _tokens_match(supplied: str, expected: str) -> bool:
-    """Constant-time token comparison that is False, not an exception, for non-ASCII or non-str input."""
-    if not isinstance(supplied, str) or not isinstance(expected, str):
-        return False
-    return secrets.compare_digest(supplied.encode(), expected.encode())
-
-
 def _authenticate_webhook(f):
     """Check X-Auth-Token, Authorization Bearer, Basic auth, or ``?token=`` query param.
 
@@ -220,7 +212,7 @@ def _authenticate_webhook(f):
         # Plex sent the event). Auth itself uses only the global webhook
         # secret, then falls back to the API auth token.
         for _method, token in candidates:
-            if webhook_secret and _tokens_match(token, webhook_secret):
+            if webhook_secret and tokens_match(token, webhook_secret):
                 return f(*args, **kwargs)
             if validate_token(token):
                 return f(*args, **kwargs)

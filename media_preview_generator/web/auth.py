@@ -19,6 +19,15 @@ AUTH_FILE = os.path.join(CONFIG_DIR, "auth.json")
 # Auth method constants (mirrors *arr ecosystem AuthenticationMethod convention)
 AUTH_METHOD_INTERNAL = "internal"
 AUTH_METHOD_EXTERNAL = "external"
+AUTH_METHOD_PROXY = "proxy"
+
+DEFAULT_PROXY_SECRET_HEADER = "X-MPG-Proxy-Secret"
+DEFAULT_PROXY_USER_HEADER = "Remote-User"
+MIN_PROXY_SECRET_LENGTH = 32
+
+
+class ProxyAuthConfigError(RuntimeError):
+    """AUTH_METHOD=proxy is set without a usable AUTH_PROXY_SECRET."""
 
 
 def get_config_dir() -> str:
@@ -151,14 +160,19 @@ def regenerate_token() -> str:
     return new_token
 
 
-def validate_token(token: str) -> bool:
-    """Validate the provided token against the stored token.
+def tokens_match(supplied: str, expected: str) -> bool:
+    """Constant-time comparison that is False, not an exception, for non-str input.
 
     Compares bytes: ``compare_digest`` raises TypeError for non-ASCII ``str``, which would turn a bad token into a 500.
     """
-    if not isinstance(token, str):
+    if not isinstance(supplied, str) or not isinstance(expected, str):
         return False
-    return secrets.compare_digest(token.encode(), get_auth_token().encode())
+    return secrets.compare_digest(supplied.encode(), expected.encode())
+
+
+def validate_token(token: str) -> bool:
+    """Validate the provided token against the stored token."""
+    return tokens_match(token, get_auth_token())
 
 
 def is_token_env_controlled() -> bool:
@@ -220,18 +234,65 @@ def get_auth_method() -> str:
     """Get the configured authentication method.
 
     Returns:
-        'internal' (default) or 'external'.
-        Set AUTH_METHOD=external when using a reverse proxy or VPN for auth.
+        'internal' (default), 'external' (no sign-in at all: a proxy or VPN guards every route), or 'proxy'
+        (the proxy's user header signs a request in when it also carries AUTH_PROXY_SECRET).
     """
     method = os.environ.get("AUTH_METHOD", AUTH_METHOD_INTERNAL).lower().strip()
-    if method == AUTH_METHOD_EXTERNAL:
-        return AUTH_METHOD_EXTERNAL
+    if method in (AUTH_METHOD_EXTERNAL, AUTH_METHOD_PROXY):
+        return method
     return AUTH_METHOD_INTERNAL
 
 
 def is_auth_external() -> bool:
     """Check if authentication is handled externally (reverse proxy, VPN, etc.)."""
     return get_auth_method() == AUTH_METHOD_EXTERNAL
+
+
+def _proxy_secret() -> str:
+    return os.environ.get("AUTH_PROXY_SECRET", "").strip()
+
+
+def _proxy_header_name(env_var: str, default: str) -> str:
+    return os.environ.get(env_var, "").strip() or default
+
+
+def validate_proxy_auth_config() -> None:
+    """Refuse to start in proxy mode without a long enough secret, rather than run with no proxy sign-in.
+
+    Raises:
+        ProxyAuthConfigError: AUTH_METHOD=proxy and AUTH_PROXY_SECRET is unset or shorter than 32 characters.
+    """
+    if get_auth_method() != AUTH_METHOD_PROXY:
+        return
+    secret = _proxy_secret()
+    if not secret:
+        raise ProxyAuthConfigError(
+            "AUTH_METHOD=proxy needs AUTH_PROXY_SECRET: a long random string your reverse proxy adds to every "
+            "request it forwards. Set it on this container and on the proxy, or set AUTH_METHOD back to internal."
+        )
+    if len(secret) < MIN_PROXY_SECRET_LENGTH:
+        raise ProxyAuthConfigError(
+            f"AUTH_PROXY_SECRET is {len(secret)} characters; AUTH_METHOD=proxy needs at least "
+            f"{MIN_PROXY_SECRET_LENGTH}. Generate one with: openssl rand -hex 32"
+        )
+
+
+def proxy_user() -> str | None:
+    """Return the user the reverse proxy signed in for this request, or None.
+
+    The user header is read only when the request also carries the proxy's secret: anyone can send ``Remote-User``
+    straight to the app's port, but only the proxy knows the secret.
+    """
+    if get_auth_method() != AUTH_METHOD_PROXY:
+        return None
+    secret = _proxy_secret()
+    if not secret:
+        return None
+    supplied = request.headers.get(_proxy_header_name("AUTH_PROXY_SECRET_HEADER", DEFAULT_PROXY_SECRET_HEADER), "")
+    if not tokens_match(supplied.strip(), secret):
+        return None
+    user = request.headers.get(_proxy_header_name("AUTH_PROXY_USER_HEADER", DEFAULT_PROXY_USER_HEADER), "")
+    return user.strip() or None
 
 
 def get_token_info() -> dict:
@@ -255,9 +316,24 @@ def get_token_info() -> dict:
     }
 
 
+# Sec-Fetch-Site values of a request one of this app's own pages made ("none": the user typed or bookmarked it).
+_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+def is_cross_site_request() -> bool:
+    """True when the browser says another origin made this request (``Sec-Fetch-Site``, which pages can't set).
+
+    Older browsers and scripts send no such header, so its absence is not cross-site.
+    """
+    fetch_site = request.headers.get("Sec-Fetch-Site")
+    return fetch_site is not None and fetch_site not in _OWN_FETCH_SITES
+
+
 def is_authenticated() -> bool:
     """Check if the current session is authenticated."""
     if is_auth_external():
+        return True
+    if proxy_user():
         return True
     return session.get("authenticated", False)
 
@@ -368,6 +444,16 @@ def log_token_on_startup() -> None:
         logger.warning("mechanism is protecting access to this application.")
         logger.warning("=" * 60)
         return
+
+    if get_auth_method() == AUTH_METHOD_PROXY:
+        logger.info("=" * 60)
+        logger.info("AUTH_METHOD=proxy — your reverse proxy signs users in")
+        logger.info(
+            "A request is signed in when it carries the {} header with AUTH_PROXY_SECRET and a {} header.",
+            _proxy_header_name("AUTH_PROXY_SECRET_HEADER", DEFAULT_PROXY_SECRET_HEADER),
+            _proxy_header_name("AUTH_PROXY_USER_HEADER", DEFAULT_PROXY_USER_HEADER),
+        )
+        logger.info("Anything else, such as a direct visit to this port, needs the token below.")
 
     token = get_auth_token()
     masked = "****" + token[-4:] if len(token) > 4 else "****"

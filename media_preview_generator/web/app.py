@@ -22,7 +22,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_LOUDNESS, JOB_KIND_PREVIEWS
 from ..nodes.protocol import APP_INSTANCE_HEADER
 from ..shutdown import on_shutdown
-from .auth import log_token_on_startup
+from .auth import log_token_on_startup, validate_proxy_auth_config
 from .jobs import JobStatus, get_job_manager
 from .scheduler import get_schedule_manager
 
@@ -643,10 +643,6 @@ _CSRF_REFUSED_MESSAGE = (
 )
 
 
-# Sec-Fetch-Site values of a request one of this app's own pages made ("none": the user typed or bookmarked it).
-_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
-
-
 def _install_csrf_protection(app: Flask) -> None:
     """Require a CSRF token on every state-changing request that relies on the browser session.
 
@@ -665,7 +661,7 @@ def _install_csrf_protection(app: Flask) -> None:
     from flask import jsonify, redirect, render_template, request, url_for
     from flask_wtf.csrf import CSRFError
 
-    from .auth import _check_token_headers
+    from .auth import _check_token_headers, is_cross_site_request
 
     @app.before_request
     def _require_csrf_for_browser_requests():
@@ -675,9 +671,10 @@ def _install_csrf_protection(app: Flask) -> None:
             return
         if getattr(app.view_functions.get(request.endpoint), "is_webhook_receiver", False):
             return
-        fetch_site = request.headers.get("Sec-Fetch-Site")
-        if fetch_site is not None and fetch_site not in _OWN_FETCH_SITES:
-            raise CSRFError(f"The request came from another site (Sec-Fetch-Site: {fetch_site}).")
+        if is_cross_site_request():
+            raise CSRFError(
+                f"The request came from another site (Sec-Fetch-Site: {request.headers['Sec-Fetch-Site']})."
+            )
         csrf.protect()
 
     @app.errorhandler(CSRFError)
@@ -708,6 +705,7 @@ def create_app(config_dir: str | None = None) -> Flask:
 
     """
     _log_build_provenance()
+    validate_proxy_auth_config()
 
     if config_dir is None:
         config_dir = os.environ.get("CONFIG_DIR", "/config")

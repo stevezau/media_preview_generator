@@ -338,7 +338,10 @@ These are not migrated to settings.json and remain in effect:
 | `HTTPS` | `false` | Mark session cookies secure. Set to `true` when the app is served over HTTPS. |
 | `DEV_RELOAD` | `false` | Start gunicorn with live reload (development) |
 | `WEB_AUTH_TOKEN` | Auto-generated | Fixed authentication token (overrides wizard-set token) |
-| `AUTH_METHOD` | `internal` | Set to `external` to disable built-in auth when using a reverse proxy or VPN (see below) |
+| `AUTH_METHOD` | `internal` | `proxy` lets your reverse proxy sign users in; `external` turns built-in auth off (see below) |
+| `AUTH_PROXY_SECRET` | — | Required with `AUTH_METHOD=proxy`: a random string of at least 32 characters that only your proxy sends |
+| `AUTH_PROXY_SECRET_HEADER` | `X-MPG-Proxy-Secret` | Header your proxy puts `AUTH_PROXY_SECRET` in |
+| `AUTH_PROXY_USER_HEADER` | `Remote-User` | Header your proxy's sign-in (Tinyauth, Authelia, Authentik) puts the user name in |
 | `FLASK_SECRET_KEY` | Auto-generated | Override the Flask session signing key. Auto-generated and persisted to `/config/flask_secret.key` if not set. Set this only when you need a fixed key across rebuilds. |
 | `LOG_FORMAT` | `pretty` | Log output format. `json` writes one JSON object per log line, for log shippers such as Loki or Datadog. |
 | `PLEX_DATA_ROOT` | `/` | Restricts where Plex config folders can be validated. Defaults to the whole filesystem; set it to e.g. `/plex` to refuse anything outside that root. |
@@ -358,7 +361,46 @@ Not for deployment. These override paths used in development and the accuracy ha
 | `MEDIA_PREVIEW_TEXTDET_MODEL` | the Docker image's own copy (`/app/models/ch_PP-OCRv4_det_infer.onnx`) | Overrides the on-screen credit text model path, for development and the `tools/markers_eval credits-text` harness. |
 | `MEDIA_PREVIEW_TEXTREC_MODEL` | the Docker image's own copy (`/app/models/latin_PP-OCRv5_rec_mobile.onnx`) | Overrides the path of the model that reads the card the credits start on (epilogue text), for development and the same harness. |
 
-### External Authentication (AUTH_METHOD)
+### Reverse proxy sign-in (AUTH_METHOD=proxy)
+
+Use this when a proxy with its own sign-in (Tinyauth, Authelia, Authentik) sits in front of the app, but port 8080 also
+has to stay reachable, for example for Sonarr and Radarr webhooks. People who come through the proxy skip the token
+login. Anyone who reaches port 8080 directly still needs the token.
+
+```yaml
+environment:
+  - AUTH_METHOD=proxy
+  - AUTH_PROXY_SECRET=<output of: openssl rand -hex 32>
+```
+
+The proxy adds the secret to every request it forwards. With Caddy and Tinyauth:
+
+```caddyfile
+mpg.example.com {
+    forward_auth tinyauth:3000 {
+        uri /api/auth/caddy
+        copy_headers Remote-User
+    }
+    reverse_proxy mpg:8080 {
+        header_up X-MPG-Proxy-Secret {env.MPG_PROXY_SECRET}
+    }
+}
+```
+
+With nginx, add `proxy_set_header X-MPG-Proxy-Secret "<your secret>";` to the `location` that proxies to the app.
+Other proxies work the same way: they set one request header. If your sign-in sends the user name in a different
+header (Authentik uses `X-authentik-username`), set `AUTH_PROXY_USER_HEADER` to it.
+
+- A request is signed in only when it carries the secret **and** a user header. The user header alone does nothing,
+  so sending `Remote-User` straight to port 8080 doesn't get anyone in.
+- The secret only proves a request came through your proxy. Your proxy must remove any user header the visitor sent,
+  and must not add the secret on paths it lets through without sign-in.
+- The app refuses to start if `AUTH_PROXY_SECRET` is missing or shorter than 32 characters.
+- Webhooks, the CSRF token on browser `POST`/`PUT`/`PATCH`/`DELETE`, and the API token for scripts work as they do
+  with built-in auth.
+- **Sign out** only clears this app's session: sign out at your proxy to leave.
+
+### External Authentication (AUTH_METHOD=external)
 
 If you secure access via a reverse proxy (Authelia, Authentik, Caddy Security, nginx basic auth, etc.) or a VPN (Tailscale, WireGuard), you can disable the built-in login screen:
 
@@ -377,7 +419,7 @@ When set to `external`:
 - Removing the variable (or setting it back to `internal`) instantly re-enables built-in auth.
 
 > [!CAUTION]
-> Only use `AUTH_METHOD=external` when you are certain that network-level access control is in place. Without it, anyone who can reach the web UI has full access.
+> Only use `AUTH_METHOD=external` when you are certain that network-level access control is in place. Without it, anyone who can reach the web UI has full access, including anyone who reaches port 8080 without going through your proxy. If that port has to stay open, use `AUTH_METHOD=proxy` instead.
 
 ### Deprecated (no longer used)
 
@@ -1102,7 +1144,7 @@ as a hidden `csrf_token` field. Without it (or with a stale one) the request is 
 - The webhook receivers (`POST /api/webhooks/radarr`, `/sonarr`, `/sportarr`, `/custom`, `/plex`, `/incoming` and
   `/server/{server_id}`) never need it: they check their own webhook secret on every call.
 - The setup wizard sends it too, including before setup is finished when its routes need no sign-in.
-- With `AUTH_METHOD=external`, browser requests still need it; scripts behind the proxy should send the API token.
+- With `AUTH_METHOD=external` or `proxy`, browser requests still need it; scripts behind the proxy should send the API token.
 - A browser request that says it came from another origin (the browser-set `Sec-Fetch-Site` header is anything but
   `same-origin` or `none`) is refused even with a valid token: another app on the same host, on a different port,
   counts as the same site for cookies. Requests without the header (older browsers, scripts) rely on the token alone.

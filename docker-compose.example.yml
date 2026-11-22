@@ -62,8 +62,13 @@ services:
       # Timezone — ensures log timestamps and scheduled jobs use your local time
       # - TZ=America/New_York
 
-      # Disable built-in auth when behind a reverse proxy or VPN (Authelia, Tailscale, etc.)
-      # Webhook auth (Radarr/Sonarr) is not affected.
+      # Let your reverse proxy's sign-in (Tinyauth, Authelia, Authentik) skip the token login.
+      # Direct visits to port 8080 still need the token. The proxy must send the same secret
+      # in the X-MPG-Proxy-Secret header (see docs/reference.md).
+      # - AUTH_METHOD=proxy
+      # - AUTH_PROXY_SECRET=<output of: openssl rand -hex 32>
+      # Or turn built-in auth off entirely when a VPN or proxy guards every route.
+      # Webhook auth (Radarr/Sonarr) is not affected by either.
       # - AUTH_METHOD=external
 
     volumes:

@@ -3,7 +3,7 @@
 from flask_socketio import disconnect, join_room, leave_room
 from loguru import logger
 
-from ..auth import is_authenticated
+from ..auth import is_authenticated, is_cross_site_request
 
 # Ordered list of log levels from most to least verbose
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -23,6 +23,16 @@ def _leave_all_level_rooms() -> None:
         leave_room(lvl)
 
 
+def _may_connect() -> bool:
+    """A socket may open only for a signed-in client on one of this app's own pages.
+
+    Socket.IO answers before Flask's CSRF check runs, and with the default ``CORS_ORIGINS=*`` it lets any origin
+    connect with credentials. A proxy's login (AUTH_METHOD=proxy/external) can ride along on a cross-site request, so
+    without this another site could read the live job and log streams.
+    """
+    return not is_cross_site_request() and is_authenticated()
+
+
 def register_socketio_handlers(socketio):
     """Register SocketIO event handlers."""
 
@@ -31,7 +41,7 @@ def register_socketio_handlers(socketio):
     @socketio.on("connect", namespace="/jobs")
     def handle_connect():
         """Handle client connection."""
-        if not is_authenticated():
+        if not _may_connect():
             disconnect()
             return False
         logger.debug("Client connected to jobs namespace")
@@ -67,7 +77,7 @@ def register_socketio_handlers(socketio):
     @socketio.on("connect", namespace="/logs")
     def handle_logs_connect():
         """Authenticate and subscribe to the server's configured log level by default."""
-        if not is_authenticated():
+        if not _may_connect():
             disconnect()
             return False
         from ..settings_manager import get_settings_manager

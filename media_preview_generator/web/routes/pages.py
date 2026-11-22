@@ -6,7 +6,14 @@ from flask import redirect, render_template, request, session, url_for
 from loguru import logger
 
 from ...config import MAX_CPU_THREADS
-from ..auth import is_auth_external, is_authenticated, login_required, start_signed_in_session, validate_token
+from ..auth import (
+    is_auth_external,
+    is_authenticated,
+    login_required,
+    proxy_user,
+    start_signed_in_session,
+    validate_token,
+)
 from . import main
 from ._helpers import limiter
 
@@ -51,7 +58,7 @@ def logout():
         return redirect(url_for("main.login"))
     if not is_authenticated():
         return redirect(url_for("main.login"))
-    return render_template("logout.html", auth_external=is_auth_external())
+    return render_template("logout.html", signed_in_by_proxy=is_auth_external() or proxy_user() is not None)
 
 
 @main.route("/settings")
