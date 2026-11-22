@@ -400,7 +400,10 @@ class WorkerStatus:
     status: str = "idle"  # "idle", "processing"
     job_id: str | None = None
     job_kind: str | None = None
+    # paused: the job's schedule stop froze this worker's FFmpeg (SIGSTOP). A job paused by hand only stops new files
+    # being picked, so its running file keeps going: job_paused without paused (#452).
     paused: bool = False
+    job_paused: bool = False
     current_file: str = ""
     current_title: str = ""
     library_name: str = ""
@@ -3318,12 +3321,15 @@ class JobManager:
             for status in self._worker_statuses.values():
                 job = self._jobs.get(status.job_id) if status.job_id else None
                 # Resolve live pause ownership here, including between progress callbacks.
+                reasons = job_pause_reasons(job) if job else set()
                 aged_out = status.fallback_until is not None and time.time() >= status.fallback_until
                 statuses.append(
                     replace(
                         status,
                         job_kind=job.kind if job else None,
-                        paused=bool(job_pause_reasons(job)) if job else False,
+                        # Mirrors job_freeze_check; the dashboard adds Pause all and quiet hours itself.
+                        paused="schedule" in reasons,
+                        job_paused=bool(reasons),
                         fallback_active=status.fallback_active and not aged_out,
                         fallback_title="" if aged_out else status.fallback_title,
                     )

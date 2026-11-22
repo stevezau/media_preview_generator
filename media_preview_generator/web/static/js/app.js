@@ -3351,15 +3351,17 @@ function _patchWorkerCard(col, worker, anyOnNode = false) {
     // ahead of this app said to need the update ("app needs an update").
     const nodeCause = nodeState?.causes?.[worker.node_cause];
     const nodeText = nodeCause ? nodeCause[0].toUpperCase() + nodeCause.slice(1) : `Node ${nodeStatus}`;
-    const workerStatus = nodeDown ? nodeText : paused ? (worker.retiring ? 'Paused · finishing after resume' : 'Paused') : worker.retiring ? 'Finishing current file' : isProcessing ? 'Processing' : 'Idle';
+    // A job paused by hand still runs its current file (#452): only a frozen FFmpeg is "Paused".
+    const finishing = isProcessing && (worker.retiring || worker.job_paused);
+    const workerStatus = nodeDown ? nodeText : paused ? (worker.retiring ? 'Paused · finishing after resume' : 'Paused') : finishing ? 'Finishing current file' : isProcessing ? 'Processing' : 'Idle';
     if (statusEl.textContent !== workerStatus) {
         statusEl.textContent = workerStatus;
     }
     const nodeBad = nodeDown && nodeState?.tone === 'bad';
     statusEl.classList.toggle('bad', nodeBad);
     statusEl.classList.toggle('warn', !nodeBad);
-    statusEl.hidden = !(nodeDown || paused || worker.retiring);
-    card.classList.toggle('worker-long-status', !!worker.retiring);
+    statusEl.hidden = !(nodeDown || paused || finishing);
+    card.classList.toggle('worker-long-status', finishing);
 
     const title = isProcessing ? worker.current_title || worker.current_file || 'Processing…' : '';
     if (titleEl.textContent !== title) titleEl.textContent = title;

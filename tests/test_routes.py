@@ -2540,7 +2540,8 @@ class TestJobConfigPathMappings:
         assert seen[0]["job_id"] == other_job.id
         assert seen[0]["job_kind"] == "loudness"
         assert seen[0]["current_file"] == "/media/AV1 Clip 3.mkv"
-        assert seen[0]["paused"] is True
+        assert seen[0]["job_paused"] is True
+        assert seen[0]["paused"] is False
 
     def test_start_job_does_NOT_accept_path_mappings_override(self, client, tmp_path):
         """``path_mappings`` is a Settings-level concept, not a per-job override.
@@ -8086,7 +8087,9 @@ class TestQueueDiscoveryContracts:
         rows = client.get("/api/jobs/workers", headers=_api_headers()).get_json()["workers"]
         by_id = {row["job_id"]: row for row in rows}
         assert by_id[preview.id]["job_kind"] == "previews" and not by_id[preview.id]["paused"]
-        assert by_id[audio.id]["job_kind"] == "loudness" and by_id[audio.id]["paused"]
+        # A pause by hand lets the running file finish (#452): the job is paused, the worker isn't frozen.
+        assert by_id[audio.id]["job_kind"] == "loudness" and by_id[audio.id]["job_paused"]
+        assert not by_id[audio.id]["paused"]
         assert by_id[audio.id]["current_file"] == "/media/audio.mkv"
         manager.request_pause(audio.id, by_schedule=True)
         manager.request_resume(audio.id)

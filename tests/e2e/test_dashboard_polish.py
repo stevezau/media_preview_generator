@@ -158,6 +158,12 @@ def test_worker_identity_and_open_file_survive_progress_and_status_updates(
     expect(preview.locator("[data-percent]")).to_have_text("67.3%")
     expect(preview.locator("[data-file]")).to_have_attribute("open", "")
     expect(preview.locator("[data-file-path]")).to_have_text(workers[0]["current_file"])
+    # #452: a job paused by hand still runs this file, so its speed and ETA stay live.
+    workers[0].update(job_paused=True, speed="2.5x", eta="3m 10s")
+    page.evaluate("workers => updateWorkerStatuses(workers)", workers)
+    expect(preview.get_by_text("Finishing current file", exact=True)).to_be_visible()
+    expect(preview.locator("[data-speed]")).to_have_text("2.5x")
+    expect(preview.locator("[data-eta]")).to_have_text("3m 10s")
     workers[0].update(paused=True, retiring=True)
     page.evaluate("workers => updateWorkerStatuses(workers)", workers)
     expect(preview.get_by_text("Paused · finishing after resume", exact=True)).to_be_visible()
