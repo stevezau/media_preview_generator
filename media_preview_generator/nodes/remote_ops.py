@@ -506,6 +506,7 @@ def find_credits(
     progress_callback: Callable[..., None] | None = None,
     gpu_worker: bool = False,
     on_cpu: Callable[[str], None] | None = None,
+    online_hint_s: float | None = None,
 ) -> CreditsTextResult:
     """``markers.credits.detector.find_credits`` on the node, with the node's own text-detection pool.
 
@@ -532,6 +533,8 @@ def find_credits(
         "read_text": bool(read_text),
         "progress": progress_callback is not None,
     }
+    if online_hint_s is not None:
+        params["online_hint_s"] = float(online_hint_s)
     try:
         result = run_on_node(
             protocol.OP_CREDITS_FIND,
