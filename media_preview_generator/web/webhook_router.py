@@ -48,7 +48,14 @@ from ..servers import (
 from ..servers.ownership import apply_path_mappings
 from .routes._helpers import _param_to_bool
 from .settings_manager import get_settings_manager
-from .webhooks import _authenticate_webhook, _validate_webhook_delay, create_vendor_webhook_job, webhooks_bp
+from .webhooks import (
+    _add_history_entry,
+    _authenticate_webhook,
+    _validate_webhook_delay,
+    create_vendor_webhook_job,
+    record_server_contact,
+    webhooks_bp,
+)
 
 
 def _build_registry_from_settings() -> ServerRegistry:
@@ -338,6 +345,19 @@ def _resolve_to_canonical_paths(
     return [], f"unsupported webhook kind: {kind}"
 
 
+# Test pings: Sonarr/Radarr send eventType "Test"; Emby's webhook Test button sends Event "system.webhooktest".
+_TEST_EVENTS = frozenset({"test", "system.webhooktest"})
+
+
+def _event_name(payload: dict[str, Any]) -> str:
+    """The event a webhook payload announces, whichever vendor's field carries it (empty when none does)."""
+    for key in ("Event", "NotificationType", "event", "eventType"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def _webhooks_disabled_response(kind: str) -> tuple[Response, int] | None:
     """Honour the "Enable webhook processing" master switch, which covers every incoming webhook.
 
@@ -460,10 +480,17 @@ def webhook_per_server(server_id: str):
     """
     kind, payload, parse_error = _classify_payload(request)
     if payload is None:
+        record_server_contact(server_id, "rejected", f"the request couldn't be read: {parse_error}")
         return jsonify({"status": "ignored", "reason": parse_error or "unrecognised"}), 400
+
+    event = _event_name(payload)
+    is_test = event.lower() in _TEST_EVENTS
+    # Any request that gets here proves the server reaches us; the detail says when it was then ignored.
+    contact = "test ping" if is_test else event or "webhook"
 
     disabled = _webhooks_disabled_response(kind)
     if disabled is not None:
+        record_server_contact(server_id, "accepted", f"{contact}, ignored: webhook processing is turned off")
         return disabled
 
     registry = _build_registry_from_settings()
@@ -481,8 +508,14 @@ def webhook_per_server(server_id: str):
             server_cfg.name,
             server_id,
         )
+        record_server_contact(server_id, "accepted", f"{contact}, ignored: this server is turned off")
         return jsonify({"status": "ignored", "reason": "server is disabled"}), 202
-    if str(payload.get("eventType", "")).lower() == "test":
+    record_server_contact(server_id, "accepted", contact)
+    if is_test:
+        server_type = server_cfg.type.value
+        _add_history_entry(
+            server_type, "Test", "", "test", server_id=server_id, server_name=server_cfg.name, server_type=server_type
+        )
         return jsonify({"status": "ignored", "kind": kind, "reason": "Test event"}), 202
 
     resolved, error = _resolve_to_canonical_paths(

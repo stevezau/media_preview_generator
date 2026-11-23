@@ -1278,6 +1278,7 @@
         const card = document.getElementById('editVendorWebhookCard');
         if (!card) return;
         const t = String(server.type || '').toLowerCase();
+        _vendorWebhookState = '';
         if (t !== 'emby' && t !== 'jellyfin') {
             card.classList.add('d-none');
             return;
@@ -1306,10 +1307,27 @@
                 hintEl.className = 'sm-warnline bad';
                 hintEl.textContent = 'Could not load webhook info: ' + (err && err.message || err);
             }
+            const statusText = document.getElementById('editVendorWebhookStatusText');
+            if (statusText) statusText.textContent = 'Could not check the webhook.';
             return;
         }
 
         if (urlInput) urlInput.value = info.webhook_url_per_server || info.webhook_url || '';
+        _renderVendorWebhookStatus(t, info.contact);
+        const recheckBtn = document.getElementById('editVendorWebhookRecheckBtn');
+        if (recheckBtn) {
+            recheckBtn.onclick = async () => {
+                recheckBtn.disabled = true;
+                try {
+                    const fresh = await apiGet('/api/settings/' + t + '_webhook/info?server_id=' + encodeURIComponent(server.id));
+                    _renderVendorWebhookStatus(t, fresh.contact);
+                } catch (err) {
+                    showToast('Error', 'Could not check the webhook: ' + (err && err.message || err), 'danger');
+                } finally {
+                    recheckBtn.disabled = false;
+                }
+            };
+        }
         // Header name is static prose (X-Auth-Token) — the API confirms
         // it but never returns the value. We deliberately don't expose
         // the webhook secret in this UI: the user copies it from
@@ -1340,6 +1358,53 @@
                 setTimeout(() => { copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>'; }, 1500);
             };
         }
+    }
+
+    // 'ok' | 'bad' | '' (nothing heard): the Emby/Jellyfin webhook's latest request, for the card and the rail dot.
+    let _vendorWebhookState = '';
+
+    // A rejection only counts while it is newer than the last accepted request, so a fixed secret turns the card
+    // back to Working on the next webhook.
+    function _renderVendorWebhookStatus(vendor, contact) {
+        const accepted = (contact || {}).accepted;
+        const rejected = (contact || {}).rejected;
+        const rejectedIsLatest = rejected && (!accepted || Date.parse(rejected.at) > Date.parse(accepted.at));
+        _vendorWebhookState = rejectedIsLatest ? 'bad' : accepted ? 'ok' : '';
+
+        const vendorName = vendor === 'emby' ? 'Emby' : 'Jellyfin';
+        const look = {
+            bad: {
+                line: 'bad', icon: 'bi-x-octagon-fill', pill: 'pill bad', pillText: 'Rejected',
+                html: () => `<strong>Rejected ${formatRelativeTime(rejected.at)}:</strong> ${escapeHtml(rejected.detail)}.`,
+            },
+            ok: {
+                line: 'ok', icon: 'bi-check-circle-fill', pill: 'pill ok', pillText: 'Working',
+                html: () => `<strong>Working.</strong> Last webhook ${formatRelativeTime(accepted.at)} (${escapeHtml(accepted.detail)}).`,
+            },
+            '': {
+                line: 'neutral', icon: 'bi-hourglass-split', pill: 'pill', pillText: 'Not heard from yet',
+                html: () => 'No webhook from this server since the app started. ' + (vendor === 'emby'
+                    ? 'Press <strong>Test</strong> on the Emby webhook, then check again.'
+                    : 'Add an item in Jellyfin, then check again.'),
+            },
+        }[_vendorWebhookState];
+
+        const line = document.getElementById('editVendorWebhookStatus');
+        const icon = document.getElementById('editVendorWebhookStatusIcon');
+        const text = document.getElementById('editVendorWebhookStatusText');
+        const pill = document.getElementById('editVendorWebhookStatusPill');
+        const auth = document.getElementById('editVendorWebhookAuthBlock');
+        if (line) line.className = 'sm-warnline ' + look.line;
+        if (icon) icon.className = 'bi ' + look.icon;
+        if (text) text.innerHTML = look.html();
+        if (pill) {
+            pill.className = look.pill;
+            pill.textContent = look.pillText;
+            pill.title = vendorName + ' webhook: ' + look.pillText.toLowerCase();
+        }
+        // Once the webhook works, the header instructions are reference, not a warning.
+        if (auth) auth.classList.toggle('neutral', _vendorWebhookState === 'ok');
+        updateAutomationDot();
     }
 
     function _resetEditReauthSection(serverType) {
@@ -1637,10 +1702,17 @@
     function updateAutomationDot() {
         const dot = document.getElementById('editAutomationTabDot');
         if (!dot) return;
-        const registered = ((document.getElementById('plexWebhookStatusBadge') || {}).textContent || '').trim() === 'Registered';
+        // The Plex badge only refreshes for Plex servers, so it can still hold an earlier Plex server's status.
+        const isPlex = String((_editState && _editState.server && _editState.server.type) || '').toLowerCase() === 'plex';
+        const registered = isPlex && ((document.getElementById('plexWebhookStatusBadge') || {}).textContent || '').trim() === 'Registered';
         const scanner = /active/i.test(((document.getElementById('recentlyAddedStatusBadge') || {}).textContent || ''));
-        dot.className = `sm-nb sm-nb-dot${registered || scanner ? ' ok' : ''}`;
-        dot.title = registered ? 'Webhook registered' : scanner ? 'Scanner active' : 'Nothing set up yet';
+        const rejected = _vendorWebhookState === 'bad';
+        const working = _vendorWebhookState === 'ok';
+        dot.className = `sm-nb sm-nb-dot${rejected ? ' bad' : registered || working || scanner ? ' ok' : ''}`;
+        dot.title = rejected ? 'Last webhook was rejected'
+            : registered ? 'Webhook registered'
+                : working ? 'Webhook working'
+                    : scanner ? 'Scanner active' : 'Nothing set up yet';
     }
 
     function renderEditCredentials(server) {

@@ -202,6 +202,7 @@ def _authenticate_webhook(f):
                 request.path,
                 request.method,
             )
+            record_server_contact(kwargs.get("server_id"), "rejected", "no webhook secret was sent")
             return jsonify({"error": "Authentication required"}), 401
 
         settings = get_settings_manager()
@@ -226,6 +227,7 @@ def _authenticate_webhook(f):
             request.path,
             candidates[0][0],
         )
+        record_server_contact(kwargs.get("server_id"), "rejected", "the webhook secret didn't match")
         return jsonify({"error": "Authentication required"}), 401
 
     # Read by create_app's CSRF setup: a receiver checks its own secret and never reads the browser session, so it
@@ -281,6 +283,41 @@ def _add_history_entry(
     with _history_lock:
         _webhook_history.append(entry)
     _save_history_to_disk()
+
+
+# The latest accepted and rejected request per configured server, so its Webhook card can show whether the webhook
+# reaches us. In memory only: a rejected request proves nothing about the sender, so it must never cause disk writes.
+_server_contact: dict[str, dict[str, dict[str, str]]] = {}
+_server_contact_lock = threading.Lock()
+
+
+def record_server_contact(server_id: str | None, outcome: str, detail: str) -> None:
+    """Remember the latest request a server's per-server webhook URL received.
+
+    Args:
+        server_id: The id from the per-server URL. Ignored unless it names a configured server, so stray requests
+            can't add entries.
+        outcome: ``"accepted"`` or ``"rejected"``.
+        detail: Short text for the UI: the event name, or why the request was rejected.
+    """
+    if not server_id:
+        return
+    servers = get_settings_manager().get("media_servers") or []
+    if not any(isinstance(s, dict) and s.get("id") == server_id for s in servers):
+        return
+    with _server_contact_lock:
+        _server_contact.setdefault(server_id, {})[outcome] = {
+            # Milliseconds: JavaScript's Date.parse only promises to read three fractional digits.
+            "at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "detail": detail[:120],
+        }
+
+
+def get_server_contact(server_id: str) -> dict[str, dict[str, str] | None]:
+    """The latest accepted and rejected request for a server, each ``{"at", "detail"}`` or None."""
+    with _server_contact_lock:
+        entry = _server_contact.get(server_id, {})
+        return {"accepted": entry.get("accepted"), "rejected": entry.get("rejected")}
 
 
 def _summarize_payload(data: dict, max_depth: int = 2) -> dict | str:

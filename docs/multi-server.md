@@ -287,6 +287,12 @@ new files from the same source/server and reset the batch timer. See
 | Jellyfin | Install **jellyfin-plugin-webhook**, configure under Plugins → Webhook |
 | Sonarr / Radarr | Settings → Connect → +Webhook |
 
+Emby before 4.9 has no **Request Headers** option, so add `?token=<webhook_secret>` to the URL instead.
+
+To check an Emby or Jellyfin webhook, open **Servers → Edit → Webhook & Scanner**. The card says **Working** once a
+webhook from that server arrives (Emby's **Test** button counts), or **Rejected** with the reason, such as a wrong
+secret.
+
 For Jellyfin, the plugin's stock `ItemAdded` template carries `ItemId` /
 `ItemType` / `ServerId` but **not** the file path. The router calls back
 to Jellyfin's API once to translate the id to a path. If you want to

@@ -114,7 +114,7 @@ class TestVendorWebhookInfo:
         assert data["webhook_secret_set"] is True, "webhook_secret_set is a boolean — never the secret itself"
         assert "auth_header_value" not in data, "auth_header_value MUST NOT be returned (token would leak via JS state)"
         assert "webhook_url_with_token" not in data, (
-            "?token= URL fallback removed — both plugins support custom headers"
+            "a ready-made ?token= URL would put the secret on screen; the UI only names the ?token= form"
         )
         # Hard fail if the actual token value appears anywhere in the
         # JSON response. Defensive: catches any future field whose
@@ -145,10 +145,6 @@ class TestVendorWebhookInfo:
             "never displays the sign-in token, so pointing there left users with no copyable value (#432)"
         )
         assert not any("Settings → Authentication" in step for step in data["plugin"]["config_steps"])
-        assert data["plugin"].get("supports_custom_headers") is True, (
-            "Both Emby's built-in Webhooks (4.6+) and the Jellyfin Webhook plugin support custom headers — "
-            "this flag tells the UI not to render a fallback path"
-        )
         # Auto-register is NOT yet supported (deferred follow-up).
         # Surface it in the response so the UI doesn't render a dead button.
         assert data["auto_register_supported"] is False
@@ -203,3 +199,136 @@ class TestVendorWebhookTestEndpointRemoved:
     def test_jellyfin_test_endpoint_404s(self, client):
         resp = client.post("/api/settings/jellyfin_webhook/test?server_id=jelly-1", headers=_hdrs())
         assert resp.status_code == 404
+
+
+class TestWebhookContactStatus:
+    """The info route reports the latest request each server's own webhook URL received (#447).
+
+    Emby and Jellyfin users had no way to tell whether their webhook reached the app: nothing showed up until
+    a real new item arrived, Emby's Test button left no trace, and a wrong secret only reached the log.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_contact(self):
+        from media_preview_generator.web import webhooks
+
+        webhooks._server_contact.clear()
+        yield
+        webhooks._server_contact.clear()
+
+    @staticmethod
+    def _contact(client, vendor: str, server_id: str) -> dict:
+        resp = client.get(f"/api/settings/{vendor}_webhook/info?server_id={server_id}", headers=_hdrs())
+        assert resp.status_code == 200
+        return resp.get_json()["contact"]
+
+    _EMBY_TEST = {"Title": "Test Notification", "Event": "system.webhooktest", "Server": {"Name": "Emby", "Id": "x"}}
+
+    def test_nothing_received_yet(self, client):
+        assert self._contact(client, "emby", "emby-1") == {"accepted": None, "rejected": None}
+
+    def test_emby_test_button_counts_as_working_and_lands_in_history(self, client):
+        from media_preview_generator.web import webhooks
+
+        resp = client.post(
+            "/api/webhooks/server/emby-1", json=self._EMBY_TEST, headers={"X-Auth-Token": "the-webhook-secret-456"}
+        )
+        assert resp.status_code == 202
+
+        contact = self._contact(client, "emby", "emby-1")
+        assert contact["accepted"]["detail"] == "test ping"
+        assert contact["rejected"] is None
+        latest = list(webhooks._webhook_history)[-1]
+        assert (latest["event_type"], latest["status"], latest["server_id"]) == ("Test", "test", "emby-1")
+
+    def test_secret_in_url_is_accepted(self, client):
+        # Emby before 4.9 has no header option; the card tells those users to append ?token=.
+        resp = client.post("/api/webhooks/server/emby-1?token=the-webhook-secret-456", json=self._EMBY_TEST)
+        assert resp.status_code == 202
+        assert self._contact(client, "emby", "emby-1")["accepted"]["detail"] == "test ping"
+
+    def test_any_event_proves_the_connection(self, client):
+        payload = {"NotificationType": "PlaybackStart", "ItemId": "abc", "ServerId": "s"}
+        client.post("/api/webhooks/server/jelly-1", json=payload, headers={"X-Auth-Token": "the-webhook-secret-456"})
+        assert self._contact(client, "jellyfin", "jelly-1")["accepted"]["detail"] == "PlaybackStart"
+
+    @pytest.mark.parametrize(
+        "headers,reason",
+        [
+            ({"X-Auth-Token": "wrong"}, "the webhook secret didn't match"),
+            ({}, "no webhook secret was sent"),
+        ],
+    )
+    def test_rejected_request_says_why(self, client, headers, reason):
+        resp = client.post("/api/webhooks/server/emby-1", json=self._EMBY_TEST, headers=headers)
+        assert resp.status_code == 401
+        contact = self._contact(client, "emby", "emby-1")
+        assert contact["rejected"]["detail"] == reason
+        assert contact["accepted"] is None
+
+    def test_unreadable_body_is_reported(self, client):
+        resp = client.post(
+            "/api/webhooks/server/emby-1",
+            data="not json",
+            content_type="text/plain",
+            headers={"X-Auth-Token": "the-webhook-secret-456"},
+        )
+        assert resp.status_code == 400
+        assert self._contact(client, "emby", "emby-1")["rejected"]["detail"].startswith("the request couldn't be read")
+
+    def test_unknown_server_id_records_nothing(self, client):
+        from media_preview_generator.web import webhooks
+
+        client.post("/api/webhooks/server/not-a-server", json=self._EMBY_TEST, headers={"X-Auth-Token": "wrong"})
+        assert webhooks._server_contact == {}, "requests to ids that aren't configured servers must not add entries"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(_EMBY_TEST, id="emby-test-button"),
+            pytest.param({"eventType": "Test"}, id="sonarr-style-test"),
+        ],
+    )
+    def test_test_ping_is_recorded_without_creating_a_job(self, client, payload, monkeypatch):
+        from media_preview_generator.web import webhook_router, webhooks
+
+        def _must_not_resolve(**_kwargs):
+            raise AssertionError("a test ping must not be resolved into a job")
+
+        monkeypatch.setattr(webhook_router, "_resolve_to_canonical_paths", _must_not_resolve)
+        resp = client.post(
+            "/api/webhooks/server/emby-1", json=payload, headers={"X-Auth-Token": "the-webhook-secret-456"}
+        )
+        assert resp.status_code == 202
+        assert self._contact(client, "emby", "emby-1")["accepted"]["detail"] == "test ping"
+        latest = list(webhooks._webhook_history)[-1]
+        assert (latest["source"], latest["server_type"], latest["status"]) == ("emby", "emby", "test")
+
+    def test_ignored_request_still_shows_it_arrived_and_why(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set("webhook_enabled", False)
+        client.post(
+            "/api/webhooks/server/emby-1", json=self._EMBY_TEST, headers={"X-Auth-Token": "the-webhook-secret-456"}
+        )
+        detail = self._contact(client, "emby", "emby-1")["accepted"]["detail"]
+        assert detail == "test ping, ignored: webhook processing is turned off"
+
+    def test_disabled_server_still_shows_it_arrived_and_why(self, client):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.set(
+            "media_servers", [{**s, "enabled": False} if s["id"] == "emby-1" else s for s in sm.get("media_servers")]
+        )
+        client.post(
+            "/api/webhooks/server/emby-1", json=self._EMBY_TEST, headers={"X-Auth-Token": "the-webhook-secret-456"}
+        )
+        detail = self._contact(client, "emby", "emby-1")["accepted"]["detail"]
+        assert detail == "test ping, ignored: this server is turned off"
+
+    def test_contact_is_per_server(self, client):
+        client.post(
+            "/api/webhooks/server/emby-1", json=self._EMBY_TEST, headers={"X-Auth-Token": "the-webhook-secret-456"}
+        )
+        assert self._contact(client, "jellyfin", "jelly-1") == {"accepted": None, "rejected": None}

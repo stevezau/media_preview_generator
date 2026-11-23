@@ -129,9 +129,10 @@
 104	P	automation	attached	#editPlexWebhookServerCaption
 105	EJ	automation	visible	#editVendorWebhookCard
 105	EJ	automation	attached	#editVendorWebhookHeader
-105	EJ	automation	attached	#editVendorWebhookPluginBadge
+105	EJ	automation	attached	#editVendorWebhookStatusPill
 106	EJ	automation	visible	#editVendorWebhookUrl
 107	EJ	automation	visible	#editVendorWebhookCopyBtn
+108	EJ	automation	visible	#editVendorWebhookStatus
 108	EJ	automation	visible	#editVendorWebhookAuthBlock
 108	EJ	automation	attached	#editVendorWebhookHeaderName
 108	EJ	automation	attached	#editVendorWebhookHeaderValuePlaceholder

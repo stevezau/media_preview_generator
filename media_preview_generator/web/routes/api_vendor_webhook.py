@@ -29,24 +29,24 @@ from typing import cast
 from flask import jsonify, request
 
 from ..auth import setup_or_auth_required
+from ..webhooks import get_server_contact
 from . import api
 
 _PLUGIN_INSTRUCTIONS = {
     "emby": {
         "plugin_name": "Emby Webhooks (built-in, Emby 4.6+)",
         "install_url": "https://emby.media/support/articles/Webhooks.html",
-        # Emby's built-in Webhooks support custom HTTP headers via the
-        # 'Request Headers' field, so the token never has to ride in the
-        # URL. Steps reference [YOUR WEBHOOK SECRET] as a placeholder so
+        # Emby 4.9+ Webhooks have a 'Request Headers' field; older ones
+        # don't, so the steps also offer the ?token= form the receiver
+        # accepts. Steps reference [YOUR WEBHOOK SECRET] as a placeholder so
         # the live secret never appears in the surfaced instructions.
         "config_steps": [
             "In Emby: Settings → Notifications → Add Webhook (Emby 4.6+ ships this built-in; no plugin install required).",
             "Set 'Url' to the Webhook URL shown above.",
-            "Expand 'Request Headers' and add a header — Name: 'X-Auth-Token', Value: [YOUR WEBHOOK SECRET] (set or generate it under Automation → Triggers → Settings).",
+            "Expand 'Request Headers' and add a header — Name: 'X-Auth-Token', Value: [YOUR WEBHOOK SECRET] (set or generate it under Automation → Triggers → Settings). No 'Request Headers' option (Emby before 4.9)? Add ?token=[YOUR WEBHOOK SECRET] to the end of the Url instead.",
             "Tick 'New Media Added' under Events. Add any other events you want to forward.",
-            "Save.",
+            "Save, then press 'Test'. This server's Webhook card here shows 'Working' once the test arrives.",
         ],
-        "supports_custom_headers": True,
     },
     "jellyfin": {
         "plugin_name": "Jellyfin Webhook plugin (official)",
@@ -63,7 +63,6 @@ _PLUGIN_INSTRUCTIONS = {
             "Set 'Item Type' to Movie + Episode at minimum.",
             "Save.",
         ],
-        "supports_custom_headers": True,
     },
 }
 
@@ -142,6 +141,8 @@ def _info_handler(vendor: str):
             "webhook_secret_set": secret_set,
             "auth_token_source": "Automation → Triggers → Settings → Webhook Secret",
             "plugin": instructions,
+            # The latest accepted / rejected request on this server's URL, for the card's "Working" status.
+            "contact": get_server_contact(cast(str, server_id)),
             # Surfaces the auto-register deferral so the UI can render a
             # "Coming soon" hint instead of pretending the button does
             # something it doesn't.

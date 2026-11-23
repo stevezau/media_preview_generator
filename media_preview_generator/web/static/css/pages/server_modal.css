@@ -55,6 +55,9 @@
 .sm-warnline > span { min-width: 0; flex: 1; }
 .sm-warnline > i { flex: none; }
 .sm-warnline.bad { background: var(--bad-soft); color: var(--bad); }
+.sm-warnline.ok { background: var(--ok-soft); color: var(--ok); }
+.sm-warnline.neutral { background: var(--inset); color: var(--muted); }
+.sm-warnline > .btn { flex: none; }
 .sm-warnline code { color: inherit; }
 .sm-warnline .info-icon { color: inherit; }
 .sm-vmsg { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
@@ -159,6 +162,8 @@
 .sm-nb.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
 .sm-nb.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .sm-nb.sm-nb-dot { min-width: 10px; width: 10px; height: 10px; padding: 0; }
+.sm-nb.sm-nb-dot.ok { background: var(--ok); }
+.sm-nb.sm-nb-dot.bad { background: var(--bad); }
 
 .sm-footer { align-items: center; gap: 12px; padding: 14px 20px; border-top: 1px solid var(--line); flex-wrap: nowrap; }
 #editServerModal .sm-footer .btn { min-height: 38px; margin: 0; }
